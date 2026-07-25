@@ -1,0 +1,184 @@
+import unittest
+import tempfile
+from pathlib import Path
+
+from chat.server.main import (
+    ChatMessage,
+    _fallback_contextual_search_query,
+    should_enable_reasoning,
+    should_perform_web_search,
+)
+from core.memory.context import select_conversation_context
+from core.memory.database import DatabaseManager
+
+
+class ConversationContextTests(unittest.TestCase):
+    def test_follow_up_keeps_previous_topic(self):
+        messages = [
+            ChatMessage(
+                role="user",
+                content="Qui est le dernier vainqueur de la coupe du monde ?",
+            ),
+            ChatMessage(
+                role="assistant",
+                content="Le dernier vainqueur connu est l'Argentine.",
+            ),
+            ChatMessage(
+                role="user",
+                content="Et maintenant tu peux me donner la bonne réponse ?",
+            ),
+        ]
+
+        query = _fallback_contextual_search_query(messages)
+
+        self.assertIn("vainqueur de la coupe du monde", query.lower())
+        self.assertIn("informations à jour", query.lower())
+
+    def test_feedback_triggers_search_when_conversation_has_context(self):
+        self.assertTrue(
+            should_perform_web_search(
+                "C'est faux",
+                user_toggle_enabled=True,
+                has_conversation_context=True,
+            )
+        )
+
+    def test_greeting_never_triggers_search(self):
+        self.assertFalse(
+            should_perform_web_search(
+                "Bonjour",
+                user_toggle_enabled=True,
+                has_conversation_context=True,
+            )
+        )
+
+    def test_disabled_web_never_triggers_search(self):
+        self.assertFalse(
+            should_perform_web_search(
+                "Qui a gagné la Coupe du monde ?",
+                user_toggle_enabled=False,
+                has_conversation_context=True,
+            )
+        )
+
+    def test_reasoning_is_hidden_for_greeting_and_enabled_for_complex_task(self):
+        self.assertFalse(
+            should_enable_reasoning(
+                "Bonjour",
+                model="gemma-4-chat",
+                requested_level="balanced",
+            )
+        )
+        self.assertTrue(
+            should_enable_reasoning(
+                "Analyse cette architecture et vérifie les risques principaux.",
+                model="gemma-4-chat",
+                requested_level="balanced",
+            )
+        )
+
+    def test_external_context_enables_balanced_reasoning(self):
+        self.assertEqual(
+            should_enable_reasoning(
+                "Résume les résultats",
+                model="gemma-4-chat",
+                requested_level="balanced",
+                has_external_context=True,
+            ),
+            "medium",
+        )
+
+    def test_reasoning_levels_map_to_ollama_effort(self):
+        self.assertFalse(
+            should_enable_reasoning(
+                "Analyse cette architecture",
+                model="gemma-4-fable",
+                requested_level="fast",
+            )
+        )
+        self.assertEqual(
+            should_enable_reasoning(
+                "Analyse cette architecture",
+                model="gemma-4-fable",
+                requested_level="high",
+            ),
+            "high",
+        )
+        self.assertEqual(
+            should_enable_reasoning(
+                "Analyse cette architecture",
+                model="gemma-4-fable",
+                requested_level="max",
+            ),
+            "max",
+        )
+
+    def test_auto_web_search_skips_stable_question(self):
+        self.assertFalse(
+            should_perform_web_search(
+                "Explique le théorème de Pythagore",
+                user_toggle_enabled=True,
+                mode="auto",
+            )
+        )
+        self.assertTrue(
+            should_perform_web_search(
+                "Quelle est la dernière version disponible ?",
+                user_toggle_enabled=True,
+                mode="auto",
+            )
+        )
+
+    def test_context_keeps_recent_relevant_and_durable_memory(self):
+        messages = [
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": (
+                    "Je veux utiliser Ollama uniquement avec des modèles GGUF."
+                    if index == 0
+                    else f"Échange secondaire numéro {index} sur un autre sujet."
+                ),
+            }
+            for index in range(16)
+        ]
+        messages.append(
+            {
+                "role": "user",
+                "content": "Et pour Ollama, rappelle-moi ce que j'avais décidé ?",
+            }
+        )
+
+        selection = select_conversation_context(
+            messages,
+            latest_query=messages[-1]["content"],
+            summary="L'utilisateur préfère des réponses concises.",
+            max_history_tokens=900,
+            recent_message_limit=4,
+            relevant_message_limit=2,
+        )
+
+        contents = "\n".join(str(item["content"]) for item in selection.messages)
+        self.assertTrue(selection.summary_used)
+        self.assertEqual(selection.messages[0]["role"], "system")
+        self.assertIn("modèles GGUF", contents)
+        self.assertIn("rappelle-moi", contents)
+        self.assertLessEqual(selection.estimated_tokens, 900)
+
+    def test_database_persists_compacted_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = DatabaseManager(Path(temp_dir) / "memory-test.db")
+            session = manager.create_session(model="gemma-4-chat:latest")
+            manager.update_session_memory(
+                session["id"],
+                "L'utilisateur préfère les modèles GGUF.",
+                12,
+            )
+
+            memory = manager.get_session_memory(session["id"])
+
+            self.assertEqual(memory["summary_message_count"], 12)
+            self.assertIn("GGUF", memory["summary"])
+
+
+if __name__ == "__main__":
+    unittest.main()

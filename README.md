@@ -1,0 +1,132 @@
+# Lasme LLM
+
+Application locale de chat et d’assistance au développement basée sur Ollama.
+
+## Architecture
+
+```text
+Navigateur
+   │ HTTP + SSE
+   ▼
+FastAPI — http://127.0.0.1:8000
+   ├── conversations et mémoire SQLite
+   ├── RAG persistant, isolé par conversation
+   ├── recherche Web : Tavily → DuckDuckGo
+   ├── génération d’images externe facultative
+   └── espace de développement local sécurisé
+             │
+             ▼
+Ollama — http://127.0.0.1:11434
+   ├── gemma-4-chat:latest — Q4_0
+   └── gemma-4-fable:latest — Q6_K
+```
+
+Cloudflared est uniquement un tunnel HTTPS vers FastAPI. Ce n’est pas un
+serveur d’inférence supplémentaire.
+
+## Modèles
+
+| Nom affiché | Identifiant Ollama | Usage | Contexte applicatif |
+| --- | --- | --- | --- |
+| Gemma 4 Chat | `gemma-4-chat` | Conversation générale | 65 536 tokens |
+| Gemma 4 Fable | `gemma-4-fable` | Raisonnement, code et tâches agentiques | 65 536 tokens |
+
+Les fichiers GGUF ne sont pas conservés dans ce dépôt. Ollama gère son propre
+stockage. L’application n’installe ni ne télécharge automatiquement de modèle.
+
+L’analyse d’images est désactivée tant que `VISION_MODEL` ne référence pas un
+modèle Ollama compatible. Cette désactivation évite de réintroduire implicitement
+un ancien modèle Qwen.
+
+## Installation
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m uvicorn chat.server.main:app --host 127.0.0.1 --port 8000
+```
+
+Ouvrir ensuite <http://127.0.0.1:8000/>.
+
+## Recherche Web
+
+Le bouton Web possède trois états :
+
+- `Web auto` : recherche seulement pour les informations actuelles, les
+  demandes explicites de vérification et les relances qui nécessitent une mise
+  à jour ;
+- `Web` : recherche forcée, sauf pour une salutation triviale ;
+- `Web off` : aucune requête externe.
+
+Tavily est utilisé lorsque `TAVILY_API_KEY` est défini. DuckDuckGo prend
+automatiquement le relais. Les URL locales, privées et réservées sont bloquées.
+
+## Raisonnement
+
+L’interface expose quatre niveaux :
+
+- Rapide : pas de thinking, sortie limitée ;
+- Équilibré : reasoning `medium` lorsqu’il est utile ;
+- Approfondi : reasoning `high` ;
+- Maximum : reasoning `max` et budget de sortie maximal.
+
+Le raisonnement interne fourni séparément par Ollama n’est ni affiché ni stocké
+dans la mémoire. Seule la réponse finale est conservée.
+
+## Documents
+
+Les fichiers PDF, TXT et Markdown sont limités à 10 Mo. Le texte extrait est
+stocké dans SQLite et indexé localement avec BM25. Chaque conversation possède
+son propre espace documentaire. Supprimer une conversation supprime aussi ses
+documents.
+
+## Accès distant avec Cloudflared
+
+Les API provenant d’un proxy exigent `LASME_ACCESS_TOKEN`. Les routes
+`/api/coding/*` restent interdites à distance par défaut.
+
+1. Définir un long jeton aléatoire dans `.env`.
+2. Redémarrer FastAPI.
+3. Lancer le tunnel vers `http://127.0.0.1:8000`.
+4. Sur le téléphone, ouvrir une seule fois :
+
+```text
+https://adresse-du-tunnel.trycloudflare.com/?token=VOTRE_JETON
+```
+
+Le navigateur retire immédiatement le jeton de l’URL et le garde uniquement
+pour la session courante.
+
+Ne pas activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
+[docs/SECURITY.md](docs/SECURITY.md).
+
+## Vie privée
+
+Le chat et l’inférence sont locaux. Deux fonctions peuvent envoyer du contenu
+hors de la machine :
+
+- la recherche Web envoie la requête à Tavily ou DuckDuckGo ;
+- la génération d’images envoie le prompt à Pollinations.
+
+La génération externe peut être coupée avec
+`LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false`.
+
+## Validation
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q chat core coding tests
+node --check chat\web\app.js
+.\.venv\Scripts\python.exe -m pip check
+```
+
+Un test comparatif manuel des deux modèles est disponible avec :
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.evaluate_models
+```
+
+Les dossiers `python_academy`, `pylearn`, `app` et `templates` sont des
+prototypes séparés. Ils ne sont pas démarrés par l’application de chat.

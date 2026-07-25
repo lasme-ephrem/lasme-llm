@@ -1,0 +1,43 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+.coverage
+htmlcov/
+
+# Runtime state
+lasme_llm.db
+lasme_llm.db-*
+database.db
+chat/web/generated_images/*
+!chat/web/generated_images/.gitkeep
+*.log
+
+# Models and local binaries
+models/
+*.gguf
+*.safetensors
+cloudflared.exe
+
+# Archived local prototypes (not part of the production application)
+app/
+pylearn/
+python_academy/
+scratch/
+templates/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
