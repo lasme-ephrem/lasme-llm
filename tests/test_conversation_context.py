@@ -195,6 +195,13 @@ class ConversationContextTests(unittest.TestCase):
                 mode="auto",
             )
         )
+        self.assertTrue(
+            should_perform_web_search(
+                "Qui a remporté la Coupe du monde de football 2026 ?",
+                user_toggle_enabled=True,
+                mode="auto",
+            )
+        )
 
     def test_context_keeps_recent_relevant_and_durable_memory(self):
         messages = [

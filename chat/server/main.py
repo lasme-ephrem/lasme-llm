@@ -4,10 +4,11 @@ import asyncio
 import re
 import time
 import unicodedata
+import httpx
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional, Literal
@@ -44,6 +45,7 @@ from core.security import (
 from coding.agent import LasmeCodingAgent
 
 app = FastAPI(title="LLM-lasme API", version="0.8.0")
+_favicon_cache: Dict[str, tuple[bytes, str]] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,6 +91,58 @@ async def protect_remote_api(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
     return response
+
+
+@app.get("/favicons/{domain}")
+async def get_site_favicon(domain: str):
+    """Return a cached site icon without exposing a general-purpose proxy."""
+    normalized_domain = domain.strip().casefold().rstrip(".")
+    if not re.fullmatch(
+        r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})",
+        normalized_domain,
+    ):
+        raise HTTPException(status_code=400, detail="Invalid domain.")
+
+    cached = _favicon_cache.get(normalized_domain)
+    if cached:
+        content, media_type = cached
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5, connect=3),
+            follow_redirects=False,
+            trust_env=True,
+        ) as http:
+            response = await http.get(
+                f"https://icons.duckduckgo.com/ip3/{normalized_domain}.ico",
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Favicon unavailable.") from exc
+
+    content = response.content
+    media_type = response.headers.get("content-type", "image/png").split(";")[0]
+    if (
+        not media_type.startswith("image/")
+        or not content
+        or len(content) > 100_000
+    ):
+        raise HTTPException(status_code=502, detail="Invalid favicon response.")
+
+    if len(_favicon_cache) >= 256:
+        _favicon_cache.pop(next(iter(_favicon_cache)))
+    _favicon_cache[normalized_domain] = (content, media_type)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 client = LasmeLLMClient()
@@ -248,6 +302,26 @@ def clean_model_text(value: str) -> str:
     return "".join(cleaned)
 
 
+def compact_web_source_metadata(
+    results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Persist only the fields needed to restore the compact source drawer."""
+    sources = []
+    for item in (results or [])[:20]:
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title or not url:
+            continue
+        sources.append(
+            {
+                "title": title[:300],
+                "url": url[:2_000],
+                "engine": str(item.get("engine") or "")[:80],
+            }
+        )
+    return {"web_results": sources} if sources else {}
+
+
 async def build_contextual_search_query(
     messages: List[ChatMessage],
     model: str,
@@ -369,6 +443,7 @@ def should_perform_web_search(
     competitive_markers = {
         "vainqueur", "vainqueurs", "gagnant", "gagnante", "champion",
         "championne", "finale", "buteur", "buteuse", "classement",
+        "gagne", "gagné", "gagnée", "remporte", "remporté", "remportée",
     }
     competition_markers = {
         "coupe", "mondial", "monde", "fifa", "uefa", "tournoi",
@@ -383,8 +458,16 @@ def should_perform_web_search(
         return True
     if word_set.intersection(live_markers | explicit_markers):
         return True
+    current_year = datetime.date.today().year
+    mentions_recent_year = any(
+        int(year) >= current_year - 1
+        for year in re.findall(r"\b(20\d{2})\b", clean_q)
+    )
     if (
-        word_set.intersection(competitive_markers)
+        (
+            word_set.intersection(competitive_markers)
+            or mentions_recent_year
+        )
         and word_set.intersection(competition_markers)
     ):
         return True
@@ -1223,7 +1306,12 @@ async def chat_stream(req: ChatRequest):
                 provider_answer,
             ).replace("\ufffd", "")
             yield f"data: {json.dumps({'type': 'content_delta', 'content': full_assistant_reply})}\n\n"
-            db.add_message(session_id, "assistant", full_assistant_reply)
+            db.add_message(
+                session_id,
+                "assistant",
+                full_assistant_reply,
+                metadata=compact_web_source_metadata(web_results_data),
+            )
             asyncio.create_task(
                 async_update_conversation_memory(session_id, selected_model)
             )
@@ -1350,7 +1438,12 @@ async def chat_stream(req: ChatRequest):
 
         if full_assistant_reply:
             full_assistant_reply = clean_model_text(full_assistant_reply)
-            db.add_message(session_id, "assistant", full_assistant_reply)
+            db.add_message(
+                session_id,
+                "assistant",
+                full_assistant_reply,
+                metadata=compact_web_source_metadata(web_results_data),
+            )
             asyncio.create_task(
                 async_update_conversation_memory(session_id, selected_model)
             )

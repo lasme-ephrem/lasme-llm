@@ -61,6 +61,30 @@ class PersonalMemoryTests(unittest.TestCase):
             is_safe_generated_memory("Je préfère recevoir les réponses en français.")
         )
 
+    def test_message_web_source_metadata_is_persisted(self):
+        session = self.db.create_session()
+        self.db.add_message(
+            session["id"],
+            "assistant",
+            "Réponse sourcée [1].",
+            metadata={
+                "web_results": [
+                    {
+                        "title": "Source officielle",
+                        "url": "https://example.org/source",
+                        "engine": "test",
+                    }
+                ]
+            },
+        )
+
+        messages = self.db.get_session_messages(session["id"])
+
+        self.assertEqual(
+            messages[0]["metadata"]["web_results"][0]["title"],
+            "Source officielle",
+        )
+
 
 class CompactionTests(unittest.TestCase):
     def test_old_external_payloads_are_removed_before_compaction(self):

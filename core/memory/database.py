@@ -1,6 +1,7 @@
 import sqlite3
 import uuid
 import datetime
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -47,6 +48,7 @@ class DatabaseManager:
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE
                 )
@@ -80,6 +82,15 @@ class DatabaseManager:
                 cursor.execute(
                     "ALTER TABLE sessions ADD COLUMN "
                     "summary_message_count INTEGER NOT NULL DEFAULT 0"
+                )
+            message_columns = {
+                row["name"]
+                for row in cursor.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "metadata" not in message_columns:
+                cursor.execute(
+                    "ALTER TABLE messages ADD COLUMN "
+                    "metadata TEXT NOT NULL DEFAULT '{}'"
                 )
             conn.commit()
 
@@ -334,9 +345,25 @@ class DatabaseManager:
     def get_session_messages(self, session_id: str) -> List[Dict[str, Any]]:
         with self._connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
+            cursor.execute(
+                """
+                SELECT role, content, metadata, timestamp
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC
+                """,
+                (session_id,),
+            )
             rows = cursor.fetchall()
-            return [dict(r) for r in rows]
+            messages = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["metadata"] = json.loads(item.get("metadata") or "{}")
+                except (TypeError, ValueError):
+                    item["metadata"] = {}
+                messages.append(item)
+            return messages
 
     def get_session_memory(self, session_id: str) -> Dict[str, Any]:
         with self._connection() as conn:
@@ -373,9 +400,20 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def add_message(self, session_id: str, role: str, content: str):
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         msg_id = str(uuid.uuid4())
         now = datetime.datetime.now().isoformat()
+        serialized_metadata = json.dumps(
+            metadata or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         with self._connection() as conn:
             cursor = conn.cursor()
             # Ensure session exists to prevent foreign key failure
@@ -386,8 +424,19 @@ class DatabaseManager:
                     (session_id, "Nouvelle Conversation", "gemma-4-chat", now, now)
                 )
             cursor.execute(
-                "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (msg_id, session_id, role, content, now)
+                """
+                INSERT INTO messages
+                    (id, session_id, role, content, metadata, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg_id,
+                    session_id,
+                    role,
+                    content,
+                    serialized_metadata,
+                    now,
+                ),
             )
             cursor.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
             conn.commit()
