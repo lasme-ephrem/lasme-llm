@@ -90,11 +90,59 @@ const reasoningPickerTrigger = document.getElementById("reasoningPickerTrigger")
 const reasoningPickerDropdown = document.getElementById("reasoningPickerDropdown");
 const selectedReasoningName = document.getElementById("selectedReasoningName");
 
+const mobilePickerMedia = window.matchMedia("(max-width: 768px)");
+
+function positionMobilePicker(dropdown) {
+    if (!dropdown) return;
+
+    if (!mobilePickerMedia.matches) {
+        dropdown.style.removeProperty("--mobile-picker-bottom");
+        dropdown.style.removeProperty("--mobile-picker-max-height");
+        return;
+    }
+
+    const composer = document.querySelector(".chat-input-container");
+    if (!composer) return;
+
+    const composerRect = composer.getBoundingClientRect();
+    const visibleViewportHeight = window.visualViewport?.height || window.innerHeight;
+    const visibleViewportTop = window.visualViewport?.offsetTop || 0;
+    const visibleViewportBottom = visibleViewportTop + visibleViewportHeight;
+    const composerTop = Math.min(composerRect.top, visibleViewportBottom);
+    const gap = 10;
+    const edgeMargin = 12;
+    const bottomOffset = Math.max(
+        edgeMargin,
+        window.innerHeight - composerTop + gap
+    );
+    const availableHeight = Math.max(
+        160,
+        Math.min(420, composerTop - visibleViewportTop - edgeMargin - gap)
+    );
+
+    dropdown.style.setProperty("--mobile-picker-bottom", `${bottomOffset}px`);
+    dropdown.style.setProperty("--mobile-picker-max-height", `${availableHeight}px`);
+}
+
+function refreshOpenMobilePickers() {
+    [modelPickerDropdown, reasoningPickerDropdown].forEach((dropdown) => {
+        if (dropdown?.classList.contains("open")) {
+            positionMobilePicker(dropdown);
+        }
+    });
+}
+
+window.addEventListener("resize", refreshOpenMobilePickers, { passive: true });
+window.addEventListener("orientationchange", refreshOpenMobilePickers, { passive: true });
+window.visualViewport?.addEventListener("resize", refreshOpenMobilePickers, { passive: true });
+window.visualViewport?.addEventListener("scroll", refreshOpenMobilePickers, { passive: true });
+
 if (modelPickerTrigger && modelPickerDropdown) {
     modelPickerTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
         if (reasoningPickerDropdown) reasoningPickerDropdown.classList.remove("open");
         if (reasoningPickerTrigger) reasoningPickerTrigger.setAttribute("aria-expanded", "false");
+        positionMobilePicker(modelPickerDropdown);
         const isOpen = modelPickerDropdown.classList.toggle("open");
         modelPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
@@ -128,6 +176,7 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
         e.stopPropagation();
         if (modelPickerDropdown) modelPickerDropdown.classList.remove("open");
         if (modelPickerTrigger) modelPickerTrigger.setAttribute("aria-expanded", "false");
+        positionMobilePicker(reasoningPickerDropdown);
         const isOpen = reasoningPickerDropdown.classList.toggle("open");
         reasoningPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });

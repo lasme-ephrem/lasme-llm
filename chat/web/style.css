@@ -1713,9 +1713,35 @@ body {
         width: 32px;
     }
 
+    /*
+     * Mobile pickers are viewport-bound instead of trigger-bound.
+     * The circular triggers are too narrow to anchor a 260–310px menu
+     * without sending most of it beyond the left edge on phones.
+     */
+    .intelligence-dropdown,
     .reasoning-dropdown {
-        right: -44px;
-        width: min(310px, calc(100vw - 2rem));
+        position: fixed;
+        left: calc(12px + env(safe-area-inset-left));
+        right: calc(12px + env(safe-area-inset-right));
+        bottom: var(
+            --mobile-picker-bottom,
+            calc(132px + env(safe-area-inset-bottom))
+        );
+        width: auto;
+        max-width: none;
+        max-height: var(--mobile-picker-max-height, min(56dvh, 420px));
+        box-sizing: border-box;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        border-radius: 16px;
+        transform-origin: bottom center;
+        z-index: 10050;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .intelligence-dropdown .intel-option {
+        touch-action: manipulation;
     }
 
     .scroll-to-bottom-btn {
