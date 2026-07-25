@@ -83,11 +83,18 @@ Le bouton Web possède trois états :
 - `Web` : recherche forcée, sauf pour une salutation triviale ;
 - `Web off` : aucune requête externe.
 
-Tavily est utilisé lorsque `TAVILY_API_KEY` est défini. DuckDuckGo prend
-automatiquement le relais. L’orchestrateur classe les candidats, extrait le
-contenu des meilleures pages dans un délai borné, puis reclasse les preuves
-réellement disponibles. Le nombre de sources varie donc selon la difficulté et
-la qualité des résultats, au lieu d’être fixé arbitrairement à quatre.
+Lorsque les clés correspondantes sont définies, les fournisseurs sont essayés
+dans cet ordre : Perplexity Sonar, Tavily, puis DuckDuckGo. Un fournisseur
+suivant n’est sollicité que si le précédent est indisponible, à court de quota
+ou ne renvoie pas de preuves suffisantes. L’orchestrateur classe les candidats,
+extrait le contenu des meilleures pages dans un délai borné, puis reclasse les
+preuves réellement disponibles. Le nombre de sources varie donc selon la
+difficulté et la qualité des résultats, au lieu d’être fixé arbitrairement à
+quatre.
+
+Configurer `PERPLEXITY_API_KEY` pour Sonar et `TAVILY_API_KEY` pour Tavily.
+`PERPLEXITY_SONAR_MODEL` permet de changer le modèle Sonar ; la valeur par
+défaut est `sonar`.
 
 Les demandes de météo, de cours boursiers et de crypto-actifs peuvent utiliser
 des API structurées avant la recherche Web générale. Les URL locales, privées
@@ -178,7 +185,7 @@ Ne pas activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
 Le chat et l’inférence sont locaux. Deux fonctions peuvent envoyer du contenu
 hors de la machine :
 
-- la recherche Web envoie la requête à Tavily ou DuckDuckGo ;
+- la recherche Web envoie la requête à Perplexity, Tavily ou DuckDuckGo ;
 - la génération d’images envoie le prompt à Pollinations.
 
 La génération externe peut être coupée avec

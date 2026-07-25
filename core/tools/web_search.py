@@ -18,6 +18,7 @@ from core.tools.search_ranking import (
 
 logger = logging.getLogger("WebSearch")
 MAX_PAGE_BYTES = 1_000_000
+SONAR_API_URL = "https://api.perplexity.ai/v1/sonar"
 ALLOWED_CONTENT_TYPES = (
     "text/",
     "application/json",
@@ -58,6 +59,148 @@ if settings.tavily_api_key:
         logger.info("Tavily AI Search Engine initialized successfully.")
     except Exception as e:
         logger.warning(f"Could not initialize TavilyClient: {e}")
+
+
+class SonarSearchError(RuntimeError):
+    """Safe provider error that never contains credentials or response bodies."""
+
+    def __init__(self, reason: str, status_code: int | None = None):
+        self.reason = reason
+        self.status_code = status_code
+        status_suffix = f" (HTTP {status_code})" if status_code else ""
+        super().__init__(f"{reason}{status_suffix}")
+
+
+def _sonar_error_reason(status_code: int) -> str:
+    if status_code in {402, 429}:
+        return "quota_or_rate_limit"
+    if status_code in {401, 403}:
+        return "authentication_failed"
+    if status_code >= 500:
+        return "provider_unavailable"
+    return "request_rejected"
+
+
+def _search_with_sonar(
+    query: str,
+    official_domains: List[str],
+    candidate_limit: int,
+) -> Dict[str, Any]:
+    """Retrieve grounded sources from Perplexity without replacing the local LLM."""
+    payload: Dict[str, Any] = {
+        "model": settings.perplexity_sonar_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Base the answer only on current Web search evidence. "
+                    "If the evidence is insufficient or mismatched, state that "
+                    "instead of guessing. Prefer primary and official sources."
+                ),
+            },
+            {"role": "user", "content": query},
+        ],
+        "max_tokens": 700,
+        "temperature": 0.1,
+        "search_mode": "web",
+        "return_related_questions": False,
+        "language_preference": "fr",
+    }
+    if official_domains:
+        payload["search_domain_filter"] = official_domains
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(12, connect=5),
+            follow_redirects=False,
+            trust_env=False,
+        ) as http:
+            response = http.post(
+                SONAR_API_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.perplexity_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+    except httpx.TimeoutException as exc:
+        raise SonarSearchError("timeout") from exc
+    except httpx.HTTPError as exc:
+        raise SonarSearchError("network_error") from exc
+
+    if response.status_code >= 400:
+        raise SonarSearchError(
+            _sonar_error_reason(response.status_code),
+            response.status_code,
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise SonarSearchError("invalid_json_response") from exc
+
+    choices = data.get("choices") or []
+    answer = ""
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        answer = str(message.get("content") or "").strip()
+
+    raw_results = data.get("search_results") or []
+    results: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw_results):
+        if len(results) >= candidate_limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if not title or not url:
+            continue
+        try:
+            safe_url = validate_public_http_url(url)
+        except ValueError:
+            continue
+        if not snippet:
+            snippet = answer
+        if not snippet:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": safe_url,
+                "engine": "Perplexity Sonar",
+                "engine_score": max(0.55, 1.0 - index * 0.06),
+            }
+        )
+
+    # Some Sonar responses expose citations without detailed search result
+    # objects. Keep a compact grounded fallback so Tavily is only used when
+    # Sonar truly provides no usable evidence.
+    if not results and answer:
+        for index, citation in enumerate((data.get("citations") or [])[:2]):
+            try:
+                safe_url = validate_public_http_url(str(citation))
+            except ValueError:
+                continue
+            hostname = urlparse(safe_url).hostname or "Source Web"
+            results.append(
+                {
+                    "title": f"Source citée par Sonar — {hostname}",
+                    "snippet": answer,
+                    "url": safe_url,
+                    "engine": "Perplexity Sonar",
+                    "engine_score": max(0.7, 0.9 - index * 0.05),
+                }
+            )
+
+    return {
+        "results": results,
+        "answer": answer,
+        "usage": data.get("usage") or {},
+    }
+
 
 def fetch_url_content(url: str, timeout: int = 8, max_chars: int = 30_000) -> str:
     """Fetch public text pages while blocking SSRF and oversized responses."""
@@ -304,8 +447,84 @@ def search_web_detailed(
         max_results=max_results,
     )
 
-    # 2. Tavily: official-first when possible, then a broader retrieval pass.
-    if tavily_client:
+    provider_attempts: List[Dict[str, Any]] = []
+
+    # 2. Perplexity Sonar is the primary grounded search provider.
+    if settings.perplexity_api_key:
+        sonar_query = (
+            _focused_official_query(cleaned_query, official_domains)
+            if official_domains
+            else cleaned_query
+        )
+        try:
+            logger.info("Executing Perplexity Sonar search for %r", sonar_query)
+            sonar_report = _search_with_sonar(
+                sonar_query,
+                official_domains,
+                plan["candidate_limit"],
+            )
+            sonar_results = sonar_report["results"]
+            candidates.extend(sonar_results)
+            if sonar_results:
+                engines_used.append("Perplexity Sonar")
+            search_rounds.append(
+                {
+                    "engine": "Perplexity Sonar",
+                    "kind": "primary",
+                    "query": sonar_query,
+                    "returned": len(sonar_results),
+                }
+            )
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "ok" if sonar_results else "empty",
+                }
+            )
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except SonarSearchError as exc:
+            errors.append(f"Perplexity Sonar: {exc}")
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "fallback",
+                    "reason": exc.reason,
+                    "status_code": exc.status_code,
+                }
+            )
+            logger.warning(
+                "Perplexity Sonar unavailable for %r: %s",
+                cleaned_query,
+                exc,
+            )
+        except Exception as exc:
+            errors.append(f"Perplexity Sonar: {type(exc).__name__}")
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "fallback",
+                    "reason": "unexpected_error",
+                }
+            )
+            logger.exception(
+                "Unexpected Perplexity Sonar failure for %r",
+                cleaned_query,
+            )
+    else:
+        provider_attempts.append(
+            {
+                "provider": "Perplexity Sonar",
+                "status": "not_configured",
+            }
+        )
+
+    # 3. Tavily runs only when Sonar did not provide sufficient evidence.
+    if not selected["strategy"]["sufficient"] and tavily_client:
         excluded_domains = [
             domain
             for domain in LOW_SIGNAL_DOMAINS
@@ -397,8 +616,25 @@ def search_web_detailed(
                     cleaned_query,
                     e,
                 )
+        provider_attempts.append(
+            {
+                "provider": "Tavily AI",
+                "status": (
+                    "ok"
+                    if any(item["engine"] == "Tavily AI" for item in search_rounds)
+                    else "fallback"
+                ),
+            }
+        )
+    elif not selected["strategy"]["sufficient"]:
+        provider_attempts.append(
+            {
+                "provider": "Tavily AI",
+                "status": "not_configured",
+            }
+        )
 
-    # 3. DuckDuckGo is an adaptive second engine, not merely a blind fallback.
+    # 4. DuckDuckGo is the final no-key fallback.
     if not selected["strategy"]["sufficient"]:
         try:
             logger.info(
@@ -438,12 +674,24 @@ def search_web_detailed(
                 official_domains,
                 max_results=max_results,
             )
+            provider_attempts.append(
+                {
+                    "provider": "DuckDuckGo",
+                    "status": "ok" if raw_results else "empty",
+                }
+            )
         except Exception as e:
             errors.append(f"DuckDuckGo: {type(e).__name__}: {e}")
             logger.error(
                 "DuckDuckGo Search failed for %r: %s",
                 cleaned_query,
                 e,
+            )
+            provider_attempts.append(
+                {
+                    "provider": "DuckDuckGo",
+                    "status": "unavailable",
+                }
             )
 
     return {
@@ -457,6 +705,12 @@ def search_web_detailed(
             "search_rounds": len(search_rounds),
             "queries": [item["query"] for item in search_rounds],
             "round_details": search_rounds,
+            "provider_order": [
+                "Perplexity Sonar",
+                "Tavily AI",
+                "DuckDuckGo",
+            ],
+            "provider_attempts": provider_attempts,
         },
     }
 
