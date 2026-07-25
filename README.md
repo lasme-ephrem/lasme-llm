@@ -206,6 +206,5 @@ prototypes séparés. Ils ne sont pas démarrés par l’application de chat.
 
 Ce projet original est distribué sous
 [Apache License 2.0](LICENSE), une licence permissive qui inclut une concession
-explicite de brevets. Les fonctionnalités inspirées par l’observation de
-produits open source ont été réimplémentées indépendamment : aucun code source
-de Proton Lumo n’est inclus. Voir [NOTICE](NOTICE).
+explicite de brevets. Les fonctionnalités de l’application ont été conçues et
+implémentées indépendamment. Voir [NOTICE](NOTICE).
