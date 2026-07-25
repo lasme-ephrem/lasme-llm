@@ -39,6 +39,7 @@ from core.memory.personal import (
 from core.rag.store import rag_store
 from core.security import (
     is_direct_local_request,
+    request_has_valid_query_token,
     request_has_valid_token,
     resolve_workspace_path,
 )
@@ -62,6 +63,7 @@ app.add_middleware(
 @app.middleware("http")
 async def protect_remote_api(request: Request, call_next):
     """Keep local UX frictionless while requiring a token through any tunnel."""
+    valid_query_token = request_has_valid_query_token(request)
     protected_path = (
         request.url.path.startswith("/api/")
         or request.url.path.startswith("/generated_images/")
@@ -90,6 +92,16 @@ async def protect_remote_api(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
+    if valid_query_token:
+        response.set_cookie(
+            key="lasme_access_token",
+            value=settings.access_token.strip(),
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=8 * 60 * 60,
+            path="/",
+        )
     return response
 
 

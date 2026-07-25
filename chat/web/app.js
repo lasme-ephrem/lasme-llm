@@ -7,7 +7,6 @@ const initialUrl = new URL(window.location.href);
 const queryAccessToken = initialUrl.searchParams.get("token");
 if (queryAccessToken) {
     sessionStorage.setItem("lasme_access_token", queryAccessToken);
-    document.cookie = `lasme_access_token=${encodeURIComponent(queryAccessToken)}; Path=/; SameSite=Strict${window.location.protocol === "https:" ? "; Secure" : ""}`;
     initialUrl.searchParams.delete("token");
     window.history.replaceState({}, document.title, initialUrl.toString());
 }
