@@ -3,6 +3,7 @@ import datetime
 import asyncio
 import re
 import time
+import unicodedata
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -165,6 +166,49 @@ def _fallback_contextual_search_query(messages: List[ChatMessage]) -> str:
     return last_msg
 
 
+_MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "ðŸ")
+_MOJIBAKE_REPLACEMENTS = {
+    "â€™": "’",
+    "â€˜": "‘",
+    "â€œ": "“",
+    "â€": "”",
+    "â€“": "–",
+    "â€”": "—",
+    "Â·": "·",
+}
+
+
+def clean_model_text(value: str) -> str:
+    """Normalize generated text and remove stray non-Latin script letters."""
+    text = unicodedata.normalize("NFC", value or "").replace("\ufffd", "")
+    if any(marker in text for marker in _MOJIBAKE_MARKERS):
+        try:
+            repaired = text.encode("cp1252").decode("utf-8")
+            if sum(repaired.count(marker) for marker in _MOJIBAKE_MARKERS) < sum(
+                text.count(marker) for marker in _MOJIBAKE_MARKERS
+            ):
+                text = repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    for broken, replacement in _MOJIBAKE_REPLACEMENTS.items():
+        text = text.replace(broken, replacement)
+    text = text.replace("Â", "")
+
+    cleaned = []
+    for character in text:
+        if character in {"\n", "\r", "\t"}:
+            cleaned.append(character)
+            continue
+        category = unicodedata.category(character)
+        if category.startswith("C"):
+            continue
+        if category.startswith("L") and ord(character) > 127:
+            if "LATIN" not in unicodedata.name(character, ""):
+                continue
+        cleaned.append(character)
+    return "".join(cleaned)
+
+
 async def build_contextual_search_query(
     messages: List[ChatMessage],
     model: str,
@@ -208,7 +252,9 @@ async def build_contextual_search_query(
             ),
             timeout=20.0,
         )
-        rewritten = reply.get("message", {}).get("content", "").strip()
+        rewritten = clean_model_text(
+            reply.get("message", {}).get("content", "")
+        ).strip()
         rewritten = re.sub(r"<think>.*?</think>", "", rewritten, flags=re.DOTALL)
         rewritten = rewritten.strip(" \t\r\n\"'`")
         rewritten = " ".join(rewritten.split())
@@ -225,6 +271,7 @@ def should_perform_web_search(
     user_toggle_enabled: bool,
     has_conversation_context: bool = False,
     mode: str = "auto",
+    conversation_messages: Optional[List[ChatMessage]] = None,
 ) -> bool:
     """Classify whether live information is useful in auto/always/off modes."""
     normalized_mode = (mode or "auto").strip().lower()
@@ -269,6 +316,7 @@ def should_perform_web_search(
     }
     follow_up_markers = {
         "alors", "maintenant", "et", "faux", "incorrect", "vérifie", "verifie",
+        "comment", "pourquoi", "quand", "où", "ou", "ensuite",
     }
     word_set = set(words)
     if re.search(r"https?://", query, flags=re.IGNORECASE):
@@ -282,7 +330,45 @@ def should_perform_web_search(
             or word_set.intersection(follow_up_markers)
         )
     ):
-        return True
+        recent_context = " ".join(
+            message.content
+            for message in (conversation_messages or [])[-5:-1]
+        ).lower()
+        context_words = set(
+            re.sub(r"[^\w\s]", " ", recent_context).split()
+        )
+        current_year = datetime.date.today().year
+        recent_year = any(
+            int(year) >= current_year - 1
+            for year in re.findall(r"\b(20\d{2})\b", recent_context)
+        )
+        cited_web_context = bool(re.search(r"\[\d+\]", recent_context))
+        if (
+            not conversation_messages
+            or context_words.intersection(live_markers)
+            or recent_year
+            or cited_web_context
+        ):
+            return True
+
+    referential_follow_up = bool(
+        re.search(
+            r"\b(le|la|les|ce|cet|cette|ça|cela|il|elle|lui|leur)\b",
+            clean_q,
+        )
+    ) and len(words) <= 14
+    if has_conversation_context and referential_follow_up:
+        recent_context = " ".join(
+            message.content
+            for message in (conversation_messages or [])[-5:-1]
+        ).lower()
+        current_year = datetime.date.today().year
+        if (
+            any(marker in recent_context for marker in live_markers)
+            or bool(re.search(rf"\b({current_year - 1}|{current_year})\b", recent_context))
+            or bool(re.search(r"\[\d+\]", recent_context))
+        ):
+            return True
     return False
 
 
@@ -339,7 +425,9 @@ async def async_generate_and_update_title(session_id: str, prompt: str, model: s
             num_ctx=2_048,
             num_predict=40,
         )
-        raw_title = reply.get("message", {}).get("content", "").strip()
+        raw_title = clean_model_text(
+            reply.get("message", {}).get("content", "")
+        ).strip()
         
         # Remove quotes
         clean_title = re.sub(r'[\"\']', '', raw_title)
@@ -771,6 +859,7 @@ async def chat_stream(req: ChatRequest):
             user_toggle,
             has_conversation_context=has_conversation_context,
             mode=web_mode,
+            conversation_messages=req.messages,
         )
         if not has_images
         else False
@@ -807,6 +896,12 @@ async def chat_stream(req: ChatRequest):
         "conversation. Les extraits Web ci-dessus sont des informations en "
         "direct : utilise-les en priorité pour les faits récents et corrige "
         "explicitement une réponse antérieure si elle est devenue inexacte. "
+        "Privilégie les sources officielles et les médias reconnus. Recoupe "
+        "les affirmations importantes entre plusieurs extraits ; si les sources "
+        "se contredisent, signale-le au lieu de choisir silencieusement. "
+        "Si les extraits ne décrivent pas précisément un événement, dis que les "
+        "détails ne sont pas vérifiables avec les sources disponibles. N'invente "
+        "jamais le déroulement, la tactique, les buteurs, les minutes ou le score. "
         "Pour toute affirmation issue du Web, cite le marqueur correspondant "
         "[1], [2], etc. N'invente jamais une source ou une URL. "
         "N'interprète jamais une relance isolément de son sujet précédent. "
@@ -918,8 +1013,7 @@ async def chat_stream(req: ChatRequest):
                         summary_parts.insert(0, "Documents joints analysés.")
                     yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': ' '.join(summary_parts)})}\n\n"
 
-                # Sanitize stray Devanagari or corrupted replacement tokens
-                clean_delta = re.sub(r'[\u0900-\u097f]', '', delta.replace("अ", "a").replace("\ufffd", ""))
+                clean_delta = clean_model_text(delta)
                 full_assistant_reply += clean_delta
                 yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
 
@@ -942,6 +1036,7 @@ async def chat_stream(req: ChatRequest):
             yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
 
         if full_assistant_reply:
+            full_assistant_reply = clean_model_text(full_assistant_reply)
             db.add_message(session_id, "assistant", full_assistant_reply)
             asyncio.create_task(
                 async_update_conversation_memory(session_id, selected_model)

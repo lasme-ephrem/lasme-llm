@@ -72,10 +72,15 @@ const themeToggleBtn = document.getElementById("themeToggleBtn");
 const modelPickerTrigger = document.getElementById("modelPickerTrigger");
 const modelPickerDropdown = document.getElementById("modelPickerDropdown");
 const selectedModelName = document.getElementById("selectedModelName");
+const reasoningPickerTrigger = document.getElementById("reasoningPickerTrigger");
+const reasoningPickerDropdown = document.getElementById("reasoningPickerDropdown");
+const selectedReasoningName = document.getElementById("selectedReasoningName");
 
 if (modelPickerTrigger && modelPickerDropdown) {
     modelPickerTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
+        if (reasoningPickerDropdown) reasoningPickerDropdown.classList.remove("open");
+        if (reasoningPickerTrigger) reasoningPickerTrigger.setAttribute("aria-expanded", "false");
         const isOpen = modelPickerDropdown.classList.toggle("open");
         modelPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
@@ -100,6 +105,39 @@ if (modelPickerTrigger && modelPickerDropdown) {
             const activeChk = btn.querySelector(".intel-check-icon");
             if (activeChk) activeChk.classList.add("active");
             modelPickerDropdown.classList.remove("open");
+        });
+    });
+}
+
+if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
+    reasoningPickerTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (modelPickerDropdown) modelPickerDropdown.classList.remove("open");
+        if (modelPickerTrigger) modelPickerTrigger.setAttribute("aria-expanded", "false");
+        const isOpen = reasoningPickerDropdown.classList.toggle("open");
+        reasoningPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+    document.addEventListener("click", () => {
+        reasoningPickerDropdown.classList.remove("open");
+        reasoningPickerTrigger.setAttribute("aria-expanded", "false");
+    });
+    document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            reasoningLevelSelect.value = btn.dataset.level || "balanced";
+            if (selectedReasoningName) {
+                selectedReasoningName.textContent = btn.dataset.label || "Équilibré";
+            }
+            document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(option => {
+                option.classList.remove("intel-active");
+                const check = option.querySelector(".intel-check-icon");
+                if (check) check.classList.remove("active");
+            });
+            btn.classList.add("intel-active");
+            const activeCheck = btn.querySelector(".intel-check-icon");
+            if (activeCheck) activeCheck.classList.add("active");
+            reasoningPickerDropdown.classList.remove("open");
+            reasoningPickerTrigger.setAttribute("aria-expanded", "false");
         });
     });
 }
@@ -554,11 +592,11 @@ if (chatMessages && scrollToBottomBtn) {
 // Auto-Resizing Textarea Handler
 function autoResizeTextarea(textarea) {
     if (!textarea) return;
-    textarea.style.height = "24px";
+    textarea.style.height = "34px";
     const scrollH = textarea.scrollHeight;
-    const newHeight = Math.min(scrollH, 200);
+    const newHeight = Math.max(34, Math.min(scrollH, 180));
     textarea.style.height = `${newHeight}px`;
-    if (scrollH > 200) {
+    if (scrollH > 180) {
         textarea.style.overflowY = "auto";
     } else {
         textarea.style.overflowY = "hidden";
@@ -876,7 +914,7 @@ async function sendChatMessage() {
                         }
                     }
                     if (parsed.content) {
-                        fullResponse += parsed.content;
+                        fullResponse = cleanModelText(fullResponse + parsed.content);
 
                         // Only render to active UI if user is still on this conversation
                         if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
@@ -963,6 +1001,31 @@ function appendMessage(role, text, imageUrl = null) {
     return bubbleDiv;
 }
 
+function cleanModelText(value) {
+    const replacements = new Map([
+        ["â€™", "’"],
+        ["â€˜", "‘"],
+        ["â€œ", "“"],
+        ["â€", "”"],
+        ["â€“", "–"],
+        ["â€”", "—"],
+        ["Â·", "·"],
+        ["Â", ""],
+    ]);
+    let text = String(value || "").normalize("NFC").replaceAll("\uFFFD", "");
+    replacements.forEach((replacement, broken) => {
+        text = text.replaceAll(broken, replacement);
+    });
+    return Array.from(text).filter(character => {
+        if (/[\n\r\t]/u.test(character)) return true;
+        if (/[\p{Cc}\p{Cf}]/u.test(character)) return false;
+        if (/\p{L}/u.test(character)) {
+            return /[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]/u.test(character);
+        }
+        return true;
+    }).join("");
+}
+
 function escapeHtml(value) {
     return String(value)
         .replaceAll("&", "&amp;")
@@ -1026,6 +1089,7 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
 // Render only the final answer. Raw chain-of-thought is intentionally hidden;
 // the UI receives structured activity events and a short process summary.
 function renderFullAssistantMessage(container, rawText, webResults, thinkingDuration = null) {
+    rawText = cleanModelText(rawText);
     let thinkingContent = "";
     let mainAnswer = (rawText || "")
         .replace(/<think>[\s\S]*?<\/think>/gi, "")

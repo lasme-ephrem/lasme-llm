@@ -1,6 +1,6 @@
 import logging
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Any
 import httpx
 from ddgs import DDGS
@@ -13,6 +13,23 @@ ALLOWED_CONTENT_TYPES = (
     "text/",
     "application/json",
     "application/xhtml+xml",
+)
+LOW_SIGNAL_DOMAINS = (
+    "baike.baidu.com",
+    "facebook.com",
+    "instagram.com",
+    "pinterest.com",
+    "reddit.com",
+    "tiktok.com",
+    "x.com",
+    "youtube.com",
+)
+OFFICIAL_DOMAIN_RULES = (
+    (("coupe du monde", "world cup", "fifa"), ("fifa.com",)),
+    (("champions league", "uefa"), ("uefa.com",)),
+    (("jeux olympiques", "olympics"), ("olympics.com",)),
+    (("nba",), ("nba.com",)),
+    (("nfl",), ("nfl.com",)),
 )
 
 # Initialize Tavily client if API key is provided
@@ -112,6 +129,53 @@ def clean_query_text(query: str) -> str:
     clean = ' '.join(text.split()).strip()
     return clean
 
+
+def _query_requests_domain(query: str, domain: str) -> bool:
+    """Keep a social or video source when the user explicitly asks for it."""
+    brand = domain.split(".", 1)[0]
+    lowered = query.casefold()
+    return domain in lowered or brand in lowered
+
+
+def _is_low_signal_url(url: str) -> bool:
+    try:
+        hostname = (urlparse(url).hostname or "").casefold()
+    except ValueError:
+        return True
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in LOW_SIGNAL_DOMAINS
+    )
+
+
+def _select_quality_results(
+    results: List[Dict[str, Any]],
+    query: str,
+    max_results: int,
+) -> List[Dict[str, Any]]:
+    """Prefer direct editorial or official pages over social reposts."""
+    explicitly_requested = any(
+        _query_requests_domain(query, domain)
+        for domain in LOW_SIGNAL_DOMAINS
+    )
+    preferred = [
+        item
+        for item in results
+        if explicitly_requested
+        or not _is_low_signal_url(str(item.get("url", "")))
+    ]
+    selected = preferred if preferred else results
+    return selected[:max_results]
+
+
+def _official_domains_for_query(query: str) -> List[str]:
+    lowered = query.casefold()
+    domains: List[str] = []
+    for markers, candidates in OFFICIAL_DOMAIN_RULES:
+        if any(marker in lowered for marker in markers):
+            domains.extend(candidates)
+    return list(dict.fromkeys(domains))
+
 def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
     """Search the live Web and return results plus an observable health status."""
     results = []
@@ -153,26 +217,56 @@ def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
     if tavily_client:
         try:
             logger.info(f"Executing Tavily AI Search for query: '{cleaned_query}'")
-            res = tavily_client.search(query=cleaned_query, max_results=max_results, search_depth="basic")
-            tavily_results = res.get("results", [])
-            for item in tavily_results:
-                title = item.get("title", "").strip()
-                content = item.get("content", "").strip()
-                url = item.get("url", "").strip()
-                if title and content:
-                    results.append({
-                        "title": title,
-                        "snippet": content,
-                        "url": url,
-                        "engine": "Tavily AI"
-                    })
-            if results:
-                return {
-                    "status": "ok",
-                    "engine": "Tavily AI",
-                    "results": results,
-                    "errors": errors,
-                }
+            excluded_domains = [
+                domain
+                for domain in LOW_SIGNAL_DOMAINS
+                if not _query_requests_domain(cleaned_query, domain)
+            ]
+            official_domains = _official_domains_for_query(cleaned_query)
+            search_attempts = []
+            if official_domains:
+                search_attempts.append({"include_domains": official_domains})
+            search_attempts.append({"exclude_domains": excluded_domains})
+
+            for domain_filter in search_attempts:
+                res = tavily_client.search(
+                    query=cleaned_query,
+                    max_results=min(20, max_results + 2),
+                    search_depth="basic",
+                    **domain_filter,
+                )
+                tavily_results = res.get("results", [])
+                for item in tavily_results:
+                    title = item.get("title", "").strip()
+                    content = item.get("content", "").strip()
+                    url = item.get("url", "").strip()
+                    relevance = item.get("score")
+                    if (
+                        title
+                        and content
+                        and (
+                            not isinstance(relevance, (int, float))
+                            or relevance >= 0.35
+                        )
+                    ):
+                        results.append({
+                            "title": title,
+                            "snippet": content,
+                            "url": url,
+                            "engine": "Tavily AI"
+                        })
+                results = _select_quality_results(
+                    results,
+                    cleaned_query,
+                    max_results,
+                )
+                if results:
+                    return {
+                        "status": "ok",
+                        "engine": "Tavily AI",
+                        "results": results,
+                        "errors": errors,
+                    }
         except Exception as e:
             errors.append(f"Tavily: {type(e).__name__}: {e}")
             logger.error(f"Tavily AI Search failed for '{cleaned_query}': {e}. Falling back to DuckDuckGo...")
@@ -193,6 +287,7 @@ def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
                     "url": url,
                     "engine": "DuckDuckGo"
                 })
+        results = _select_quality_results(results, cleaned_query, max_results)
     except Exception as e:
         errors.append(f"DuckDuckGo: {type(e).__name__}: {e}")
         logger.error(f"DuckDuckGo Search failed for '{cleaned_query}': {e}")

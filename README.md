@@ -75,6 +75,27 @@ L’interface expose quatre niveaux :
 Le raisonnement interne fourni séparément par Ollama n’est ni affiché ni stocké
 dans la mémoire. Seule la réponse finale est conservée.
 
+## Performances et streaming
+
+Le chemin de génération est conçu pour réduire à la fois la latence réelle et
+la latence perçue :
+
+- le client HTTP vers Ollama est persistant et réutilise ses connexions ;
+- l’historique est limité aux messages récents et pertinents, complétés par une
+  mémoire compacte ;
+- le mode Rapide désactive le raisonnement et les autres niveaux n’augmentent
+  le budget de calcul que lorsque cela est demandé ;
+- `Web auto` évite une recherche externe pour les questions stables, tout en
+  conservant la recherche pour les relances liées à un sujet actuel ;
+- les tâches secondaires comme le titre et la mémoire sont exécutées sans
+  bloquer le flux principal ;
+- les événements SSE sont affichés progressivement dès leur réception.
+
+Sur la configuration de référence — RTX 4070 Ti SUPER 16 Go — le débit observé
+se situe généralement autour de 45 à 60 tokens par seconde. Ce chiffre dépend
+du modèle, de la longueur du contexte, du niveau de raisonnement et de
+l’utilisation de la recherche Web.
+
 ## Documents
 
 Les fichiers PDF, TXT et Markdown sont limités à 10 Mo. Le texte extrait est

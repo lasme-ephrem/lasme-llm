@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+README_PERSONNEL.md
 
 # Python
 .venv/
