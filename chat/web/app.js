@@ -67,15 +67,34 @@ const webSearchToggle = document.getElementById("webSearchToggle");
 const webSearchBtn = document.getElementById("webSearchBtn");
 const webSearchLabel = document.getElementById("webSearchLabel");
 const themeToggleBtn = document.getElementById("themeToggleBtn");
+const contextUsageIndicator = document.getElementById("contextUsageIndicator");
+const contextUsageBar = document.getElementById("contextUsageBar");
+const contextUsageLabel = document.getElementById("contextUsageLabel");
+const memorySettingsBtn = document.getElementById("memorySettingsBtn");
+const memoryModal = document.getElementById("memoryModal");
+const memoryModalOverlay = document.getElementById("memoryModalOverlay");
+const closeMemoryModalBtn = document.getElementById("closeMemoryModalBtn");
+const memoryEnabledToggle = document.getElementById("memoryEnabledToggle");
+const memoryAutoSaveToggle = document.getElementById("memoryAutoSaveToggle");
+const memoryNewInput = document.getElementById("memoryNewInput");
+const memoryAddBtn = document.getElementById("memoryAddBtn");
+const memoryList = document.getElementById("memoryList");
+const memoryRefreshBtn = document.getElementById("memoryRefreshBtn");
+const memoryStatus = document.getElementById("memoryStatus");
 
 // ── Model Selection Popover Menu Handler ─────────────────────────────
 const modelPickerTrigger = document.getElementById("modelPickerTrigger");
 const modelPickerDropdown = document.getElementById("modelPickerDropdown");
 const selectedModelName = document.getElementById("selectedModelName");
+const reasoningPickerTrigger = document.getElementById("reasoningPickerTrigger");
+const reasoningPickerDropdown = document.getElementById("reasoningPickerDropdown");
+const selectedReasoningName = document.getElementById("selectedReasoningName");
 
 if (modelPickerTrigger && modelPickerDropdown) {
     modelPickerTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
+        if (reasoningPickerDropdown) reasoningPickerDropdown.classList.remove("open");
+        if (reasoningPickerTrigger) reasoningPickerTrigger.setAttribute("aria-expanded", "false");
         const isOpen = modelPickerDropdown.classList.toggle("open");
         modelPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
@@ -100,6 +119,39 @@ if (modelPickerTrigger && modelPickerDropdown) {
             const activeChk = btn.querySelector(".intel-check-icon");
             if (activeChk) activeChk.classList.add("active");
             modelPickerDropdown.classList.remove("open");
+        });
+    });
+}
+
+if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
+    reasoningPickerTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (modelPickerDropdown) modelPickerDropdown.classList.remove("open");
+        if (modelPickerTrigger) modelPickerTrigger.setAttribute("aria-expanded", "false");
+        const isOpen = reasoningPickerDropdown.classList.toggle("open");
+        reasoningPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+    document.addEventListener("click", () => {
+        reasoningPickerDropdown.classList.remove("open");
+        reasoningPickerTrigger.setAttribute("aria-expanded", "false");
+    });
+    document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            reasoningLevelSelect.value = btn.dataset.level || "balanced";
+            if (selectedReasoningName) {
+                selectedReasoningName.textContent = btn.dataset.label || "Équilibré";
+            }
+            document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(option => {
+                option.classList.remove("intel-active");
+                const check = option.querySelector(".intel-check-icon");
+                if (check) check.classList.remove("active");
+            });
+            btn.classList.add("intel-active");
+            const activeCheck = btn.querySelector(".intel-check-icon");
+            if (activeCheck) activeCheck.classList.add("active");
+            reasoningPickerDropdown.classList.remove("open");
+            reasoningPickerTrigger.setAttribute("aria-expanded", "false");
         });
     });
 }
@@ -451,6 +503,7 @@ function renderSessions(sessions) {
 async function selectSession(sessionId) {
     currentSessionId = sessionId;
     currentDocumentScopeId = sessionId;
+    refreshSendButtonState();
     localStorage.setItem("active_session_id", sessionId);
     conversationHistory = [];
     if (chatMessages) chatMessages.innerHTML = "";
@@ -493,6 +546,8 @@ async function selectSession(sessionId) {
 async function startNewChat() {
     currentSessionId = null;
     currentDocumentScopeId = crypto.randomUUID();
+    refreshSendButtonState();
+    updateContextUsage({ percentage: 0 });
     localStorage.removeItem("active_session_id");
     conversationHistory = [];
     chatMessages.innerHTML = "";
@@ -522,6 +577,9 @@ async function startNewChat() {
 
 async function deleteSession(sessionId) {
     try {
+        const controller = streamControllers.get(sessionId);
+        if (controller) controller.abort();
+        streamControllers.delete(sessionId);
         await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
         if (currentSessionId === sessionId) {
             startNewChat();
@@ -530,6 +588,221 @@ async function deleteSession(sessionId) {
         }
     } catch (err) {}
 }
+
+function updateContextUsage(meta = {}) {
+    if (!contextUsageIndicator || !contextUsageBar || !contextUsageLabel) return;
+    const percentage = Math.max(
+        0,
+        Math.min(100, Number(meta.percentage) || 0)
+    );
+    contextUsageBar.style.width = `${percentage}%`;
+    contextUsageIndicator.classList.toggle("medium", percentage >= 55 && percentage < 80);
+    contextUsageIndicator.classList.toggle("high", percentage >= 80);
+    const summary = meta.summary_used ? " · résumé actif" : "";
+    contextUsageLabel.textContent = `Contexte ${percentage}%${summary}`;
+    contextUsageIndicator.title = [
+        `${meta.estimated_tokens || 0} tokens conversationnels`,
+        `${meta.personal_memory_count || 0} souvenirs actifs`,
+        `${meta.rag_chunk_count || 0} extraits documentaires`,
+    ].join(" · ");
+}
+
+async function loadSuggestedQuestions(sessionId, model, bubble) {
+    try {
+        const response = await fetch(`${API_BASE}/chat/suggestions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, model }),
+        });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const suggestions = Array.isArray(payload.suggestions)
+            ? payload.suggestions.slice(0, 3)
+            : [];
+        if (!suggestions.length || currentSessionId !== sessionId || !bubble.isConnected) {
+            return;
+        }
+        bubble.querySelector(".suggested-questions")?.remove();
+        const row = document.createElement("div");
+        row.className = "suggested-questions";
+        suggestions.forEach((suggestion) => {
+            if (typeof suggestion !== "string" || !suggestion.trim()) return;
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "suggested-question";
+            button.textContent = suggestion.trim();
+            button.addEventListener("click", () => {
+                chatInput.value = suggestion.trim();
+                autoResizeTextarea(chatInput);
+                chatInput.focus();
+            });
+            row.appendChild(button);
+        });
+        if (row.childElementCount) bubble.appendChild(row);
+    } catch (_) {}
+}
+
+function setMemoryStatus(message) {
+    if (memoryStatus) memoryStatus.textContent = message || "";
+}
+
+function renderMemoryItems(items) {
+    if (!memoryList) return;
+    memoryList.innerHTML = "";
+    if (!items.length) {
+        const empty = document.createElement("p");
+        empty.className = "memory-empty";
+        empty.textContent = "Aucun souvenir enregistré.";
+        memoryList.appendChild(empty);
+        return;
+    }
+    items.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = `memory-item ${item.enabled ? "" : "disabled"}`;
+
+        const enabled = document.createElement("input");
+        enabled.type = "checkbox";
+        enabled.checked = Boolean(item.enabled);
+        enabled.title = "Activer ou désactiver ce souvenir";
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.maxLength = 300;
+        input.value = item.content || "";
+
+        const source = document.createElement("span");
+        source.className = "memory-source";
+        source.textContent = item.source === "user" ? "manuel" : "auto";
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "Supprimer";
+
+        const save = async (payload) => {
+            const response = await fetch(`${API_BASE}/memory/${item.id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!response.ok) throw new Error("Modification impossible");
+        };
+
+        enabled.addEventListener("change", async () => {
+            try {
+                await save({ enabled: enabled.checked });
+                row.classList.toggle("disabled", !enabled.checked);
+                setMemoryStatus("Mémoire mise à jour.");
+            } catch (_) {
+                enabled.checked = !enabled.checked;
+                setMemoryStatus("Impossible de modifier ce souvenir.");
+            }
+        });
+        input.addEventListener("change", async () => {
+            const content = input.value.trim();
+            if (!content) return;
+            try {
+                await save({ content });
+                setMemoryStatus("Souvenir modifié.");
+            } catch (_) {
+                setMemoryStatus("Impossible de modifier ce souvenir.");
+            }
+        });
+        remove.addEventListener("click", async () => {
+            const response = await fetch(`${API_BASE}/memory/${item.id}`, {
+                method: "DELETE",
+            });
+            if (response.ok) {
+                row.remove();
+                setMemoryStatus("Souvenir supprimé.");
+            }
+        });
+        row.append(enabled, input, source, remove);
+        memoryList.appendChild(row);
+    });
+}
+
+async function loadMemoryPanel() {
+    setMemoryStatus("Chargement…");
+    try {
+        const response = await fetch(`${API_BASE}/memory`);
+        if (!response.ok) throw new Error();
+        const payload = await response.json();
+        if (memoryEnabledToggle) {
+            memoryEnabledToggle.checked = payload.settings?.enabled !== false;
+        }
+        if (memoryAutoSaveToggle) {
+            memoryAutoSaveToggle.checked = payload.settings?.auto_save !== false;
+        }
+        renderMemoryItems(payload.memories || []);
+        setMemoryStatus("");
+    } catch (_) {
+        setMemoryStatus("Mémoire indisponible.");
+    }
+}
+
+function closeMemoryPanel() {
+    if (!memoryModal) return;
+    memoryModal.style.display = "none";
+    memoryModal.setAttribute("aria-hidden", "true");
+}
+
+if (memorySettingsBtn && memoryModal) {
+    memorySettingsBtn.addEventListener("click", () => {
+        memoryModal.style.display = "grid";
+        memoryModal.setAttribute("aria-hidden", "false");
+        void loadMemoryPanel();
+    });
+}
+memoryModalOverlay?.addEventListener("click", closeMemoryPanel);
+closeMemoryModalBtn?.addEventListener("click", closeMemoryPanel);
+
+async function saveMemorySettings() {
+    try {
+        await fetch(`${API_BASE}/memory/settings`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                enabled: memoryEnabledToggle?.checked,
+                auto_save: memoryAutoSaveToggle?.checked,
+            }),
+        });
+        setMemoryStatus("Réglages enregistrés.");
+    } catch (_) {
+        setMemoryStatus("Impossible d’enregistrer les réglages.");
+    }
+}
+memoryEnabledToggle?.addEventListener("change", saveMemorySettings);
+memoryAutoSaveToggle?.addEventListener("change", saveMemorySettings);
+
+memoryAddBtn?.addEventListener("click", async () => {
+    const content = memoryNewInput?.value.trim();
+    if (!content) return;
+    const response = await fetch(`${API_BASE}/memory`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+    });
+    if (response.ok) {
+        memoryNewInput.value = "";
+        await loadMemoryPanel();
+        setMemoryStatus("Souvenir ajouté.");
+    } else {
+        setMemoryStatus("Impossible d’ajouter ce souvenir.");
+    }
+});
+
+memoryRefreshBtn?.addEventListener("click", async () => {
+    setMemoryStatus("Analyse des conversations…");
+    const response = await fetch(`${API_BASE}/memory/refresh`, {
+        method: "POST",
+    });
+    if (response.ok) {
+        await loadMemoryPanel();
+        setMemoryStatus("Mémoire actualisée.");
+    } else {
+        setMemoryStatus("Actualisation impossible.");
+    }
+});
 
 // Floating Scroll to Bottom Handler
 const scrollToBottomBtn = document.getElementById("scrollToBottomBtn");
@@ -554,11 +827,11 @@ if (chatMessages && scrollToBottomBtn) {
 // Auto-Resizing Textarea Handler
 function autoResizeTextarea(textarea) {
     if (!textarea) return;
-    textarea.style.height = "24px";
+    textarea.style.height = "34px";
     const scrollH = textarea.scrollHeight;
-    const newHeight = Math.min(scrollH, 200);
+    const newHeight = Math.max(34, Math.min(scrollH, 180));
     textarea.style.height = `${newHeight}px`;
-    if (scrollH > 200) {
+    if (scrollH > 180) {
         textarea.style.overflowY = "auto";
     } else {
         textarea.style.overflowY = "hidden";
@@ -569,7 +842,21 @@ if (chatInput) {
     chatInput.addEventListener("input", () => autoResizeTextarea(chatInput));
 }
 
-let activeAbortController = null;
+const streamControllers = new Map();
+
+function currentStreamKey() {
+    return currentSessionId || currentDocumentScopeId;
+}
+
+function activeControllerForCurrentConversation() {
+    return streamControllers.get(currentStreamKey()) || null;
+}
+
+function refreshSendButtonState() {
+    setSendButtonState(
+        activeControllerForCurrentConversation() ? "stop" : "send"
+    );
+}
 
 function setSendButtonState(state) {
     if (!sendChatBtn) return;
@@ -597,10 +884,11 @@ function setSendButtonState(state) {
 if (sendChatBtn) {
     sendChatBtn.addEventListener("click", (e) => {
         if (e) e.preventDefault();
-        if (activeAbortController) {
-            activeAbortController.abort();
-            activeAbortController = null;
-            setSendButtonState("send");
+        const controller = activeControllerForCurrentConversation();
+        if (controller) {
+            controller.abort();
+            streamControllers.delete(currentStreamKey());
+            refreshSendButtonState();
             return;
         }
         sendChatMessage();
@@ -611,7 +899,7 @@ if (chatInput) {
     chatInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (activeAbortController) return; // Don't trigger new send if already streaming
+            if (activeControllerForCurrentConversation()) return;
             sendChatMessage();
         }
     });
@@ -682,6 +970,33 @@ function renderGeneratedImageCard(bubbleDiv, imageUrl, promptText) {
     if (zoomButton) zoomButton.addEventListener("click", () => openImageViewer(safeImageUrl));
 }
 
+function renderAssistantProgressively(
+    bubble,
+    text,
+    webResults,
+    reasoningDuration,
+    final = false
+) {
+    const render = (container, latestText) => {
+        renderFullAssistantMessage(
+            container,
+            latestText,
+            webResults,
+            reasoningDuration
+        );
+    };
+    if (window.LasmeProgressiveRenderer) {
+        window.LasmeProgressiveRenderer.schedule(
+            bubble,
+            text,
+            render,
+            { final }
+        );
+    } else {
+        render(bubble, text);
+    }
+}
+
 async function sendChatMessage() {
     const text = chatInput.value.trim();
     if (!text && !attachedImageBase64) return;
@@ -701,6 +1016,8 @@ async function sendChatMessage() {
 
     // Track target session ID for background execution
     const streamSessionId = currentSessionId;
+    const initialStreamKey = streamSessionId || currentDocumentScopeId;
+    if (streamControllers.has(initialStreamKey)) return;
 
     // Append User Message with Image Preview
     const userPromptText = text || "Analyse cette image.";
@@ -711,6 +1028,7 @@ async function sendChatMessage() {
         userMsgObj.images = [currentImageB64];
     }
     conversationHistory.push(userMsgObj);
+    const streamConversationHistory = conversationHistory;
 
     // Append Assistant Container with Animated Pulsing Dots
     const assistantBubble = appendMessage("assistant", "...");
@@ -719,10 +1037,24 @@ async function sendChatMessage() {
     
     let reasoningDuration = null;
 
-    activeAbortController = new AbortController();
-    setSendButtonState("stop");
+    const streamController = new AbortController();
+    let streamKey = initialStreamKey;
+    streamControllers.set(streamKey, streamController);
+    refreshSendButtonState();
 
     let activeSessionIdForStream = currentSessionId;
+    const isStreamVisible = () => {
+        if (activeSessionIdForStream) {
+            return currentSessionId === activeSessionIdForStream;
+        }
+        if (streamSessionId) {
+            return currentSessionId === streamSessionId;
+        }
+        return (
+            currentSessionId === null
+            && currentDocumentScopeId === initialStreamKey
+        );
+    };
     if (activeSessionIdForStream) {
         activeStreamingSessions.add(activeSessionIdForStream);
         loadSessions();
@@ -730,8 +1062,8 @@ async function sendChatMessage() {
 
     try {
         // Strip heavy base64 image strings from older turns to keep HTTP payload light
-        const cleanHistory = conversationHistory.map((m, idx) => {
-            if (idx === conversationHistory.length - 1) return m;
+        const cleanHistory = streamConversationHistory.map((m, idx) => {
+            if (idx === streamConversationHistory.length - 1) return m;
             const { images, ...rest } = m;
             return rest;
         });
@@ -740,7 +1072,7 @@ async function sendChatMessage() {
         const resp = await fetch(`${API_BASE}/chat/stream`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            signal: activeAbortController.signal,
+            signal: streamController.signal,
             body: JSON.stringify({
                 session_id: streamSessionId,
                 document_scope_id: currentDocumentScopeId,
@@ -785,15 +1117,31 @@ async function sendChatMessage() {
                 try {
                     const parsed = JSON.parse(dataStr);
                     if (parsed.session_id) {
-                        const wasNew = !activeSessionIdForStream;
                         activeSessionIdForStream = parsed.session_id;
                         activeStreamingSessions.add(parsed.session_id);
-                        if (wasNew || currentSessionId === streamSessionId) {
+                        if (streamKey !== parsed.session_id) {
+                            if (streamControllers.get(streamKey) === streamController) {
+                                streamControllers.delete(streamKey);
+                            }
+                            streamKey = parsed.session_id;
+                            streamControllers.set(streamKey, streamController);
+                        }
+                        const shouldActivateSession = streamSessionId
+                            ? currentSessionId === streamSessionId
+                            : (
+                                currentSessionId === null
+                                && currentDocumentScopeId === initialStreamKey
+                            );
+                        if (shouldActivateSession) {
                             currentSessionId = parsed.session_id;
                             currentDocumentScopeId = parsed.session_id;
                             localStorage.setItem("active_session_id", parsed.session_id);
+                            refreshSendButtonState();
                         }
                         loadSessions();
+                    }
+                    if (parsed.type === "session" && parsed.context_meta) {
+                        updateContextUsage(parsed.context_meta);
                     }
                     if (parsed.web_results && parsed.web_results.length > 0) {
                         webResultsMeta = parsed.web_results;
@@ -803,7 +1151,35 @@ async function sendChatMessage() {
                             assistantBubble,
                             "web",
                             "active",
-                            "Recherche sur le Web"
+                            parsed.message || "Recherche sur le Web"
+                        );
+                    }
+                    if (parsed.type === "tool_start") {
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "web",
+                            "active",
+                            parsed.message || "Consultation de données structurées"
+                        );
+                    }
+                    if (parsed.type === "tool_done" && parsed.status !== "ok") {
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "web",
+                            "warning",
+                            "Données structurées indisponibles",
+                            "Bascule vers la recherche Web"
+                        );
+                    }
+                    if (parsed.type === "web_extract_done") {
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "web",
+                            "active",
+                            parsed.message || "Pages analysées",
+                            parsed.verified_count
+                                ? `${parsed.verified_count} source(s) vérifiée(s)`
+                                : ""
                         );
                     }
                     if (parsed.type === "web_search_done") {
@@ -815,9 +1191,11 @@ async function sendChatMessage() {
                             "web",
                             parsed.status === "ok" ? "done" : "warning",
                             parsed.status === "ok"
-                                ? `${parsed.result_count} sources consultées`
+                                ? `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
                                 : "Recherche Web indisponible",
-                            parsed.search_query || ""
+                            parsed.status === "ok" && parsed.candidate_count
+                                ? `${parsed.candidate_count} résultats évalués · ${parsed.search_query || ""}`
+                                : parsed.search_query || ""
                         );
                     }
                     if (parsed.type === "reasoning_start") {
@@ -863,24 +1241,29 @@ async function sendChatMessage() {
                         );
                     }
                     if (parsed.type === "image_start") {
-                        if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
+                        if (isStreamVisible()) {
                             renderDalleLoaderCard(assistantBubble);
                             chatMessages.scrollTop = chatMessages.scrollHeight;
                         }
                     }
                     if (parsed.type === "image_done" && parsed.image_url) {
                         fullResponse = `![${parsed.prompt}](${parsed.image_url})`;
-                        if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
+                        if (isStreamVisible()) {
                             renderGeneratedImageCard(assistantBubble, parsed.image_url, parsed.prompt);
                             chatMessages.scrollTop = chatMessages.scrollHeight;
                         }
                     }
                     if (parsed.content) {
-                        fullResponse += parsed.content;
+                        fullResponse = cleanModelText(fullResponse + parsed.content);
 
                         // Only render to active UI if user is still on this conversation
-                        if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
-                            renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
+                        if (isStreamVisible()) {
+                            renderAssistantProgressively(
+                                assistantBubble,
+                                fullResponse,
+                                webResultsMeta,
+                                reasoningDuration
+                            );
                             chatMessages.scrollTop = chatMessages.scrollHeight;
                         }
                     }
@@ -895,10 +1278,23 @@ async function sendChatMessage() {
             sseBuffer += remaining;
         }
 
-        if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
-            renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
+        if (isStreamVisible()) {
+            renderAssistantProgressively(
+                assistantBubble,
+                fullResponse,
+                webResultsMeta,
+                reasoningDuration,
+                true
+            );
         }
-        conversationHistory.push({ role: "assistant", content: fullResponse });
+        streamConversationHistory.push({ role: "assistant", content: fullResponse });
+        if (activeSessionIdForStream && fullResponse) {
+            void loadSuggestedQuestions(
+                activeSessionIdForStream,
+                inputModelSelect ? inputModelSelect.value : "gemma-4-chat",
+                assistantBubble
+            );
+        }
 
     } catch (err) {
         if (err.name === "AbortError") {
@@ -907,12 +1303,12 @@ async function sendChatMessage() {
             } else {
                 fullResponse = "*(Génération arrêtée par l'utilisateur)*";
             }
-            if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
+            if (isStreamVisible()) {
                 renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
             }
-            conversationHistory.push({ role: "assistant", content: fullResponse });
+            streamConversationHistory.push({ role: "assistant", content: fullResponse });
         } else {
-            if (currentSessionId === activeSessionIdForStream || !currentSessionId) {
+            if (isStreamVisible()) {
                 assistantBubble.textContent = `Erreur : ${err.message || "connexion au serveur local impossible"}`;
                 assistantBubble.style.color = "#EF4444";
             }
@@ -921,8 +1317,13 @@ async function sendChatMessage() {
         if (activeSessionIdForStream) {
             activeStreamingSessions.delete(activeSessionIdForStream);
         }
-        activeAbortController = null;
-        setSendButtonState("send");
+        if (streamControllers.get(streamKey) === streamController) {
+            streamControllers.delete(streamKey);
+        }
+        if (streamControllers.get(initialStreamKey) === streamController) {
+            streamControllers.delete(initialStreamKey);
+        }
+        refreshSendButtonState();
         loadSessions();
     }
 }
@@ -961,6 +1362,32 @@ function appendMessage(role, text, imageUrl = null) {
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return bubbleDiv;
+}
+
+function cleanModelText(value) {
+    const replacements = new Map([
+        ["â€™", "’"],
+        ["â€˜", "‘"],
+        ["â€œ", "“"],
+        ["â€", "”"],
+        ["â€“", "–"],
+        ["â€”", "—"],
+        ["Â·", "·"],
+        ["Â", ""],
+    ]);
+    let text = String(value || "").normalize("NFC").replaceAll("\uFFFD", "");
+    replacements.forEach((replacement, broken) => {
+        text = text.replaceAll(broken, replacement);
+    });
+    return Array.from(text).filter(character => {
+        if (/[\n\r\t]/u.test(character)) return true;
+        if (/[\p{Cc}\p{Cf}]/u.test(character)) return false;
+        if (/\p{L}/u.test(character)) {
+            // Greek letters are valid mathematical symbols (α, β, ε, …).
+            return /[A-Za-z\u00C0-\u024F\u0370-\u03FF\u1E00-\u1EFF]/u.test(character);
+        }
+        return true;
+    }).join("");
 }
 
 function escapeHtml(value) {
@@ -1026,6 +1453,7 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
 // Render only the final answer. Raw chain-of-thought is intentionally hidden;
 // the UI receives structured activity events and a short process summary.
 function renderFullAssistantMessage(container, rawText, webResults, thinkingDuration = null) {
+    rawText = cleanModelText(rawText);
     let thinkingContent = "";
     let mainAnswer = (rawText || "")
         .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -1179,53 +1607,26 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
     }
 }
 
-// Master Bulletproof Rich Content Renderer (Markdown + KaTeX Auto-Render)
+// Rich content renderer (Markdown + resilient KaTeX rendering).
 function renderRichContent(container, text, webResults) {
     if (!text) {
         container.innerHTML = "";
         return;
     }
 
-    let processedText = text;
-
-    // ── STEP 0: Normalize alternate LaTeX delimiters into $$ / $ ──────────
-    // \[ ... \]  →  $$ ... $$
-    processedText = processedText.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) =>
-        "\n\n$$ " + math.trim().replace(/\n/g, " ") + " $$\n\n"
-    );
-    // \( ... \)  →  $ ... $
-    processedText = processedText.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) =>
-        " $" + math.trim().replace(/\n/g, " ") + "$ "
-    );
-
-    // ── STEP 1: Extract & protect display blocks $$ ... $$ BEFORE Marked ──
-    const displayMathBlocks = [];
-    processedText = processedText.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
-        const idx = displayMathBlocks.length;
-        displayMathBlocks.push(math.trim().replace(/\n/g, " "));
-        return `\n\nLATEXDISPLAY${idx}ENDLATEX\n\n`;
-    });
-
-    // ── STEP 2: Extract & protect inline math $ ... $ BEFORE Marked ───────
-    const inlineMathBlocks = [];
-    processedText = processedText.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
-        const idx = inlineMathBlocks.length;
-        inlineMathBlocks.push(math.trim());
-        return `LATEXINLINE${idx}ENDLATEX`;
-    });
-
-    // ── STEP 3: Render Markdown (Marked.js sees no $ signs now) ───────────
-    let html = typeof marked !== "undefined" ? marked.parse(processedText) : processedText;
-
-    // ── STEP 4: Restore display math blocks ───────────────────────────────
-    html = html.replace(/LATEXDISPLAY(\d+)ENDLATEX/g, (_, idx) =>
-        `<span class="katex-display-wrap">$$${displayMathBlocks[parseInt(idx)]}$$</span>`
-    );
-
-    // ── STEP 5: Restore inline math ───────────────────────────────────────
-    html = html.replace(/LATEXINLINE(\d+)ENDLATEX/g, (_, idx) =>
-        `$${inlineMathBlocks[parseInt(idx)]}$`
-    );
+    const preparedMath = window.LasmeMath
+        ? window.LasmeMath.prepareForMarkdown(text)
+        : { text, math: [] };
+    let html = typeof marked !== "undefined"
+        ? marked.parse(preparedMath.text)
+        : escapeHtml(preparedMath.text);
+    if (window.LasmeMath) {
+        html = window.LasmeMath.restoreAfterMarkdown(
+            html,
+            preparedMath.math,
+            escapeHtml
+        );
+    }
 
     // ── STEP 6: Web source pill badges ────────────────────────────────────
     if (webResults && webResults.length > 0) {
@@ -1296,13 +1697,21 @@ function renderRichContent(container, text, webResults) {
         try {
             renderMathInElement(container, {
                 delimiters: [
+                    { left: "\\[", right: "\\]", display: true },
                     { left: "$$", right: "$$", display: true },
-                    { left: "$",  right: "$",  display: false }
+                    { left: "\\(", right: "\\)", display: false },
+                    { left: "$", right: "$", display: false }
                 ],
                 throwOnError: false,
-                errorColor: "#CC0000"
+                errorColor: "#6B7280",
+                strict: false,
+                trust: false,
+                macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
+                ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
             });
-        } catch (e) {}
+        } catch (error) {
+            console.warn("Unable to render a LaTeX fragment:", error);
+        }
     }
 
 

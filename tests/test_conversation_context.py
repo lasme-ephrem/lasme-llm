@@ -5,6 +5,8 @@ from pathlib import Path
 from chat.server.main import (
     ChatMessage,
     _fallback_contextual_search_query,
+    clean_model_text,
+    is_simple_factual_lookup,
     should_enable_reasoning,
     should_perform_web_search,
 )
@@ -42,6 +44,38 @@ class ConversationContextTests(unittest.TestCase):
                 has_conversation_context=True,
             )
         )
+
+    def test_current_event_follow_up_inherits_web_search(self):
+        messages = [
+            ChatMessage(
+                role="user",
+                content="Qui est le vainqueur récent de la Coupe du monde ?",
+            ),
+            ChatMessage(
+                role="assistant",
+                content="L'Espagne a remporté la Coupe du monde 2026 [1].",
+            ),
+            ChatMessage(
+                role="user",
+                content="Comment s'est déroulé le match ?",
+            ),
+        ]
+        self.assertTrue(
+            should_perform_web_search(
+                messages[-1].content,
+                user_toggle_enabled=True,
+                has_conversation_context=True,
+                mode="auto",
+                conversation_messages=messages,
+            )
+        )
+
+    def test_generated_text_removes_foreign_script_and_mojibake(self):
+        self.assertEqual(
+            clean_model_text("privilégiant laសervation"),
+            "privilégiant laervation",
+        )
+        self.assertEqual(clean_model_text("Lâ€™équipe"), "L’équipe")
 
     def test_greeting_never_triggers_search(self):
         self.assertFalse(
@@ -86,6 +120,18 @@ class ConversationContextTests(unittest.TestCase):
                 has_external_context=True,
             ),
             "medium",
+        )
+
+    def test_simple_web_fact_never_uses_slow_reasoning(self):
+        query = "Qui est le dernier vainqueur de la Coupe du monde ?"
+        self.assertTrue(is_simple_factual_lookup(query))
+        self.assertFalse(
+            should_enable_reasoning(
+                query,
+                model="gemma-4-fable",
+                requested_level="balanced",
+                has_external_context=True,
+            )
         )
 
     def test_reasoning_levels_map_to_ollama_effort(self):
