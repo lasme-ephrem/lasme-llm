@@ -2,6 +2,6 @@ Lasme LLM
 Copyright 2026 lasme-ephrem
 
 The conversation, search, memory, and interface features in this repository
-were implemented independently. No source code from Proton Lumo is included.
-Publicly observable product ideas and architectural patterns may have informed
-the design; all implementation code remains original to this project.
+were designed and implemented independently. All application implementation
+code remains original to this project. Third-party components retain their
+respective license and attribution notices.
