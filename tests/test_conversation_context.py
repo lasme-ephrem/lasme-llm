@@ -36,6 +36,20 @@ class ConversationContextTests(unittest.TestCase):
         self.assertIn("vainqueur de la coupe du monde", query.lower())
         self.assertIn("informations à jour", query.lower())
 
+    def test_multi_turn_follow_up_keeps_root_topic(self):
+        messages = [
+            ChatMessage(role="user", content="Qui a gagné la Coupe du monde ?"),
+            ChatMessage(role="assistant", content="L'Espagne [1]."),
+            ChatMessage(role="user", content="Comment s'est passée la finale ?"),
+            ChatMessage(role="assistant", content="Elle s'est terminée 1-0 [1]."),
+            ChatMessage(role="user", content="Et le meilleur buteur ?"),
+        ]
+
+        query = _fallback_contextual_search_query(messages)
+
+        self.assertIn("coupe du monde", query.lower())
+        self.assertIn("meilleur buteur", query.lower())
+
     def test_feedback_triggers_search_when_conversation_has_context(self):
         self.assertTrue(
             should_perform_web_search(
@@ -170,6 +184,13 @@ class ConversationContextTests(unittest.TestCase):
         self.assertTrue(
             should_perform_web_search(
                 "Quelle est la dernière version disponible ?",
+                user_toggle_enabled=True,
+                mode="auto",
+            )
+        )
+        self.assertTrue(
+            should_perform_web_search(
+                "Qui est le vainqueur de la Coupe du monde ?",
                 user_toggle_enabled=True,
                 mode="auto",
             )

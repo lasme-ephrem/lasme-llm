@@ -43,7 +43,7 @@ from core.security import (
 )
 from coding.agent import LasmeCodingAgent
 
-app = FastAPI(title="LLM-lasme API", version="0.7.0")
+app = FastAPI(title="LLM-lasme API", version="0.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -194,10 +194,13 @@ def _fallback_contextual_search_query(messages: List[ChatMessage]) -> str:
     )
     if follow_up_pattern.search(last_msg) or len(last_msg.split()) <= 6:
         today = datetime.date.today().isoformat()
+        # Keep several user turns so a chain such as “who won?” → “how was the
+        # match?” → “top scorer?” does not lose the original competition.
+        topic_history = " | ".join(previous_user_prompts[-3:])
         return (
-            f"{previous_user_prompts[-1]}. "
+            f"Contexte du sujet : {topic_history}. "
             f"Relance utilisateur : {last_msg}. Informations à jour au {today}"
-        )
+        )[:600]
 
     return last_msg
 
@@ -363,6 +366,14 @@ def should_perform_web_search(
         "cherche", "recherche", "internet", "web", "source", "sources",
         "vérifie", "verifie", "confirme", "lien", "url",
     }
+    competitive_markers = {
+        "vainqueur", "vainqueurs", "gagnant", "gagnante", "champion",
+        "championne", "finale", "buteur", "buteuse", "classement",
+    }
+    competition_markers = {
+        "coupe", "mondial", "monde", "fifa", "uefa", "tournoi",
+        "championnat", "ligue", "nba", "nfl",
+    }
     follow_up_markers = {
         "alors", "maintenant", "et", "faux", "incorrect", "vérifie", "verifie",
         "comment", "pourquoi", "quand", "où", "ou", "ensuite",
@@ -371,6 +382,11 @@ def should_perform_web_search(
     if re.search(r"https?://", query, flags=re.IGNORECASE):
         return True
     if word_set.intersection(live_markers | explicit_markers):
+        return True
+    if (
+        word_set.intersection(competitive_markers)
+        and word_set.intersection(competition_markers)
+    ):
         return True
     if (
         has_conversation_context
@@ -1124,6 +1140,9 @@ async def chat_stream(req: ChatRequest):
         stream_messages = [dict(message) for message in messages_payload]
         local_search_query = search_query
         web_results_data = []
+        provider_answer = ""
+        answer_mode = None
+        answer_provider = None
         web_status = "disabled" if not user_toggle else (
             "skipped" if not web_search_needed else "pending"
         )
@@ -1174,15 +1193,53 @@ async def chat_stream(req: ChatRequest):
                 search_report = await asyncio.to_thread(
                     search_extract_verify,
                     local_search_query,
+                    conversation_messages=[
+                        {
+                            "role": message.role,
+                            "content": message.content,
+                        }
+                        for message in req.messages
+                    ],
                 )
             web_results_data = search_report.get("results", [])
+            provider_answer = str(
+                search_report.get("provider_answer") or ""
+            ).strip()
+            answer_mode = search_report.get("answer_mode")
+            answer_provider = search_report.get("engine")
             web_status = search_report.get("status", "unavailable")
             search_strategy = search_report.get("strategy", {})
             extracted_count = int(search_strategy.get("extracted_count", 0))
             verified_count = int(search_strategy.get("verified_count", 0))
             if extracted_count:
                 yield f"data: {json.dumps({'type': 'web_extract_done', 'message': f'{extracted_count} page(s) analysée(s)', 'extracted_count': extracted_count, 'verified_count': verified_count})}\n\n"
-            yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': 'Sources Web pertinentes vérifiées' if web_results_data else 'Recherche Web indisponible', 'search_query': local_search_query, 'engine': search_report.get('engine'), 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
+            yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': 'Réponse Web vérifiée' if answer_mode == 'provider' else ('Sources Web pertinentes vérifiées' if web_results_data else 'Recherche Web indisponible'), 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
+
+        if answer_mode == "provider" and provider_answer:
+            # Sonar's response is already grounded and its [n] markers align
+            # with web_results_data. Do not make the local model paraphrase it.
+            full_assistant_reply = unicodedata.normalize(
+                "NFC",
+                provider_answer,
+            ).replace("\ufffd", "")
+            yield f"data: {json.dumps({'type': 'content_delta', 'content': full_assistant_reply})}\n\n"
+            db.add_message(session_id, "assistant", full_assistant_reply)
+            asyncio.create_task(
+                async_update_conversation_memory(session_id, selected_model)
+            )
+            asyncio.create_task(async_update_personal_memory(selected_model))
+            provider_usage = search_report.get("usage", {})
+            yield f"data: {json.dumps({'type': 'generation_stats', 'provider': answer_provider, 'prompt_tokens': int(provider_usage.get('prompt_tokens') or 0), 'output_tokens': int(provider_usage.get('completion_tokens') or 0), 'tokens_per_second': None, 'done_reason': 'provider_answer'})}\n\n"
+            if is_new_session and last_user_msg:
+                asyncio.create_task(
+                    async_generate_and_update_title(
+                        session_id,
+                        last_user_msg,
+                        selected_model,
+                    )
+                )
+            yield "data: [DONE]\n\n"
+            return
 
         web_context = (
             "\n\n" + format_search_results(web_results_data)

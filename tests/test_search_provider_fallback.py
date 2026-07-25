@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import core.tools.web_search as web_search
 
@@ -18,6 +18,72 @@ def _official_world_cup_result(engine: str):
 
 
 class SequentialSearchProviderTests(unittest.TestCase):
+    def test_sonar_preserves_citation_order_and_conversation_context(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [
+                {"message": {"content": "Réponse actuelle [1] puis [2]."}}
+            ],
+            "citations": [
+                "https://www.uefa.com/article",
+                "https://www.fifa.com/article",
+            ],
+            "search_results": [
+                {
+                    "title": "Première source",
+                    "url": "https://www.fifa.com/article",
+                    "snippet": "Premier extrait.",
+                },
+                {
+                    "title": "Deuxième source",
+                    "url": "https://www.uefa.com/article",
+                    "snippet": "Deuxième extrait.",
+                },
+            ],
+        }
+        http = MagicMock()
+        http.__enter__.return_value.post.return_value = response
+
+        with (
+            patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.httpx, "Client", return_value=http),
+        ):
+            report = web_search._search_with_sonar(
+                "Et le meilleur buteur ?",
+                [],
+                8,
+                conversation_messages=[
+                    {
+                        "role": "user",
+                        "content": "Qui a gagné la Coupe du monde ?",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "Ancienne réponse potentiellement fausse.",
+                    },
+                ],
+            )
+
+        payload = http.__enter__.return_value.post.call_args.kwargs["json"]
+        self.assertTrue(
+            any(
+                "Coupe du monde" in message["content"]
+                for message in payload["messages"]
+            )
+        )
+        self.assertEqual(report["answer_mode"], "provider")
+        self.assertEqual(
+            [item["url"] for item in report["results"]],
+            [
+                "https://www.uefa.com/article",
+                "https://www.fifa.com/article",
+            ],
+        )
+        self.assertEqual(
+            [item["citation_index"] for item in report["results"]],
+            [1, 2],
+        )
+
     def test_sonar_success_stops_before_tavily_and_duckduckgo(self):
         tavily = Mock()
         with (
@@ -27,7 +93,11 @@ class SequentialSearchProviderTests(unittest.TestCase):
                 "_search_with_sonar",
                 return_value={
                     "results": [_official_world_cup_result("Perplexity Sonar")],
-                    "answer": "Spain won.",
+                    "provider_answer": "L'Espagne a gagné [1].",
+                    "provider_citations": [
+                        "https://www.fifa.com/tournaments/world-cup/2026/final"
+                    ],
+                    "answer_mode": "provider",
                     "usage": {},
                 },
             ) as sonar,
@@ -45,6 +115,12 @@ class SequentialSearchProviderTests(unittest.TestCase):
         sonar.assert_called_once()
         tavily.search.assert_not_called()
         self.assertEqual(report["engine"], "Perplexity Sonar")
+        self.assertEqual(report["answer_mode"], "provider")
+        self.assertEqual(report["provider_answer"], "L'Espagne a gagné [1].")
+        self.assertEqual(
+            report["strategy"]["stop_reason"],
+            "provider_answer",
+        )
         self.assertEqual(
             report["strategy"]["provider_attempts"][0]["status"],
             "ok",
@@ -67,6 +143,7 @@ class SequentialSearchProviderTests(unittest.TestCase):
         }
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search,
                 "_search_with_sonar",
@@ -93,6 +170,43 @@ class SequentialSearchProviderTests(unittest.TestCase):
             "quota_or_rate_limit",
         )
         self.assertEqual(
+            report["strategy"]["provider_attempts"][2]["status"],
+            "ok",
+        )
+
+    def test_sonar_quota_falls_back_to_searxng_before_tavily(self):
+        tavily = Mock()
+        with (
+            patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "searxng_enabled", True),
+            patch.object(
+                web_search,
+                "_search_with_sonar",
+                side_effect=web_search.SonarSearchError(
+                    "quota_or_rate_limit",
+                    429,
+                ),
+            ),
+            patch.object(
+                web_search,
+                "_search_with_searxng",
+                return_value=[_official_world_cup_result("SearXNG")],
+            ) as searxng,
+            patch.object(web_search, "tavily_client", tavily),
+            patch.object(
+                web_search,
+                "DDGS",
+                side_effect=AssertionError("DuckDuckGo should not run"),
+            ),
+        ):
+            report = web_search.search_web_detailed(
+                "Qui est le dernier vainqueur de la Coupe du monde ?"
+            )
+
+        searxng.assert_called_once()
+        tavily.search.assert_not_called()
+        self.assertEqual(report["engine"], "SearXNG")
+        self.assertEqual(
             report["strategy"]["provider_attempts"][1]["status"],
             "ok",
         )
@@ -113,6 +227,7 @@ class SequentialSearchProviderTests(unittest.TestCase):
         ]
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search,
                 "_search_with_sonar",

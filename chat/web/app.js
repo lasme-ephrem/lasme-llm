@@ -1240,9 +1240,15 @@ async function sendChatMessage() {
                             "web",
                             parsed.status === "ok" ? "done" : "warning",
                             parsed.status === "ok"
-                                ? `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
+                                ? (
+                                    parsed.answer_mode === "provider"
+                                        ? `Réponse vérifiée par ${parsed.answer_provider || parsed.engine || "le Web"}`
+                                        : `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
+                                )
                                 : "Recherche Web indisponible",
-                            parsed.status === "ok" && parsed.candidate_count
+                            parsed.answer_mode === "provider"
+                                ? `${parsed.result_count || 0} source${parsed.result_count > 1 ? "s" : ""} citée${parsed.result_count > 1 ? "s" : ""}`
+                                : parsed.status === "ok" && parsed.candidate_count
                                 ? `${parsed.candidate_count} résultats évalués · ${parsed.search_query || ""}`
                                 : parsed.search_query || ""
                         );
@@ -1266,14 +1272,19 @@ async function sendChatMessage() {
                         );
                     }
                     if (parsed.type === "generation_stats") {
-                        const detail = parsed.tokens_per_second
-                            ? `${parsed.output_tokens || 0} tokens · ${parsed.tokens_per_second} tok/s`
-                            : `${parsed.output_tokens || 0} tokens générés`;
+                        const isProviderAnswer = Boolean(parsed.provider);
+                        const detail = isProviderAnswer
+                            ? "Réponse et citations conservées sans réécriture locale"
+                            : parsed.tokens_per_second
+                                ? `${parsed.output_tokens || 0} tokens · ${parsed.tokens_per_second} tok/s`
+                                : `${parsed.output_tokens || 0} tokens générés`;
                         renderAssistantActivity(
                             assistantBubble,
                             "generation",
                             "done",
-                            "Génération terminée",
+                            isProviderAnswer
+                                ? `Réponse ${parsed.provider}`
+                                : "Génération terminée",
                             detail
                         );
                     }

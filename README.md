@@ -83,18 +83,34 @@ Le bouton Web possède trois états :
 - `Web` : recherche forcée, sauf pour une salutation triviale ;
 - `Web off` : aucune requête externe.
 
-Lorsque les clés correspondantes sont définies, les fournisseurs sont essayés
-dans cet ordre : Perplexity Sonar, Tavily, puis DuckDuckGo. Un fournisseur
-suivant n’est sollicité que si le précédent est indisponible, à court de quota
-ou ne renvoie pas de preuves suffisantes. L’orchestrateur classe les candidats,
-extrait le contenu des meilleures pages dans un délai borné, puis reclasse les
-preuves réellement disponibles. Le nombre de sources varie donc selon la
-difficulté et la qualité des résultats, au lieu d’être fixé arbitrairement à
-quatre.
+Les fournisseurs sont essayés dans cet ordre : Perplexity Sonar, SearXNG local,
+Tavily, puis DuckDuckGo. Un fournisseur suivant n’est sollicité que si le
+précédent est indisponible, à court de quota ou ne renvoie pas de preuves
+suffisantes.
+
+Quand Sonar fournit une réponse sourcée, l’application conserve directement
+son texte et l’ordre exact de ses citations : Gemma ne la paraphrase plus. Le
+fil récent de la conversation est transmis pour comprendre correctement les
+relances, mais les anciennes réponses ne sont jamais considérées comme des
+faits fiables. Pour les autres fournisseurs, l’orchestrateur classe les
+candidats, extrait le contenu principal des meilleures pages avec Trafilatura
+dans un délai borné, puis confie ces preuves à Gemma. Le nombre de sources varie
+donc selon la difficulté et la qualité des résultats.
 
 Configurer `PERPLEXITY_API_KEY` pour Sonar et `TAVILY_API_KEY` pour Tavily.
 `PERPLEXITY_SONAR_MODEL` permet de changer le modèle Sonar ; la valeur par
 défaut est `sonar`.
+
+SearXNG est facultatif et désactivé par défaut. Après installation de Docker :
+
+```powershell
+$env:SEARXNG_SECRET = "une-valeur-locale-longue-et-aleatoire"
+docker compose -f infra/searxng/compose.yaml up -d
+```
+
+Définir ensuite `SEARXNG_ENABLED=true` dans `.env` puis redémarrer le backend.
+Le service n’écoute que sur `127.0.0.1:8080`. SearXNG reste un composant externe
+AGPL-3.0 appelé par HTTP ; aucun de ses fichiers source n’est inclus ici.
 
 Les demandes de météo, de cours boursiers et de crypto-actifs peuvent utiliser
 des API structurées avant la recherche Web générale. Les URL locales, privées
