@@ -2,6 +2,28 @@
 
 Application locale de chat et d’assistance au développement basée sur Ollama.
 
+<p align="center">
+  <img
+    src="docs/assets/lasme-llm-demo.gif"
+    alt="Démonstration de Lasme LLM : recherche Web, streaming, sources et formule LaTeX"
+    width="960"
+  >
+</p>
+
+<p align="center">
+  <em>Recherche Web, réponse en streaming, citations et rendu LaTeX — démonstration locale accélérée.</em>
+</p>
+
+<details>
+  <summary>Afficher une capture statique</summary>
+  <br>
+  <img
+    src="docs/assets/lasme-llm-grounded-chat.png"
+    alt="Réponse scientifique sourcée avec formule de diffusion de Rayleigh"
+    width="960"
+  >
+</details>
+
 ## Architecture
 
 ```text
