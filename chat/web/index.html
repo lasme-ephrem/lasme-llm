@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://cdn.jsdelivr.net; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://cdn.jsdelivr.net; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Lasme LLM</title>
@@ -15,8 +15,8 @@
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
     
-    <!-- KaTeX Math CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <!-- KaTeX is local so math and its fonts also work without Internet. -->
+    <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.16.9">
     
     <!-- Highlight.js Code Dark Theme -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/tokyo-night-dark.min.css">
@@ -28,8 +28,8 @@
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <script src="vendor/katex/katex.min.js?v=0.16.9"></script>
+    <script src="vendor/katex/contrib/auto-render.min.js?v=0.16.9"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10.8.0/dist/mermaid.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/twemoji@14.0.2/dist/twemoji.min.js" crossorigin="anonymous"></script>
 </head>
@@ -105,6 +105,16 @@
                 </div>
 
                 <div class="header-controls">
+                    <button type="button" id="memorySettingsBtn" class="theme-toggle-btn memory-settings-btn" title="Mémoire personnelle">
+                        <span class="theme-icon-svg">
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 3a3 3 0 0 0-3 3v1a3 3 0 0 0-2 5.2A3 3 0 0 0 6 17v1a3 3 0 0 0 3 3"></path>
+                                <path d="M15 3a3 3 0 0 1 3 3v1a3 3 0 0 1 2 5.2A3 3 0 0 1 18 17v1a3 3 0 0 1-3 3"></path>
+                                <path d="M9 3v18M15 3v18M9 8h6M9 16h6"></path>
+                            </svg>
+                        </span>
+                        <span class="theme-label">Mémoire</span>
+                    </button>
                     <!-- Theme Toggle Button -->
                     <button type="button" id="themeToggleBtn" class="theme-toggle-btn" title="Changer de thème">
                         <span class="theme-icon-svg">
@@ -339,7 +349,13 @@
                                 </button>
                             </div>
                         </div>
-                        <div class="input-disclaimer">Lasme LLM propulsé localement sur RTX 4070 Ti SUPER.</div>
+                        <div class="composer-meta-row">
+                            <div id="contextUsageIndicator" class="context-usage" title="Part du contexte de conversation utilisée">
+                                <span class="context-usage-track"><span id="contextUsageBar" class="context-usage-bar"></span></span>
+                                <span id="contextUsageLabel">Contexte prêt</span>
+                            </div>
+                            <div class="input-disclaimer">Lasme LLM propulsé localement sur RTX 4070 Ti SUPER.</div>
+                        </div>
                     </div>
             </section>
         </main>
@@ -362,6 +378,39 @@
                 </a>
             </div>
         </div>
+    </div>
+
+    <!-- Mémoire personnelle : toujours visible, modifiable et désactivable. -->
+    <div id="memoryModal" class="memory-modal" style="display:none;" aria-hidden="true">
+        <div id="memoryModalOverlay" class="memory-modal-overlay"></div>
+        <section class="memory-modal-panel" role="dialog" aria-modal="true" aria-labelledby="memoryModalTitle">
+            <header class="memory-modal-header">
+                <div>
+                    <h2 id="memoryModalTitle">Mémoire personnelle</h2>
+                    <p>Vous gardez le contrôle sur ce que l’assistant retient entre les conversations.</p>
+                </div>
+                <button type="button" id="closeMemoryModalBtn" class="memory-close-btn" aria-label="Fermer">&times;</button>
+            </header>
+            <div class="memory-modal-body">
+                <label class="memory-setting-row">
+                    <span><strong>Utiliser la mémoire</strong><small>Ajoute les éléments actifs au contexte lorsqu’ils sont utiles.</small></span>
+                    <input type="checkbox" id="memoryEnabledToggle" checked>
+                </label>
+                <label class="memory-setting-row">
+                    <span><strong>Mémorisation automatique</strong><small>Analyse périodiquement vos préférences durables, jamais vos secrets.</small></span>
+                    <input type="checkbox" id="memoryAutoSaveToggle" checked>
+                </label>
+                <div class="memory-add-row">
+                    <input id="memoryNewInput" type="text" maxlength="300" placeholder="Ex. Je préfère les réponses concises en français.">
+                    <button type="button" id="memoryAddBtn">Ajouter</button>
+                </div>
+                <div id="memoryList" class="memory-list"></div>
+            </div>
+            <footer class="memory-modal-footer">
+                <span id="memoryStatus" aria-live="polite"></span>
+                <button type="button" id="memoryRefreshBtn" class="memory-refresh-btn">Actualiser depuis les conversations</button>
+            </footer>
+        </section>
     </div>
 
     <!-- MODAL: Selection de Projet pour Nouvelle Conversation -->
@@ -446,6 +495,8 @@
         </div>
     </div>
 
-    <script src="app.js?v=20260725-context-reasoning"></script>
+    <script src="math-renderer.js?v=20260725-latex"></script>
+    <script src="progressive-renderer.js?v=20260725-cleanroom"></script>
+    <script src="app.js?v=20260725-memory-search"></script>
 </body>
 </html>

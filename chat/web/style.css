@@ -816,6 +816,32 @@ body {
     margin-bottom: 0.75rem;
 }
 
+/* KaTeX owns formula typography; the application font must not leak into it. */
+.message.assistant .bubble .katex {
+    color: inherit;
+    font-size: 1.08em;
+    text-rendering: optimizeLegibility;
+}
+
+.message.assistant .bubble .katex-display {
+    max-width: 100%;
+    margin: 0.9rem 0;
+    padding: 0.25rem 0.1rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+}
+
+.message.assistant .bubble .katex-display > .katex {
+    min-width: max-content;
+    text-align: center;
+}
+
+.message.assistant .bubble .katex-error {
+    color: var(--text-secondary) !important;
+    font-family: KaTeX_Main, "Times New Roman", serif;
+}
+
 /* Markdown Tables */
 .bubble table {
     width: 100%;
@@ -3128,4 +3154,251 @@ body {
     padding: 6px 10px;
     font-size: 0.76rem;
     color: #38bdf8;
+}
+/* Context, suggestions and personal memory (clean-room UX layer). */
+.composer-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 22px;
+    padding: 4px 10px 0;
+}
+
+.context-usage {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: #7a7a7a;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.context-usage-track {
+    width: 44px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(120, 120, 120, 0.18);
+}
+
+.context-usage-bar {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: #10a37f;
+    transition: width 240ms ease, background-color 240ms ease;
+}
+
+.context-usage.medium .context-usage-bar { background: #d97706; }
+.context-usage.high .context-usage-bar { background: #dc2626; }
+
+.suggested-questions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.suggested-question {
+    border: 1px solid rgba(120, 120, 120, 0.22);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 150ms ease, background 150ms ease;
+}
+
+.suggested-question:hover {
+    border-color: #10a37f;
+    background: rgba(16, 163, 127, 0.07);
+}
+
+.memory-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+}
+
+.memory-modal-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 15, 25, 0.48);
+    backdrop-filter: blur(5px);
+}
+
+.memory-modal-panel {
+    position: relative;
+    width: min(620px, 100%);
+    max-height: min(760px, 90vh);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid rgba(120, 120, 120, 0.22);
+    border-radius: 22px;
+    background: #fff;
+    color: #171717;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.24);
+}
+
+[data-theme="dark"] .memory-modal-panel {
+    background: #202123;
+    color: #f4f4f4;
+}
+
+.memory-modal-header,
+.memory-modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 20px 22px;
+}
+
+.memory-modal-header {
+    border-bottom: 1px solid rgba(120, 120, 120, 0.16);
+}
+
+.memory-modal-header h2 {
+    margin: 0 0 4px;
+    font-size: 1.08rem;
+}
+
+.memory-modal-header p {
+    margin: 0;
+    color: #737373;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.memory-close-btn {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 1.7rem;
+    cursor: pointer;
+}
+
+.memory-modal-body {
+    display: grid;
+    gap: 12px;
+    overflow-y: auto;
+    padding: 18px 22px;
+}
+
+.memory-setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 13px 15px;
+    border-radius: 14px;
+    background: rgba(120, 120, 120, 0.08);
+}
+
+.memory-setting-row span {
+    display: grid;
+    gap: 3px;
+}
+
+.memory-setting-row small {
+    color: #777;
+    line-height: 1.35;
+}
+
+.memory-setting-row input {
+    width: 18px;
+    height: 18px;
+    accent-color: #10a37f;
+}
+
+.memory-add-row,
+.memory-item {
+    display: flex;
+    gap: 8px;
+}
+
+.memory-add-row input,
+.memory-item input {
+    min-width: 0;
+    flex: 1;
+    border: 1px solid rgba(120, 120, 120, 0.24);
+    border-radius: 12px;
+    background: transparent;
+    color: inherit;
+    padding: 10px 12px;
+    font: inherit;
+}
+
+.memory-add-row button,
+.memory-item button,
+.memory-refresh-btn {
+    border: 1px solid rgba(120, 120, 120, 0.22);
+    border-radius: 10px;
+    background: transparent;
+    color: inherit;
+    padding: 9px 12px;
+    cursor: pointer;
+}
+
+.memory-add-row button,
+.memory-refresh-btn {
+    border-color: #10a37f;
+    color: #087f63;
+}
+
+.memory-list {
+    display: grid;
+    gap: 8px;
+}
+
+.memory-item {
+    align-items: center;
+}
+
+.memory-item.disabled {
+    opacity: 0.55;
+}
+
+.memory-source {
+    flex: 0 0 auto;
+    color: #777;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+}
+
+.memory-modal-footer {
+    border-top: 1px solid rgba(120, 120, 120, 0.16);
+    color: #777;
+    font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+    .memory-settings-btn .theme-label,
+    .composer-meta-row .input-disclaimer {
+        display: none;
+    }
+
+    .composer-meta-row {
+        justify-content: flex-start;
+    }
+
+    .memory-modal {
+        align-items: end;
+        padding: 0;
+    }
+
+    .memory-modal-panel {
+        width: 100%;
+        max-height: 88vh;
+        border-radius: 22px 22px 0 0;
+    }
 }

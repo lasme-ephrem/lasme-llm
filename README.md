@@ -9,9 +9,10 @@ Navigateur
    │ HTTP + SSE
    ▼
 FastAPI — http://127.0.0.1:8000
-   ├── conversations et mémoire SQLite
+   ├── conversations, compaction et mémoire personnelle SQLite
    ├── RAG persistant, isolé par conversation
-   ├── recherche Web : Tavily → DuckDuckGo
+   ├── recherche Web : recherche → extraction → vérification
+   ├── données structurées : météo, actions et crypto
    ├── génération d’images externe facultative
    └── espace de développement local sécurisé
              │
@@ -61,7 +62,28 @@ Le bouton Web possède trois états :
 - `Web off` : aucune requête externe.
 
 Tavily est utilisé lorsque `TAVILY_API_KEY` est défini. DuckDuckGo prend
-automatiquement le relais. Les URL locales, privées et réservées sont bloquées.
+automatiquement le relais. L’orchestrateur classe les candidats, extrait le
+contenu des meilleures pages dans un délai borné, puis reclasse les preuves
+réellement disponibles. Le nombre de sources varie donc selon la difficulté et
+la qualité des résultats, au lieu d’être fixé arbitrairement à quatre.
+
+Les demandes de météo, de cours boursiers et de crypto-actifs peuvent utiliser
+des API structurées avant la recherche Web générale. Les URL locales, privées
+et réservées restent bloquées.
+
+## Mémoire et continuité
+
+Deux niveaux complémentaires évitent de renvoyer tout l’historique au modèle :
+
+- une compaction progressive propre à chaque conversation conserve les
+  décisions, corrections, contraintes et tâches en cours ;
+- une mémoire personnelle inter-conversations retient uniquement des
+  préférences durables.
+
+La mémoire personnelle est consultable depuis l’en-tête. Chaque élément peut
+être corrigé, désactivé ou supprimé, et l’enregistrement automatique peut être
+coupé entièrement. Les anciens extraits Web et documents ne sont jamais
+recopiés tels quels dans les résumés.
 
 ## Raisonnement
 
@@ -89,7 +111,13 @@ la latence perçue :
   conservant la recherche pour les relances liées à un sujet actuel ;
 - les tâches secondaires comme le titre et la mémoire sont exécutées sans
   bloquer le flux principal ;
-- les événements SSE sont affichés progressivement dès leur réception.
+- les événements SSE sont affichés progressivement dès leur réception ;
+- le rendu Markdown est regroupé par trames pour éviter un recalcul coûteux à
+  chaque token ;
+- chaque conversation possède son propre contrôleur de génération : changer de
+  conversation n’interrompt plus automatiquement le flux précédent ;
+- l’interface affiche l’occupation du contexte et propose trois relances
+  facultatives après une réponse.
 
 Sur la configuration de référence — RTX 4070 Ti SUPER 16 Go — le débit observé
 se situe généralement autour de 45 à 60 tokens par seconde. Ce chiffre dépend
@@ -151,3 +179,11 @@ Un test comparatif manuel des deux modèles est disponible avec :
 
 Les dossiers `python_academy`, `pylearn`, `app` et `templates` sont des
 prototypes séparés. Ils ne sont pas démarrés par l’application de chat.
+
+## Licence
+
+Ce projet original est distribué sous
+[Apache License 2.0](LICENSE), une licence permissive qui inclut une concession
+explicite de brevets. Les fonctionnalités inspirées par l’observation de
+produits open source ont été réimplémentées indépendamment : aucun code source
+de Proton Lumo n’est inclus. Voir [NOTICE](NOTICE).

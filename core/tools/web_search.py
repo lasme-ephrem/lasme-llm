@@ -1,11 +1,20 @@
 import logging
 import re
+import datetime
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Any
 import httpx
 from ddgs import DDGS
 from core.config import settings
 from core.security import validate_public_http_url
+from core.tools.search_ranking import (
+    WINNER_MARKERS,
+    VERSION_MARKERS,
+    adaptive_select_results,
+    build_search_plan,
+    normalize_search_text,
+    search_terms,
+)
 
 logger = logging.getLogger("WebSearch")
 MAX_PAGE_BYTES = 1_000_000
@@ -30,6 +39,14 @@ OFFICIAL_DOMAIN_RULES = (
     (("jeux olympiques", "olympics"), ("olympics.com",)),
     (("nba",), ("nba.com",)),
     (("nfl",), ("nfl.com",)),
+    (("python",), ("python.org",)),
+    (("github",), ("github.com",)),
+    (("hugging face", "huggingface"), ("huggingface.co",)),
+    (("ollama",), ("ollama.com",)),
+    (("openai", "chatgpt"), ("openai.com",)),
+    (("microsoft", "windows", "azure"), ("microsoft.com", "learn.microsoft.com")),
+    (("google", "gemini"), ("google.com", "ai.google.dev")),
+    (("apple", "iphone", "macos"), ("apple.com",)),
 )
 
 # Initialize Tavily client if API key is provided
@@ -42,7 +59,7 @@ if settings.tavily_api_key:
     except Exception as e:
         logger.warning(f"Could not initialize TavilyClient: {e}")
 
-def fetch_url_content(url: str, timeout: int = 8) -> str:
+def fetch_url_content(url: str, timeout: int = 8, max_chars: int = 30_000) -> str:
     """Fetch public text pages while blocking SSRF and oversized responses."""
     try:
         current_url = validate_public_http_url(url.split("#")[0])
@@ -101,7 +118,7 @@ def fetch_url_content(url: str, timeout: int = 8) -> str:
                         flags=re.DOTALL | re.IGNORECASE,
                     )
                     text = re.sub(r"<.*?>", " ", text)
-                    return " ".join(text.split())[:4500]
+                    return " ".join(text.split())[:max(1, min(max_chars, 100_000))]
             raise ValueError("Too many redirects.")
     except Exception as e:
         logger.error(f"Error fetching URL {url}: {e}")
@@ -119,6 +136,10 @@ def clean_query_text(query: str) -> str:
         r"réponds[- ]moi",
         r"peux[- ]tu",
         r"s'il te plaît",
+        r"c['’]est faux",
+        r"tu te trompes",
+        r"relance utilisateur\s*:",
+        r"informations à jour au \d{4}-\d{2}-\d{2}",
         r"voici le lien",
         r"clique ici",
         r"cherche"
@@ -176,10 +197,54 @@ def _official_domains_for_query(query: str) -> List[str]:
             domains.extend(candidates)
     return list(dict.fromkeys(domains))
 
-def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
-    """Search the live Web and return results plus an observable health status."""
-    results = []
+
+def _focused_official_query(query: str, official_domains: List[str]) -> str:
+    """Turn conversational wording into an answer-oriented official query."""
+    terms = search_terms(query)
+    year = datetime.date.today().year
+    if terms.intersection(WINNER_MARKERS):
+        if "fifa.com" in official_domains:
+            return f"latest FIFA World Cup champion final result {year}"
+        if "uefa.com" in official_domains:
+            return f"latest UEFA champion final result {year}"
+        if "nba.com" in official_domains:
+            return f"latest NBA champion finals winner {year}"
+        if "nfl.com" in official_domains:
+            return f"latest NFL Super Bowl champion winner {year}"
+        return f"{query} latest champion final result {year}"
+    if terms.intersection(VERSION_MARKERS):
+        return f"{query} official stable release documentation"
+    if any(
+        marker in normalize_search_text(query).split()
+        for marker in ("actuel", "actuelle", "dernier", "derniere", "recent")
+    ):
+        return f"{query} official announcement {year}"
+    return query
+
+def _adaptive_report(
+    candidates: List[Dict[str, Any]],
+    query: str,
+    official_domains: List[str],
+    max_results: int | None,
+) -> Dict[str, Any]:
+    return adaptive_select_results(
+        candidates,
+        query,
+        official_domains=official_domains,
+        low_signal_domains=LOW_SIGNAL_DOMAINS,
+        max_results=max_results,
+    )
+
+
+def search_web_detailed(
+    query: str,
+    max_results: int | None = None,
+) -> Dict[str, Any]:
+    """Search, rerank and stop once enough independent evidence is available."""
+    candidates: List[Dict[str, Any]] = []
     errors: List[str] = []
+    engines_used: List[str] = []
+    search_rounds: List[Dict[str, Any]] = []
     
     # 1. Detect explicit URLs in the prompt
     urls = [
@@ -190,18 +255,31 @@ def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
         for url in urls[:2]:
             page_text = fetch_url_content(url)
             if page_text:
-                results.append({
+                candidates.append({
                     "title": f"Contenu de la page Web : {url}",
                     "snippet": page_text,
                     "url": url,
-                    "engine": "Direct Scraper"
+                    "engine": "Direct Scraper",
+                    "engine_score": 1.0,
                 })
-        if results:
+        if candidates:
+            selected = _adaptive_report(
+                candidates,
+                query,
+                [],
+                max_results=max_results,
+            )
             return {
                 "status": "ok",
                 "engine": "Direct Scraper",
-                "results": results,
+                "results": selected["results"],
                 "errors": errors,
+                "strategy": {
+                    **selected["strategy"],
+                    "official_domains": [],
+                    "search_rounds": 1,
+                    "queries": [query],
+                },
             }
 
     cleaned_query = clean_query_text(query)
@@ -213,26 +291,66 @@ def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
             "errors": errors,
         }
 
-    # 2. Try Tavily AI Search (Primary)
-    if tavily_client:
-        try:
-            logger.info(f"Executing Tavily AI Search for query: '{cleaned_query}'")
-            excluded_domains = [
-                domain
-                for domain in LOW_SIGNAL_DOMAINS
-                if not _query_requests_domain(cleaned_query, domain)
-            ]
-            official_domains = _official_domains_for_query(cleaned_query)
-            search_attempts = []
-            if official_domains:
-                search_attempts.append({"include_domains": official_domains})
-            search_attempts.append({"exclude_domains": excluded_domains})
+    official_domains = _official_domains_for_query(cleaned_query)
+    plan = build_search_plan(
+        cleaned_query,
+        official_domains,
+        max_results=max_results,
+    )
+    selected = _adaptive_report(
+        candidates,
+        cleaned_query,
+        official_domains,
+        max_results=max_results,
+    )
 
-            for domain_filter in search_attempts:
+    # 2. Tavily: official-first when possible, then a broader retrieval pass.
+    if tavily_client:
+        excluded_domains = [
+            domain
+            for domain in LOW_SIGNAL_DOMAINS
+            if not _query_requests_domain(cleaned_query, domain)
+        ]
+        search_attempts = []
+        if official_domains:
+            search_attempts.append(
+                (
+                    "official",
+                    _focused_official_query(cleaned_query, official_domains),
+                    {"include_domains": official_domains},
+                )
+            )
+        search_attempts.append(
+            (
+                "broad",
+                cleaned_query,
+                {"exclude_domains": excluded_domains},
+            )
+        )
+        if not official_domains and plan["temporal"]:
+            search_attempts.append(
+                (
+                    "authority",
+                    f"{cleaned_query} official documentation",
+                    {"exclude_domains": excluded_domains},
+                )
+            )
+
+        for round_name, round_query, domain_filter in search_attempts:
+            if selected["strategy"]["sufficient"]:
+                break
+            try:
+                logger.info(
+                    "Executing Tavily %s search for query: %r",
+                    round_name,
+                    round_query,
+                )
                 res = tavily_client.search(
-                    query=cleaned_query,
-                    max_results=min(20, max_results + 2),
-                    search_depth="basic",
+                    query=round_query,
+                    max_results=plan["candidate_limit"],
+                    search_depth=(
+                        "advanced" if plan["complex"] else "basic"
+                    ),
                     **domain_filter,
                 )
                 tavily_results = res.get("results", [])
@@ -246,57 +364,100 @@ def search_web_detailed(query: str, max_results: int = 4) -> Dict[str, Any]:
                         and content
                         and (
                             not isinstance(relevance, (int, float))
-                            or relevance >= 0.35
+                            or relevance >= 0.15
                         )
                     ):
-                        results.append({
+                        candidates.append({
                             "title": title,
                             "snippet": content,
                             "url": url,
-                            "engine": "Tavily AI"
+                            "engine": "Tavily AI",
+                            "engine_score": relevance,
                         })
-                results = _select_quality_results(
-                    results,
-                    cleaned_query,
-                    max_results,
-                )
-                if results:
-                    return {
-                        "status": "ok",
+                engines_used.append("Tavily AI")
+                search_rounds.append(
+                    {
                         "engine": "Tavily AI",
-                        "results": results,
-                        "errors": errors,
+                        "kind": round_name,
+                        "query": round_query,
+                        "returned": len(tavily_results),
                     }
-        except Exception as e:
-            errors.append(f"Tavily: {type(e).__name__}: {e}")
-            logger.error(f"Tavily AI Search failed for '{cleaned_query}': {e}. Falling back to DuckDuckGo...")
+                )
+                selected = _adaptive_report(
+                    candidates,
+                    cleaned_query,
+                    official_domains,
+                    max_results=max_results,
+                )
+            except Exception as e:
+                errors.append(f"Tavily: {type(e).__name__}: {e}")
+                logger.error(
+                    "Tavily %s search failed for %r: %s",
+                    round_name,
+                    cleaned_query,
+                    e,
+                )
 
-    # 3. Fallback: DuckDuckGo Search
-    try:
-        logger.info(f"Executing DuckDuckGo Search for query: '{cleaned_query}'")
-        ddgs_client = DDGS()
-        raw_results = list(ddgs_client.text(cleaned_query, max_results=max_results))
-        for item in raw_results:
-            title = item.get("title", "").strip()
-            body = item.get("body", "").strip()
-            url = item.get("href", "").strip()
-            if title and body:
-                results.append({
-                    "title": title,
-                    "snippet": body,
-                    "url": url,
-                    "engine": "DuckDuckGo"
-                })
-        results = _select_quality_results(results, cleaned_query, max_results)
-    except Exception as e:
-        errors.append(f"DuckDuckGo: {type(e).__name__}: {e}")
-        logger.error(f"DuckDuckGo Search failed for '{cleaned_query}': {e}")
+    # 3. DuckDuckGo is an adaptive second engine, not merely a blind fallback.
+    if not selected["strategy"]["sufficient"]:
+        try:
+            logger.info(
+                "Evidence is incomplete; executing DuckDuckGo for %r",
+                cleaned_query,
+            )
+            ddgs_client = DDGS()
+            raw_results = list(
+                ddgs_client.text(
+                    cleaned_query,
+                    max_results=plan["candidate_limit"],
+                )
+            )
+            for item in raw_results:
+                title = item.get("title", "").strip()
+                body = item.get("body", "").strip()
+                url = item.get("href", "").strip()
+                if title and body and url:
+                    candidates.append({
+                        "title": title,
+                        "snippet": body,
+                        "url": url,
+                        "engine": "DuckDuckGo",
+                    })
+            engines_used.append("DuckDuckGo")
+            search_rounds.append(
+                {
+                    "engine": "DuckDuckGo",
+                    "kind": "corroboration",
+                    "query": cleaned_query,
+                    "returned": len(raw_results),
+                }
+            )
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except Exception as e:
+            errors.append(f"DuckDuckGo: {type(e).__name__}: {e}")
+            logger.error(
+                "DuckDuckGo Search failed for %r: %s",
+                cleaned_query,
+                e,
+            )
 
     return {
-        "status": "ok" if results else "unavailable",
-        "engine": "DuckDuckGo" if results else None,
-        "results": results,
+        "status": "ok" if selected["results"] else "unavailable",
+        "engine": " + ".join(dict.fromkeys(engines_used)) or None,
+        "results": selected["results"],
         "errors": errors,
+        "strategy": {
+            **selected["strategy"],
+            "official_domains": official_domains,
+            "search_rounds": len(search_rounds),
+            "queries": [item["query"] for item in search_rounds],
+            "round_details": search_rounds,
+        },
     }
 
 
@@ -319,9 +480,27 @@ def format_search_results(results: List[Dict[str, str]]) -> str:
         ),
     ]
     for idx, r in enumerate(results, 1):
+        source_quality = {
+            "official": "officielle",
+            "trusted": "reconnue",
+            "standard": "pertinente",
+        }.get(r.get("quality"), "pertinente")
+        evidence_kind = r.get("evidence_kind", "search_snippet")
+        evidence_label = {
+            "page_extract": "contenu extrait de la page source",
+            "structured_api": "donnée structurée fournie par une API",
+            "search_snippet": "extrait du moteur de recherche uniquement",
+        }.get(evidence_kind, "extrait Web")
+        verification_label = (
+            "vérifiée"
+            if r.get("verified")
+            else "non vérifiée par extraction"
+        )
         formatted.append(
             f"<source id=\"{idx}\" url=\"{r['url']}\">\n"
             f"Titre: {r['title']}\n"
+            f"Type: Source {source_quality}, classée au rang {idx}\n"
+            f"Preuve: {evidence_label} ({verification_label})\n"
             f"Extrait: {r['snippet']}\n"
             f"</source>\n"
         )

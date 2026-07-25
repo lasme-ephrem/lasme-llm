@@ -6,6 +6,7 @@ from chat.server.main import (
     ChatMessage,
     _fallback_contextual_search_query,
     clean_model_text,
+    is_simple_factual_lookup,
     should_enable_reasoning,
     should_perform_web_search,
 )
@@ -119,6 +120,18 @@ class ConversationContextTests(unittest.TestCase):
                 has_external_context=True,
             ),
             "medium",
+        )
+
+    def test_simple_web_fact_never_uses_slow_reasoning(self):
+        query = "Qui est le dernier vainqueur de la Coupe du monde ?"
+        self.assertTrue(is_simple_factual_lookup(query))
+        self.assertFalse(
+            should_enable_reasoning(
+                query,
+                model="gemma-4-fable",
+                requested_level="balanced",
+                has_external_context=True,
+            )
         )
 
     def test_reasoning_levels_map_to_ollama_effort(self):
