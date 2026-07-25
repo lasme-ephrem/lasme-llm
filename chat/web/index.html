@@ -22,7 +22,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/tokyo-night-dark.min.css">
     
     <!-- App Custom CSS -->
-    <link rel="stylesheet" href="style.css?v=20260725-context-reasoning">
+    <link rel="stylesheet" href="style.css?v=20260725-mobile-popovers">
     
     <!-- Markdown & Renderers CDN Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
@@ -242,7 +242,7 @@
 
                                 <!-- Model Selection Popover Menu -->
                                 <div class="intelligence-picker" id="modelPickerContainer">
-                                    <button type="button" class="intelligence-trigger" id="modelPickerTrigger">
+                                    <button type="button" class="intelligence-trigger" id="modelPickerTrigger" aria-expanded="false">
                                         <span class="intel-trigger-icon" id="modelTriggerIcon">⚡</span>
                                         <span class="intel-label" id="selectedModelName">Gemma 4 Chat</span>
                                         <svg class="intel-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -497,6 +497,6 @@
 
     <script src="math-renderer.js?v=20260725-latex"></script>
     <script src="progressive-renderer.js?v=20260725-cleanroom"></script>
-    <script src="app.js?v=20260725-memory-search"></script>
+    <script src="app.js?v=20260725-mobile-popovers"></script>
 </body>
 </html>

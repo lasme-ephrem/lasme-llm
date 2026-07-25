@@ -17,6 +17,7 @@ coverage.xml
 htmlcov/
 
 # Runtime state
+.runtime/
 lasme_llm.db
 lasme_llm.db-*
 database.db

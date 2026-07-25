@@ -36,6 +36,13 @@ class RemoteAPISecurityTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+    def test_favicon_proxy_rejects_non_domain_targets(self):
+        response = self.client.get("/favicons/127.0.0.1")
+        self.assertEqual(response.status_code, 400)
+
+        response = self.client.get("/favicons/not-a-domain")
+        self.assertEqual(response.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

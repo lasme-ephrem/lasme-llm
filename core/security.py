@@ -45,7 +45,19 @@ def request_has_valid_token(request: Request) -> bool:
             supplied = authorization[7:].strip()
     if not supplied:
         supplied = request.cookies.get("lasme_access_token", "").strip()
+    if not supplied:
+        supplied = request.query_params.get("token", "").strip()
     return bool(supplied) and secrets.compare_digest(supplied, configured)
+
+
+def request_has_valid_query_token(request: Request) -> bool:
+    configured = settings.access_token.strip()
+    supplied = request.query_params.get("token", "").strip()
+    return (
+        bool(configured)
+        and bool(supplied)
+        and secrets.compare_digest(supplied, configured)
+    )
 
 
 def resolve_workspace_path(path: str | Path = ".") -> Path:

@@ -7,7 +7,6 @@ const initialUrl = new URL(window.location.href);
 const queryAccessToken = initialUrl.searchParams.get("token");
 if (queryAccessToken) {
     sessionStorage.setItem("lasme_access_token", queryAccessToken);
-    document.cookie = `lasme_access_token=${encodeURIComponent(queryAccessToken)}; Path=/; SameSite=Strict${window.location.protocol === "https:" ? "; Secure" : ""}`;
     initialUrl.searchParams.delete("token");
     window.history.replaceState({}, document.title, initialUrl.toString());
 }
@@ -90,11 +89,59 @@ const reasoningPickerTrigger = document.getElementById("reasoningPickerTrigger")
 const reasoningPickerDropdown = document.getElementById("reasoningPickerDropdown");
 const selectedReasoningName = document.getElementById("selectedReasoningName");
 
+const mobilePickerMedia = window.matchMedia("(max-width: 768px)");
+
+function positionMobilePicker(dropdown) {
+    if (!dropdown) return;
+
+    if (!mobilePickerMedia.matches) {
+        dropdown.style.removeProperty("--mobile-picker-bottom");
+        dropdown.style.removeProperty("--mobile-picker-max-height");
+        return;
+    }
+
+    const composer = document.querySelector(".chat-input-container");
+    if (!composer) return;
+
+    const composerRect = composer.getBoundingClientRect();
+    const visibleViewportHeight = window.visualViewport?.height || window.innerHeight;
+    const visibleViewportTop = window.visualViewport?.offsetTop || 0;
+    const visibleViewportBottom = visibleViewportTop + visibleViewportHeight;
+    const composerTop = Math.min(composerRect.top, visibleViewportBottom);
+    const gap = 10;
+    const edgeMargin = 12;
+    const bottomOffset = Math.max(
+        edgeMargin,
+        window.innerHeight - composerTop + gap
+    );
+    const availableHeight = Math.max(
+        160,
+        Math.min(420, composerTop - visibleViewportTop - edgeMargin - gap)
+    );
+
+    dropdown.style.setProperty("--mobile-picker-bottom", `${bottomOffset}px`);
+    dropdown.style.setProperty("--mobile-picker-max-height", `${availableHeight}px`);
+}
+
+function refreshOpenMobilePickers() {
+    [modelPickerDropdown, reasoningPickerDropdown].forEach((dropdown) => {
+        if (dropdown?.classList.contains("open")) {
+            positionMobilePicker(dropdown);
+        }
+    });
+}
+
+window.addEventListener("resize", refreshOpenMobilePickers, { passive: true });
+window.addEventListener("orientationchange", refreshOpenMobilePickers, { passive: true });
+window.visualViewport?.addEventListener("resize", refreshOpenMobilePickers, { passive: true });
+window.visualViewport?.addEventListener("scroll", refreshOpenMobilePickers, { passive: true });
+
 if (modelPickerTrigger && modelPickerDropdown) {
     modelPickerTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
         if (reasoningPickerDropdown) reasoningPickerDropdown.classList.remove("open");
         if (reasoningPickerTrigger) reasoningPickerTrigger.setAttribute("aria-expanded", "false");
+        positionMobilePicker(modelPickerDropdown);
         const isOpen = modelPickerDropdown.classList.toggle("open");
         modelPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
@@ -128,6 +175,7 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
         e.stopPropagation();
         if (modelPickerDropdown) modelPickerDropdown.classList.remove("open");
         if (modelPickerTrigger) modelPickerTrigger.setAttribute("aria-expanded", "false");
+        positionMobilePicker(reasoningPickerDropdown);
         const isOpen = reasoningPickerDropdown.classList.toggle("open");
         reasoningPickerTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
     });
@@ -532,7 +580,12 @@ async function selectSession(sessionId) {
                     cleanText = msg.content.replace(/\!\[Image Attachée\]\((.*?)\)\n\n?/, "").trim();
                 }
             }
-            appendMessage(msg.role, cleanText, imgUrl);
+            appendMessage(
+                msg.role,
+                cleanText,
+                imgUrl,
+                msg.metadata?.web_results || []
+            );
             conversationHistory.push({ role: msg.role, content: msg.content });
         });
 
@@ -1191,9 +1244,15 @@ async function sendChatMessage() {
                             "web",
                             parsed.status === "ok" ? "done" : "warning",
                             parsed.status === "ok"
-                                ? `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
+                                ? (
+                                    parsed.answer_mode === "provider"
+                                        ? "Sources Web vérifiées"
+                                        : `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
+                                )
                                 : "Recherche Web indisponible",
-                            parsed.status === "ok" && parsed.candidate_count
+                            parsed.answer_mode === "provider"
+                                ? `${parsed.result_count || 0} source${parsed.result_count > 1 ? "s" : ""} citée${parsed.result_count > 1 ? "s" : ""}`
+                                : parsed.status === "ok" && parsed.candidate_count
                                 ? `${parsed.candidate_count} résultats évalués · ${parsed.search_query || ""}`
                                 : parsed.search_query || ""
                         );
@@ -1219,7 +1278,9 @@ async function sendChatMessage() {
                     if (parsed.type === "generation_stats") {
                         const detail = parsed.tokens_per_second
                             ? `${parsed.output_tokens || 0} tokens · ${parsed.tokens_per_second} tok/s`
-                            : `${parsed.output_tokens || 0} tokens générés`;
+                            : parsed.output_tokens
+                                ? `${parsed.output_tokens} tokens générés`
+                                : "Réponse terminée";
                         renderAssistantActivity(
                             assistantBubble,
                             "generation",
@@ -1329,7 +1390,7 @@ async function sendChatMessage() {
 }
 
 // Append Message with optional image attachment
-function appendMessage(role, text, imageUrl = null) {
+function appendMessage(role, text, imageUrl = null, webResults = []) {
     const msgDiv = document.createElement("div");
     msgDiv.className = `message ${role}`;
 
@@ -1354,7 +1415,7 @@ function appendMessage(role, text, imageUrl = null) {
         if (text === "...") {
             bubbleDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
         } else if (text) {
-            renderFullAssistantMessage(bubbleDiv, text, []);
+            renderFullAssistantMessage(bubbleDiv, text, webResults);
         }
     }
 
@@ -1559,46 +1620,92 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
                 sourcesDrawer = document.createElement("div");
                 sourcesDrawer.className = "sources-drawer-container";
 
-                const countStr = webResults.length > 1 ? `${webResults.length} Sources consultées` : `1 Source consultée`;
+                const countStr = webResults.length > 1 ? `${webResults.length} sources` : `1 source`;
+                const sourceMeta = webResults
+                    .map(result => {
+                        const safeUrl = safeHttpUrl(result.url);
+                        if (!safeUrl) return null;
+                        try {
+                            const parsedUrl = new URL(safeUrl, window.location.origin);
+                            const domain = parsedUrl.hostname.replace(/^www\./, "");
+                            const domainParts = domain.split(".");
+                            const lastTwoLabels = domainParts.slice(-2).join(".");
+                            const multiPartSuffixes = new Set([
+                                "co.uk", "org.uk", "com.au", "com.br",
+                                "co.jp", "co.kr", "com.cn", "com.mx", "co.in"
+                            ]);
+                            const registrableLabelCount = (
+                                multiPartSuffixes.has(lastTwoLabels) ? 3 : 2
+                            );
+                            const faviconDomain = domainParts.length > registrableLabelCount
+                                ? domainParts.slice(-registrableLabelCount).join(".")
+                                : domain;
+                            return {
+                                result,
+                                safeUrl,
+                                domain,
+                                faviconDomain,
+                                faviconUrl: `/favicons/${encodeURIComponent(faviconDomain)}`,
+                                initial: (faviconDomain[0] || "S").toUpperCase()
+                            };
+                        } catch (error) {
+                            return null;
+                        }
+                    })
+                    .filter(Boolean);
+                const uniqueFaviconSources = [];
+                const seenFaviconDomains = new Set();
+                sourceMeta.forEach(item => {
+                    if (
+                        uniqueFaviconSources.length < 3
+                        && !seenFaviconDomains.has(item.faviconDomain)
+                    ) {
+                        seenFaviconDomains.add(item.faviconDomain);
+                        uniqueFaviconSources.push(item);
+                    }
+                });
+                const faviconStack = uniqueFaviconSources.map(item => `
+                    <span class="source-favicon-shell" title="${escapeHtml(item.domain)}">
+                        <span class="source-favicon-fallback">${escapeHtml(item.initial)}</span>
+                        <img class="source-favicon" src="${escapeHtml(item.faviconUrl)}" alt="">
+                    </span>
+                `).join("");
                 
                 sourcesDrawer.innerHTML = `
-                    <div class="sources-drawer-header">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="12" cy="12" r="10"></circle>
-                            <line x1="2" y1="12" x2="22" y2="12"></line>
-                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-                        </svg>
+                    <button type="button" class="sources-drawer-header" aria-expanded="false">
+                        <span class="sources-favicon-stack" aria-hidden="true">
+                            ${faviconStack}
+                        </span>
                         <span>${countStr}</span>
-                        <span class="chevron">▼</span>
-                    </div>
+                    </button>
                     <div class="sources-drawer-body">
-                        ${webResults.map(r => {
-                            let domain = "";
-                            const safeUrl = safeHttpUrl(r.url);
-                            if (!safeUrl) return "";
-                            try { domain = new URL(safeUrl, window.location.origin).hostname.replace('www.', ''); } catch(e) { domain = "source"; }
-                            return `
-                                <a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" class="source-card">
-                                    <span class="source-icon">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <circle cx="12" cy="12" r="10"></circle>
-                                            <line x1="2" y1="12" x2="22" y2="12"></line>
-                                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1 4-10z"></path>
-                                        </svg>
-                                    </span>
-                                    <div class="source-info">
-                                        <div class="source-title">${escapeHtml(r.title || domain)}</div>
-                                        <div class="source-domain">${escapeHtml(domain)}</div>
-                                    </div>
-                                </a>
-                            `;
-                        }).join('')}
+                        ${sourceMeta.map(item => `
+                            <a href="${escapeHtml(item.safeUrl)}" target="_blank" rel="noopener noreferrer" class="source-card">
+                                <span class="source-favicon-shell source-card-favicon">
+                                    <span class="source-favicon-fallback">${escapeHtml(item.initial)}</span>
+                                    <img class="source-favicon" src="${escapeHtml(item.faviconUrl)}" alt="">
+                                </span>
+                                <div class="source-info">
+                                    <div class="source-title">${escapeHtml(item.result.title || item.domain)}</div>
+                                    <div class="source-domain">${escapeHtml(item.domain)}</div>
+                                </div>
+                            </a>
+                        `).join("")}
                     </div>
                 `;
 
                 const drawerHeader = sourcesDrawer.querySelector(".sources-drawer-header");
                 drawerHeader.addEventListener("click", () => {
                     sourcesDrawer.classList.toggle("open");
+                    drawerHeader.setAttribute(
+                        "aria-expanded",
+                        sourcesDrawer.classList.contains("open") ? "true" : "false"
+                    );
+                });
+                sourcesDrawer.querySelectorAll(".source-favicon").forEach(image => {
+                    image.addEventListener("error", () => {
+                        image.classList.add("failed");
+                    }, { once: true });
                 });
 
                 container.appendChild(sourcesDrawer);
@@ -1614,6 +1721,12 @@ function renderRichContent(container, text, webResults) {
         return;
     }
 
+    // Keep citations in the expandable source drawer instead of interrupting
+    // the prose with repeated domain badges.
+    text = text
+        .replace(/(?:\s*\[\d+(?:\s*[,–-]\s*\d+)*\])+/g, "")
+        .replace(/[ \t]+([,.;:!?])/g, "$1");
+
     const preparedMath = window.LasmeMath
         ? window.LasmeMath.prepareForMarkdown(text)
         : { text, math: [] };
@@ -1626,26 +1739,6 @@ function renderRichContent(container, text, webResults) {
             preparedMath.math,
             escapeHtml
         );
-    }
-
-    // ── STEP 6: Web source pill badges ────────────────────────────────────
-    if (webResults && webResults.length > 0) {
-        html = html.replace(/\[(\d+)\]/g, (match, num) => {
-            const index = parseInt(num) - 1;
-            const res = webResults[index];
-            if (res) {
-                try {
-                    const safeUrl = safeHttpUrl(res.url);
-                    if (!safeUrl) return match;
-                    const domain = new URL(safeUrl, window.location.origin).hostname.replace('www.', '');
-                    const label = res.title && res.title.length < 25 ? res.title : domain;
-                    return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" class="chatgpt-source-pill" title="${escapeHtml(res.title || "")}"><span class="pill-title">${escapeHtml(label)}</span></a>`;
-                } catch (e) {
-                    return match;
-                }
-            }
-            return match;
-        });
     }
 
     container.innerHTML = sanitizeHtml(html);

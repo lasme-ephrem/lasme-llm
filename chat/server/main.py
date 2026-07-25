@@ -4,10 +4,11 @@ import asyncio
 import re
 import time
 import unicodedata
+import httpx
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional, Literal
@@ -38,12 +39,14 @@ from core.memory.personal import (
 from core.rag.store import rag_store
 from core.security import (
     is_direct_local_request,
+    request_has_valid_query_token,
     request_has_valid_token,
     resolve_workspace_path,
 )
 from coding.agent import LasmeCodingAgent
 
-app = FastAPI(title="LLM-lasme API", version="0.7.0")
+app = FastAPI(title="LLM-lasme API", version="0.8.0")
+_favicon_cache: Dict[str, tuple[bytes, str]] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +63,7 @@ app.add_middleware(
 @app.middleware("http")
 async def protect_remote_api(request: Request, call_next):
     """Keep local UX frictionless while requiring a token through any tunnel."""
+    valid_query_token = request_has_valid_query_token(request)
     protected_path = (
         request.url.path.startswith("/api/")
         or request.url.path.startswith("/generated_images/")
@@ -88,7 +92,69 @@ async def protect_remote_api(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
+    if valid_query_token:
+        response.set_cookie(
+            key="lasme_access_token",
+            value=settings.access_token.strip(),
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=8 * 60 * 60,
+            path="/",
+        )
     return response
+
+
+@app.get("/favicons/{domain}")
+async def get_site_favicon(domain: str):
+    """Return a cached site icon without exposing a general-purpose proxy."""
+    normalized_domain = domain.strip().casefold().rstrip(".")
+    if not re.fullmatch(
+        r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})",
+        normalized_domain,
+    ):
+        raise HTTPException(status_code=400, detail="Invalid domain.")
+
+    cached = _favicon_cache.get(normalized_domain)
+    if cached:
+        content, media_type = cached
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5, connect=3),
+            follow_redirects=False,
+            trust_env=True,
+        ) as http:
+            response = await http.get(
+                f"https://icons.duckduckgo.com/ip3/{normalized_domain}.ico",
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Favicon unavailable.") from exc
+
+    content = response.content
+    media_type = response.headers.get("content-type", "image/png").split(";")[0]
+    if (
+        not media_type.startswith("image/")
+        or not content
+        or len(content) > 100_000
+    ):
+        raise HTTPException(status_code=502, detail="Invalid favicon response.")
+
+    if len(_favicon_cache) >= 256:
+        _favicon_cache.pop(next(iter(_favicon_cache)))
+    _favicon_cache[normalized_domain] = (content, media_type)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 client = LasmeLLMClient()
@@ -194,10 +260,13 @@ def _fallback_contextual_search_query(messages: List[ChatMessage]) -> str:
     )
     if follow_up_pattern.search(last_msg) or len(last_msg.split()) <= 6:
         today = datetime.date.today().isoformat()
+        # Keep several user turns so a chain such as “who won?” → “how was the
+        # match?” → “top scorer?” does not lose the original competition.
+        topic_history = " | ".join(previous_user_prompts[-3:])
         return (
-            f"{previous_user_prompts[-1]}. "
+            f"Contexte du sujet : {topic_history}. "
             f"Relance utilisateur : {last_msg}. Informations à jour au {today}"
-        )
+        )[:600]
 
     return last_msg
 
@@ -243,6 +312,26 @@ def clean_model_text(value: str) -> str:
                 continue
         cleaned.append(character)
     return "".join(cleaned)
+
+
+def compact_web_source_metadata(
+    results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Persist only the fields needed to restore the compact source drawer."""
+    sources = []
+    for item in (results or [])[:20]:
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title or not url:
+            continue
+        sources.append(
+            {
+                "title": title[:300],
+                "url": url[:2_000],
+                "engine": str(item.get("engine") or "")[:80],
+            }
+        )
+    return {"web_results": sources} if sources else {}
 
 
 async def build_contextual_search_query(
@@ -363,6 +452,15 @@ def should_perform_web_search(
         "cherche", "recherche", "internet", "web", "source", "sources",
         "vérifie", "verifie", "confirme", "lien", "url",
     }
+    competitive_markers = {
+        "vainqueur", "vainqueurs", "gagnant", "gagnante", "champion",
+        "championne", "finale", "buteur", "buteuse", "classement",
+        "gagne", "gagné", "gagnée", "remporte", "remporté", "remportée",
+    }
+    competition_markers = {
+        "coupe", "mondial", "monde", "fifa", "uefa", "tournoi",
+        "championnat", "ligue", "nba", "nfl",
+    }
     follow_up_markers = {
         "alors", "maintenant", "et", "faux", "incorrect", "vérifie", "verifie",
         "comment", "pourquoi", "quand", "où", "ou", "ensuite",
@@ -371,6 +469,19 @@ def should_perform_web_search(
     if re.search(r"https?://", query, flags=re.IGNORECASE):
         return True
     if word_set.intersection(live_markers | explicit_markers):
+        return True
+    current_year = datetime.date.today().year
+    mentions_recent_year = any(
+        int(year) >= current_year - 1
+        for year in re.findall(r"\b(20\d{2})\b", clean_q)
+    )
+    if (
+        (
+            word_set.intersection(competitive_markers)
+            or mentions_recent_year
+        )
+        and word_set.intersection(competition_markers)
+    ):
         return True
     if (
         has_conversation_context
@@ -1124,6 +1235,9 @@ async def chat_stream(req: ChatRequest):
         stream_messages = [dict(message) for message in messages_payload]
         local_search_query = search_query
         web_results_data = []
+        provider_answer = ""
+        answer_mode = None
+        answer_provider = None
         web_status = "disabled" if not user_toggle else (
             "skipped" if not web_search_needed else "pending"
         )
@@ -1174,15 +1288,58 @@ async def chat_stream(req: ChatRequest):
                 search_report = await asyncio.to_thread(
                     search_extract_verify,
                     local_search_query,
+                    conversation_messages=[
+                        {
+                            "role": message.role,
+                            "content": message.content,
+                        }
+                        for message in req.messages
+                    ],
                 )
             web_results_data = search_report.get("results", [])
+            provider_answer = str(
+                search_report.get("provider_answer") or ""
+            ).strip()
+            answer_mode = search_report.get("answer_mode")
+            answer_provider = search_report.get("engine")
             web_status = search_report.get("status", "unavailable")
             search_strategy = search_report.get("strategy", {})
             extracted_count = int(search_strategy.get("extracted_count", 0))
             verified_count = int(search_strategy.get("verified_count", 0))
             if extracted_count:
                 yield f"data: {json.dumps({'type': 'web_extract_done', 'message': f'{extracted_count} page(s) analysée(s)', 'extracted_count': extracted_count, 'verified_count': verified_count})}\n\n"
-            yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': 'Sources Web pertinentes vérifiées' if web_results_data else 'Recherche Web indisponible', 'search_query': local_search_query, 'engine': search_report.get('engine'), 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
+            yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': 'Réponse Web vérifiée' if answer_mode == 'provider' else ('Sources Web pertinentes vérifiées' if web_results_data else 'Recherche Web indisponible'), 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
+
+        if answer_mode == "provider" and provider_answer:
+            # Sonar's response is already grounded and its [n] markers align
+            # with web_results_data. Do not make the local model paraphrase it.
+            full_assistant_reply = unicodedata.normalize(
+                "NFC",
+                provider_answer,
+            ).replace("\ufffd", "")
+            yield f"data: {json.dumps({'type': 'content_delta', 'content': full_assistant_reply})}\n\n"
+            db.add_message(
+                session_id,
+                "assistant",
+                full_assistant_reply,
+                metadata=compact_web_source_metadata(web_results_data),
+            )
+            asyncio.create_task(
+                async_update_conversation_memory(session_id, selected_model)
+            )
+            asyncio.create_task(async_update_personal_memory(selected_model))
+            provider_usage = search_report.get("usage", {})
+            yield f"data: {json.dumps({'type': 'generation_stats', 'provider': answer_provider, 'prompt_tokens': int(provider_usage.get('prompt_tokens') or 0), 'output_tokens': int(provider_usage.get('completion_tokens') or 0), 'tokens_per_second': None, 'done_reason': 'provider_answer'})}\n\n"
+            if is_new_session and last_user_msg:
+                asyncio.create_task(
+                    async_generate_and_update_title(
+                        session_id,
+                        last_user_msg,
+                        selected_model,
+                    )
+                )
+            yield "data: [DONE]\n\n"
+            return
 
         web_context = (
             "\n\n" + format_search_results(web_results_data)
@@ -1293,7 +1450,12 @@ async def chat_stream(req: ChatRequest):
 
         if full_assistant_reply:
             full_assistant_reply = clean_model_text(full_assistant_reply)
-            db.add_message(session_id, "assistant", full_assistant_reply)
+            db.add_message(
+                session_id,
+                "assistant",
+                full_assistant_reply,
+                metadata=compact_web_source_metadata(web_results_data),
+            )
             asyncio.create_task(
                 async_update_conversation_memory(session_id, selected_model)
             )

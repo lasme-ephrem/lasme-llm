@@ -61,6 +61,30 @@ class PersonalMemoryTests(unittest.TestCase):
             is_safe_generated_memory("Je préfère recevoir les réponses en français.")
         )
 
+    def test_message_web_source_metadata_is_persisted(self):
+        session = self.db.create_session()
+        self.db.add_message(
+            session["id"],
+            "assistant",
+            "Réponse sourcée [1].",
+            metadata={
+                "web_results": [
+                    {
+                        "title": "Source officielle",
+                        "url": "https://example.org/source",
+                        "engine": "test",
+                    }
+                ]
+            },
+        )
+
+        messages = self.db.get_session_messages(session["id"])
+
+        self.assertEqual(
+            messages[0]["metadata"]["web_results"][0]["title"],
+            "Source officielle",
+        )
+
 
 class CompactionTests(unittest.TestCase):
     def test_old_external_payloads_are_removed_before_compaction(self):
@@ -122,6 +146,39 @@ class WebOrchestrationTests(unittest.TestCase):
         self.assertEqual(report["strategy"]["verified_count"], 1)
         self.assertTrue(report["results"][0]["verified"])
         self.assertEqual(report["results"][0]["evidence_kind"], "page_extract")
+
+    def test_provider_answer_keeps_citation_order_and_skips_extraction(self):
+        def fake_search(query, max_results, conversation_messages=None):
+            return {
+                "status": "ok",
+                "engine": "Perplexity Sonar",
+                "answer_mode": "provider",
+                "provider_answer": "Réponse vérifiée [1] puis [2].",
+                "results": [
+                    {"title": "Un", "url": "https://one.example", "snippet": "1"},
+                    {"title": "Deux", "url": "https://two.example", "snippet": "2"},
+                ],
+                "strategy": {"scope": "direct"},
+            }
+
+        def forbidden_fetch(url, timeout):
+            raise AssertionError("Provider-grounded answers must not be fetched again")
+
+        report = search_extract_verify(
+            "question actuelle",
+            conversation_messages=[
+                {"role": "user", "content": "question précédente"},
+            ],
+            search_fn=fake_search,
+            fetch_fn=forbidden_fetch,
+        )
+
+        self.assertEqual(report["answer_mode"], "provider")
+        self.assertEqual(report["strategy"]["verified_count"], 2)
+        self.assertEqual(
+            [item["title"] for item in report["results"]],
+            ["Un", "Deux"],
+        )
 
     def test_specialized_intent_detection_is_conservative(self):
         self.assertEqual(

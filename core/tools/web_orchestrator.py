@@ -11,7 +11,7 @@ from core.tools.search_ranking import (
 from core.tools.web_search import fetch_url_content, search_web_detailed
 
 
-SearchFunction = Callable[[str, Optional[int]], Dict[str, Any]]
+SearchFunction = Callable[..., Dict[str, Any]]
 FetchFunction = Callable[[str, int], str]
 
 
@@ -54,6 +54,7 @@ def search_extract_verify(
     query: str,
     max_results: Optional[int] = None,
     deadline_seconds: float = 8.0,
+    conversation_messages: Optional[List[Dict[str, str]]] = None,
     *,
     search_fn: SearchFunction = search_web_detailed,
     fetch_fn: FetchFunction = fetch_url_content,
@@ -65,13 +66,40 @@ def search_extract_verify(
     must never turn a short factual lookup into a minute-long browsing session.
     """
     started = time.monotonic()
-    report = search_fn(query, max_results)
+    try:
+        report = search_fn(
+            query,
+            max_results,
+            conversation_messages=conversation_messages,
+        )
+    except TypeError as exc:
+        # Preserve compatibility with small injected search functions in tests
+        # and extensions which still implement the historical two-arg API.
+        if "conversation_messages" not in str(exc):
+            raise
+        report = search_fn(query, max_results)
     results = list(report.get("results", []))
     strategy = dict(report.get("strategy", {}))
     scope = str(strategy.get("scope", "standard"))
     official_domains = list(strategy.get("official_domains", []))
     extracted_count = 0
     extraction_failures: List[str] = []
+
+    # Sonar already performed retrieval and synthesis. Reordering its sources
+    # would break the [n] citation mapping, and a second extraction pass would
+    # only add latency without improving the provider-grounded response.
+    if report.get("answer_mode") == "provider" and report.get("provider_answer"):
+        return {
+            **report,
+            "strategy": {
+                **strategy,
+                "extracted_count": 0,
+                "verified_count": len(results),
+                "verification_status": "provider_grounded",
+                "elapsed_ms": round((time.monotonic() - started) * 1_000),
+                "stop_reason": "provider_answer",
+            },
+        }
 
     if not results:
         return {

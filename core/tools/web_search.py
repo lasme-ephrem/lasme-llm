@@ -2,7 +2,7 @@ import logging
 import re
 import datetime
 from urllib.parse import urljoin, urlparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import httpx
 from ddgs import DDGS
 from core.config import settings
@@ -18,6 +18,7 @@ from core.tools.search_ranking import (
 
 logger = logging.getLogger("WebSearch")
 MAX_PAGE_BYTES = 1_000_000
+SONAR_API_URL = "https://api.perplexity.ai/v1/sonar"
 ALLOWED_CONTENT_TYPES = (
     "text/",
     "application/json",
@@ -49,6 +50,11 @@ OFFICIAL_DOMAIN_RULES = (
     (("apple", "iphone", "macos"), ("apple.com",)),
 )
 
+try:
+    import trafilatura
+except ImportError:  # pragma: no cover - regex extraction remains available
+    trafilatura = None
+
 # Initialize Tavily client if API key is provided
 tavily_client = None
 if settings.tavily_api_key:
@@ -58,6 +64,255 @@ if settings.tavily_api_key:
         logger.info("Tavily AI Search Engine initialized successfully.")
     except Exception as e:
         logger.warning(f"Could not initialize TavilyClient: {e}")
+
+
+class SonarSearchError(RuntimeError):
+    """Safe provider error that never contains credentials or response bodies."""
+
+    def __init__(self, reason: str, status_code: int | None = None):
+        self.reason = reason
+        self.status_code = status_code
+        status_suffix = f" (HTTP {status_code})" if status_code else ""
+        super().__init__(f"{reason}{status_suffix}")
+
+
+class SearXNGSearchError(RuntimeError):
+    """Safe error raised when the optional local metasearch is unavailable."""
+
+
+def _sonar_error_reason(status_code: int) -> str:
+    if status_code in {402, 429}:
+        return "quota_or_rate_limit"
+    if status_code in {401, 403}:
+        return "authentication_failed"
+    if status_code >= 500:
+        return "provider_unavailable"
+    return "request_rejected"
+
+
+def _search_with_sonar(
+    query: str,
+    official_domains: List[str],
+    candidate_limit: int,
+    conversation_messages: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Retrieve Sonar's grounded answer while preserving citation order."""
+    history: List[Dict[str, str]] = []
+    for item in (conversation_messages or [])[-10:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        history.append({"role": role, "content": content[:1_600]})
+
+    sonar_messages: List[Dict[str, str]] = [
+        {
+            "role": "system",
+            "content": (
+                "Réponds en français à la dernière question de la conversation "
+                "à partir de preuves Web à jour. L'historique sert uniquement "
+                "à résoudre les références et à comprendre le fil : ses "
+                "anciennes réponses peuvent être fausses. Vérifie chaque fait "
+                "actuel, privilégie les sources officielles ou primaires, "
+                "conserve les marqueurs de citation [1], [2], etc., et "
+                "n'invente jamais un détail absent des sources."
+            ),
+        }
+    ]
+    # With conversation history, the latest natural user turn is the best
+    # Sonar query. Adding a second rewritten question here makes short
+    # follow-ups less precise. The standalone query is only a no-history fallback.
+    if history:
+        sonar_messages.extend(history)
+    else:
+        sonar_messages.append({"role": "user", "content": query})
+
+    payload: Dict[str, Any] = {
+        "model": settings.perplexity_sonar_model,
+        "messages": sonar_messages,
+        "max_tokens": 1_200,
+        "temperature": 0.1,
+        "search_mode": "web",
+        "return_related_questions": False,
+        "language_preference": "fr",
+    }
+    if official_domains:
+        payload["search_domain_filter"] = official_domains
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(12, connect=5),
+            follow_redirects=False,
+            trust_env=False,
+        ) as http:
+            response = http.post(
+                SONAR_API_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.perplexity_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+    except httpx.TimeoutException as exc:
+        raise SonarSearchError("timeout") from exc
+    except httpx.HTTPError as exc:
+        raise SonarSearchError("network_error") from exc
+
+    if response.status_code >= 400:
+        raise SonarSearchError(
+            _sonar_error_reason(response.status_code),
+            response.status_code,
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise SonarSearchError("invalid_json_response") from exc
+
+    choices = data.get("choices") or []
+    answer = ""
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        answer = str(message.get("content") or "").strip()
+
+    raw_results = [
+        item for item in (data.get("search_results") or [])
+        if isinstance(item, dict)
+    ]
+    raw_by_url: Dict[str, Dict[str, Any]] = {}
+    for item in raw_results:
+        raw_url = str(item.get("url") or "").strip()
+        if raw_url:
+            raw_by_url[raw_url.rstrip("/")] = item
+
+    # The frontend resolves [n] against results[n - 1]. Build the list from
+    # Sonar's citation array, never from a reranker, so that mapping is exact.
+    results: List[Dict[str, Any]] = []
+    citations = [
+        str(value).strip()
+        for value in (data.get("citations") or [])
+        if str(value).strip()
+    ][:20]
+    for index, citation_url in enumerate(citations):
+        try:
+            safe_url = validate_public_http_url(citation_url)
+        except ValueError:
+            continue
+        item = raw_by_url.get(citation_url.rstrip("/"), {})
+        hostname = urlparse(safe_url).hostname or "Source Web"
+        title = str(item.get("title") or hostname).strip()
+        snippet = str(
+            item.get("snippet")
+            or item.get("content")
+            or "Source utilisée par Perplexity Sonar."
+        ).strip()
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": safe_url,
+                "engine": "Perplexity Sonar",
+                "engine_score": max(0.55, 1.0 - index * 0.03),
+                "citation_index": index + 1,
+                "verified": True,
+                "evidence_kind": "provider_citation",
+            }
+        )
+
+    # Be tolerant of provider variants which return search_results but omit a
+    # separate citations array. These results remain useful for local synthesis.
+    if not results:
+        for index, item in enumerate(raw_results[:candidate_limit]):
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            snippet = str(
+                item.get("snippet") or item.get("content") or ""
+            ).strip()
+            if not title or not url or not snippet:
+                continue
+            try:
+                safe_url = validate_public_http_url(url)
+            except ValueError:
+                continue
+            results.append(
+                {
+                    "title": title,
+                    "snippet": snippet,
+                    "url": safe_url,
+                    "engine": "Perplexity Sonar",
+                    "engine_score": max(0.55, 1.0 - index * 0.06),
+                }
+            )
+
+    return {
+        "results": results,
+        "provider_answer": answer,
+        "provider_citations": citations,
+        "answer_mode": (
+            "provider"
+            if answer and citations and len(results) == len(citations)
+            else None
+        ),
+        "usage": data.get("usage") or {},
+    }
+
+
+def _search_with_searxng(
+    query: str,
+    candidate_limit: int,
+) -> List[Dict[str, Any]]:
+    """Query a configured private SearXNG JSON endpoint."""
+    if not settings.searxng_enabled or not settings.searxng_base_url:
+        return []
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(5, connect=2),
+            follow_redirects=False,
+            trust_env=False,
+        ) as http:
+            response = http.get(
+                f"{settings.searxng_base_url}/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "language": "fr",
+                    "safesearch": 1,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SearXNGSearchError("local_provider_unavailable") from exc
+
+    results: List[Dict[str, Any]] = []
+    for index, item in enumerate(data.get("results") or []):
+        if len(results) >= candidate_limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("content") or "").strip()
+        if not title or not url or not snippet:
+            continue
+        try:
+            safe_url = validate_public_http_url(url)
+        except ValueError:
+            continue
+        results.append(
+            {
+                "title": title,
+                "snippet": snippet,
+                "url": safe_url,
+                "engine": "SearXNG",
+                "engine_score": max(0.45, 0.9 - index * 0.04),
+                "source_engines": item.get("engines") or [],
+            }
+        )
+    return results
+
 
 def fetch_url_content(url: str, timeout: int = 8, max_chars: int = 30_000) -> str:
     """Fetch public text pages while blocking SSRF and oversized responses."""
@@ -105,6 +360,29 @@ def fetch_url_content(url: str, timeout: int = 8, max_chars: int = 30_000) -> st
                         if len(body) > MAX_PAGE_BYTES:
                             raise ValueError("Web page exceeds the 1 MB safety limit.")
                     html = bytes(body).decode(response.encoding or "utf-8", errors="ignore")
+                    extracted = ""
+                    if trafilatura is not None:
+                        try:
+                            extracted = trafilatura.extract(
+                                html,
+                                url=current_url,
+                                output_format="txt",
+                                include_comments=False,
+                                include_tables=True,
+                                favor_precision=True,
+                                deduplicate=True,
+                            ) or ""
+                        except Exception:
+                            logger.debug(
+                                "Trafilatura extraction failed for %s",
+                                current_url,
+                                exc_info=True,
+                            )
+                    if extracted:
+                        return " ".join(extracted.split())[
+                            :max(1, min(max_chars, 100_000))
+                        ]
+
                     text = re.sub(
                         r"<script.*?>.*?</script>",
                         " ",
@@ -239,6 +517,7 @@ def _adaptive_report(
 def search_web_detailed(
     query: str,
     max_results: int | None = None,
+    conversation_messages: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Search, rerank and stop once enough independent evidence is available."""
     candidates: List[Dict[str, Any]] = []
@@ -304,8 +583,170 @@ def search_web_detailed(
         max_results=max_results,
     )
 
-    # 2. Tavily: official-first when possible, then a broader retrieval pass.
-    if tavily_client:
+    provider_attempts: List[Dict[str, Any]] = []
+
+    # 2. Perplexity Sonar is the primary grounded search provider.
+    if settings.perplexity_api_key:
+        sonar_query = (
+            _focused_official_query(cleaned_query, official_domains)
+            if official_domains
+            else cleaned_query
+        )
+        try:
+            logger.info("Executing Perplexity Sonar search for %r", sonar_query)
+            sonar_report = _search_with_sonar(
+                sonar_query,
+                official_domains,
+                plan["candidate_limit"],
+                conversation_messages=conversation_messages,
+            )
+            sonar_results = sonar_report["results"]
+            search_rounds.append(
+                {
+                    "engine": "Perplexity Sonar",
+                    "kind": "primary",
+                    "query": sonar_query,
+                    "returned": len(sonar_results),
+                }
+            )
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "ok" if sonar_results else "empty",
+                }
+            )
+            if sonar_report.get("answer_mode") == "provider":
+                return {
+                    "status": "ok",
+                    "engine": "Perplexity Sonar",
+                    "results": sonar_results,
+                    "errors": errors,
+                    "provider_answer": sonar_report["provider_answer"],
+                    "provider_citations": sonar_report["provider_citations"],
+                    "answer_mode": "provider",
+                    "usage": sonar_report.get("usage", {}),
+                    "strategy": {
+                        "scope": plan["scope"],
+                        "candidate_count": len(sonar_results),
+                        "selected_count": len(sonar_results),
+                        "sufficient": True,
+                        "evidence_strength": 1.0,
+                        "official_domains": official_domains,
+                        "search_rounds": 1,
+                        "queries": [sonar_query],
+                        "round_details": search_rounds,
+                        "provider_order": [
+                            "Perplexity Sonar",
+                            "SearXNG",
+                            "Tavily AI",
+                            "DuckDuckGo",
+                        ],
+                        "provider_attempts": provider_attempts,
+                        "stop_reason": "provider_answer",
+                        "verification_status": "provider_grounded",
+                    },
+                }
+
+            candidates.extend(sonar_results)
+            if sonar_results:
+                engines_used.append("Perplexity Sonar")
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except SonarSearchError as exc:
+            errors.append(f"Perplexity Sonar: {exc}")
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "fallback",
+                    "reason": exc.reason,
+                    "status_code": exc.status_code,
+                }
+            )
+            logger.warning(
+                "Perplexity Sonar unavailable for %r: %s",
+                cleaned_query,
+                exc,
+            )
+        except Exception as exc:
+            errors.append(f"Perplexity Sonar: {type(exc).__name__}")
+            provider_attempts.append(
+                {
+                    "provider": "Perplexity Sonar",
+                    "status": "fallback",
+                    "reason": "unexpected_error",
+                }
+            )
+            logger.exception(
+                "Unexpected Perplexity Sonar failure for %r",
+                cleaned_query,
+            )
+    else:
+        provider_attempts.append(
+            {
+                "provider": "Perplexity Sonar",
+                "status": "not_configured",
+            }
+        )
+
+    # 3. The optional local SearXNG metasearch is the first fallback.
+    if not selected["strategy"]["sufficient"] and settings.searxng_enabled:
+        try:
+            logger.info("Executing local SearXNG search for %r", cleaned_query)
+            searxng_results = _search_with_searxng(
+                cleaned_query,
+                plan["candidate_limit"],
+            )
+            candidates.extend(searxng_results)
+            if searxng_results:
+                engines_used.append("SearXNG")
+            search_rounds.append(
+                {
+                    "engine": "SearXNG",
+                    "kind": "metasearch",
+                    "query": cleaned_query,
+                    "returned": len(searxng_results),
+                }
+            )
+            provider_attempts.append(
+                {
+                    "provider": "SearXNG",
+                    "status": "ok" if searxng_results else "empty",
+                }
+            )
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except SearXNGSearchError as exc:
+            errors.append(f"SearXNG: {exc}")
+            provider_attempts.append(
+                {
+                    "provider": "SearXNG",
+                    "status": "fallback",
+                    "reason": str(exc),
+                }
+            )
+            logger.warning("SearXNG unavailable for %r", cleaned_query)
+    else:
+        provider_attempts.append(
+            {
+                "provider": "SearXNG",
+                "status": (
+                    "skipped_sufficient"
+                    if selected["strategy"]["sufficient"]
+                    else "not_configured"
+                ),
+            }
+        )
+
+    # 4. Tavily runs only when earlier providers lack sufficient evidence.
+    if not selected["strategy"]["sufficient"] and tavily_client:
         excluded_domains = [
             domain
             for domain in LOW_SIGNAL_DOMAINS
@@ -397,8 +838,25 @@ def search_web_detailed(
                     cleaned_query,
                     e,
                 )
+        provider_attempts.append(
+            {
+                "provider": "Tavily AI",
+                "status": (
+                    "ok"
+                    if any(item["engine"] == "Tavily AI" for item in search_rounds)
+                    else "fallback"
+                ),
+            }
+        )
+    elif not selected["strategy"]["sufficient"]:
+        provider_attempts.append(
+            {
+                "provider": "Tavily AI",
+                "status": "not_configured",
+            }
+        )
 
-    # 3. DuckDuckGo is an adaptive second engine, not merely a blind fallback.
+    # 5. DuckDuckGo is the final no-key fallback.
     if not selected["strategy"]["sufficient"]:
         try:
             logger.info(
@@ -438,12 +896,24 @@ def search_web_detailed(
                 official_domains,
                 max_results=max_results,
             )
+            provider_attempts.append(
+                {
+                    "provider": "DuckDuckGo",
+                    "status": "ok" if raw_results else "empty",
+                }
+            )
         except Exception as e:
             errors.append(f"DuckDuckGo: {type(e).__name__}: {e}")
             logger.error(
                 "DuckDuckGo Search failed for %r: %s",
                 cleaned_query,
                 e,
+            )
+            provider_attempts.append(
+                {
+                    "provider": "DuckDuckGo",
+                    "status": "unavailable",
+                }
             )
 
     return {
@@ -457,6 +927,13 @@ def search_web_detailed(
             "search_rounds": len(search_rounds),
             "queries": [item["query"] for item in search_rounds],
             "round_details": search_rounds,
+            "provider_order": [
+                "Perplexity Sonar",
+                "SearXNG",
+                "Tavily AI",
+                "DuckDuckGo",
+            ],
+            "provider_attempts": provider_attempts,
         },
     }
 
