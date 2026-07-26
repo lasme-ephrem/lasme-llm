@@ -255,10 +255,20 @@ def _fallback_contextual_search_query(messages: List[ChatMessage]) -> str:
     follow_up_pattern = re.compile(
         r"\b(maintenant|à présent|bonne réponse|mets? à jour|actualise|"
         r"vérifie|encore|alors|et lui|et elle|et ça|et cela|c['’]est faux|"
-        r"tu te trompes|qui a|quand|où|combien)\b",
+        r"tu te trompes|réponds|reponds|qui a|quand|où|combien|"
+        r"buts?|passes?|bilan|statistiques?|a-t-il|a-t-elle)\b",
         flags=re.IGNORECASE,
     )
-    if follow_up_pattern.search(last_msg) or len(last_msg.split()) <= 6:
+    current_year = datetime.date.today().year
+    refers_to_recent_period = any(
+        int(year) >= current_year - 1
+        for year in re.findall(r"\b(20\d{2})\b", last_msg)
+    )
+    if (
+        follow_up_pattern.search(last_msg)
+        or refers_to_recent_period
+        or len(last_msg.split()) <= 6
+    ):
         today = datetime.date.today().isoformat()
         # Keep several user turns so a chain such as “who won?” → “how was the
         # match?” → “top scorer?” does not lose the original competition.
@@ -446,7 +456,8 @@ def should_perform_web_search(
         "dernier", "dernière", "derniers", "dernières", "récent", "récente",
         "nouveau", "nouvelle", "actualité", "actualités", "prix", "météo",
         "score", "résultat", "classement", "président", "gouvernement",
-        "version", "sortie", "disponible", "horaire", "programme",
+        "version", "sortie", "disponible", "horaire", "programme", "bilan",
+        "statistique", "statistiques",
     }
     explicit_markers = {
         "cherche", "recherche", "internet", "web", "source", "sources",
@@ -460,6 +471,11 @@ def should_perform_web_search(
     competition_markers = {
         "coupe", "mondial", "monde", "fifa", "uefa", "tournoi",
         "championnat", "ligue", "nba", "nfl",
+    }
+    sports_stat_markers = {
+        "but", "buts", "passe", "passes", "buteur", "buteuse", "score",
+        "match", "matches", "tournoi", "saison", "record", "statistique",
+        "statistiques", "bilan",
     }
     follow_up_markers = {
         "alors", "maintenant", "et", "faux", "incorrect", "vérifie", "verifie",
@@ -475,6 +491,12 @@ def should_perform_web_search(
         int(year) >= current_year - 1
         for year in re.findall(r"\b(20\d{2})\b", clean_q)
     )
+    # A recent year is sufficient on its own. Natural follow-ups should not
+    # have to repeat the athlete and competition in every turn.
+    if mentions_recent_year:
+        return True
+    if word_set.intersection(sports_stat_markers):
+        return True
     if (
         (
             word_set.intersection(competitive_markers)
@@ -492,7 +514,7 @@ def should_perform_web_search(
     ):
         recent_context = " ".join(
             message.content
-            for message in (conversation_messages or [])[-5:-1]
+            for message in (conversation_messages or [])[-9:-1]
         ).lower()
         context_words = set(
             re.sub(r"[^\w\s]", " ", recent_context).split()
@@ -520,7 +542,7 @@ def should_perform_web_search(
     if has_conversation_context and referential_follow_up:
         recent_context = " ".join(
             message.content
-            for message in (conversation_messages or [])[-5:-1]
+            for message in (conversation_messages or [])[-9:-1]
         ).lower()
         current_year = datetime.date.today().year
         if (
@@ -1346,10 +1368,29 @@ async def chat_stream(req: ChatRequest):
             if web_results_data
             else ""
         )
+        web_runtime_instruction = ""
+        if web_search_needed and web_results_data:
+            web_runtime_instruction = (
+                "\n\nLa recherche Web vient d'être exécutée avec succès pour "
+                "cette demande. Réponds directement à la question factuelle à "
+                "partir des sources fournies. Ne prétends jamais ne pas avoir "
+                "accès à Internet ou manquer de données en temps réel lorsque "
+                "ces sources contiennent la réponse."
+            )
+        elif web_search_needed:
+            web_runtime_instruction = (
+                "\n\nUne recherche Web a été tentée pour cette demande mais "
+                "aucune preuve exploitable n'a été obtenue. N'invente aucun "
+                "fait actuel et indique simplement que la vérification Web a "
+                "échoué, sans demander à l'utilisateur de fournir lui-même "
+                "les statistiques."
+            )
         if rag_context or web_context:
             stream_messages[-1]["content"] += (
                 f"{rag_context}{web_context}{context_instruction}"
             )
+        if web_runtime_instruction:
+            stream_messages[-1]["content"] += web_runtime_instruction
 
         # Use each model's measured maximum-quality profile. Ollama exposes
         # thinking separately, so internal reasoning never pollutes chat memory.

@@ -188,6 +188,44 @@ class ConversationContextTests(unittest.TestCase):
                 mode="auto",
             )
         )
+
+    def test_recent_sports_follow_ups_always_use_web(self):
+        messages = [
+            ChatMessage(
+                role="user",
+                content="Lionel Messi nombre de buts total en Coupe du monde",
+            ),
+            ChatMessage(
+                role="assistant",
+                content="Il a inscrit 13 buts jusqu'en 2022.",
+            ),
+            ChatMessage(
+                role="user",
+                content="Combien de buts a-t-il marqué en 2026 ?",
+            ),
+        ]
+        self.assertTrue(
+            should_perform_web_search(
+                messages[-1].content,
+                user_toggle_enabled=True,
+                has_conversation_context=True,
+                mode="auto",
+                conversation_messages=messages,
+            )
+        )
+        query = _fallback_contextual_search_query(messages)
+        self.assertIn("lionel messi", query.lower())
+        self.assertIn("2026", query)
+
+    def test_sports_statistics_trigger_web_without_repeating_competition(self):
+        self.assertTrue(
+            should_perform_web_search(
+                "Quel est son bilan actuel ?",
+                user_toggle_enabled=True,
+                has_conversation_context=True,
+                mode="auto",
+            )
+        )
         self.assertTrue(
             should_perform_web_search(
                 "Qui est le vainqueur de la Coupe du monde ?",
