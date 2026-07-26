@@ -31,8 +31,10 @@ Navigateur
    │ HTTP + SSE
    ▼
 FastAPI — http://127.0.0.1:8000
-   ├── conversations, compaction et mémoire personnelle SQLite
-   ├── RAG persistant, isolé par conversation
+   ├── projets, conversations branchables et mémoire SQLite
+   ├── RAG hybride persistant, isolé par projet
+   ├── Canvas et artefacts versionnés
+   ├── recherche approfondie avec plan et progression
    ├── recherche Web : recherche → extraction → vérification
    ├── données structurées : météo, actions et crypto
    ├── génération d’images externe facultative
@@ -73,14 +75,32 @@ python -m uvicorn chat.server.main:app --host 127.0.0.1 --port 8000
 
 Ouvrir ensuite <http://127.0.0.1:8000/>.
 
-## Recherche Web
+## Espaces de travail, conversations et Canvas
 
-Le bouton Web possède trois états :
+Les conversations peuvent être regroupées dans des projets. Chaque projet
+possède ses propres instructions, son modèle par défaut, ses documents et sa
+politique de mémoire. Le projet `Général` conserve la mémoire personnelle
+globale ; un nouveau projet utilise par défaut une mémoire isolée.
+
+Les actions affichées sous les messages permettent de copier, créer une
+branche, modifier un ancien message puis régénérer depuis ce point, ou ouvrir
+une réponse dans Canvas. Ces opérations ne modifient jamais la conversation
+originale.
+
+Canvas offre une vue édition/aperçu pour les documents, Markdown, code,
+tableaux et rapports de recherche. Chaque sauvegarde crée une version
+immuable, consultable et exportable.
+
+## Recherche Web et recherche approfondie
+
+Le bouton Web possède quatre états :
 
 - `Web auto` : recherche seulement pour les informations actuelles, les
   demandes explicites de vérification et les relances qui nécessitent une mise
   à jour ;
 - `Web` : recherche forcée, sauf pour une salutation triviale ;
+- `Recherche` : affiche un plan, recoupe plusieurs axes de recherche puis
+  produit un rapport cité automatiquement conservé dans Canvas ;
 - `Web off` : aucune requête externe.
 
 L’orchestrateur ne demande plus systématiquement le même nombre de sources.
@@ -207,9 +227,12 @@ l’utilisation de la recherche Web.
 ## Documents
 
 Les fichiers PDF, TXT et Markdown sont limités à 10 Mo. Le texte extrait est
-stocké dans SQLite et indexé localement avec BM25. Chaque conversation possède
-son propre espace documentaire. Supprimer une conversation supprime aussi ses
-documents.
+stocké dans SQLite au niveau du projet actif. Le découpage conserve la page et
+la position de chaque extrait. Le classement hybride fusionne BM25 avec une
+représentation vectorielle locale tolérante aux accents, flexions et petites
+variations d’écriture. Les extraits injectés au modèle portent le nom du
+document, la page et le numéro du fragment pour produire des citations
+documentaires vérifiables.
 
 ## Accès distant avec Cloudflared
 
@@ -249,6 +272,7 @@ La génération externe peut être coupée avec
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe -m compileall -q chat core coding tests
 node --check chat\web\app.js
+node --check chat\web\workspace.js
 .\.venv\Scripts\python.exe -m pip check
 ```
 
