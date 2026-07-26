@@ -7,6 +7,14 @@ import httpx
 from ddgs import DDGS
 from core.config import settings
 from core.security import validate_public_http_url
+from core.tools.search_providers import (
+    SearchProviderError,
+    detect_search_vertical,
+    search_brave,
+    search_gdelt,
+    search_openalex,
+    search_wikipedia,
+)
 from core.tools.search_ranking import (
     WINNER_MARKERS,
     VERSION_MARKERS,
@@ -637,7 +645,9 @@ def search_web_detailed(
                         "round_details": search_rounds,
                         "provider_order": [
                             "Perplexity Sonar",
+                            "Domain specialist",
                             "SearXNG",
+                            "Brave Search",
                             "Tavily AI",
                             "DuckDuckGo",
                         ],
@@ -692,7 +702,120 @@ def search_web_detailed(
             }
         )
 
-    # 3. The optional local SearXNG metasearch is the first fallback.
+    # 3. High-confidence verticals use precise, low-cost sources before a
+    # general Web fallback. A specialist is additive: weak evidence continues
+    # through the normal provider chain.
+    vertical = (
+        detect_search_vertical(cleaned_query)
+        if settings.search_specialists_enabled
+        else None
+    )
+    if not selected["strategy"]["sufficient"] and vertical:
+        specialist_name = {
+            "academic": "OpenAlex",
+            "news": "GDELT",
+            "knowledge": "Wikimedia",
+        }[vertical]
+        try:
+            if vertical == "academic":
+                if not settings.openalex_api_key:
+                    provider_attempts.append(
+                        {
+                            "provider": specialist_name,
+                            "status": "not_configured",
+                            "route": vertical,
+                        }
+                    )
+                    specialist_results = []
+                else:
+                    specialist_results = search_openalex(
+                        cleaned_query,
+                        settings.openalex_api_key,
+                        plan["candidate_limit"],
+                    )
+            elif vertical == "news":
+                specialist_results = search_gdelt(
+                    cleaned_query,
+                    plan["candidate_limit"],
+                )
+            else:
+                specialist_results = search_wikipedia(
+                    cleaned_query,
+                    plan["candidate_limit"],
+                )
+
+            if specialist_results:
+                candidates.extend(specialist_results)
+                engines_used.append(specialist_name)
+                search_rounds.append(
+                    {
+                        "engine": specialist_name,
+                        "kind": f"specialist_{vertical}",
+                        "query": cleaned_query,
+                        "returned": len(specialist_results),
+                    }
+                )
+                provider_attempts.append(
+                    {
+                        "provider": specialist_name,
+                        "status": "ok",
+                        "route": vertical,
+                    }
+                )
+                selected = _adaptive_report(
+                    candidates,
+                    cleaned_query,
+                    official_domains,
+                    max_results=max_results,
+                )
+            elif not any(
+                item.get("provider") == specialist_name
+                for item in provider_attempts
+            ):
+                provider_attempts.append(
+                    {
+                        "provider": specialist_name,
+                        "status": "empty",
+                        "route": vertical,
+                    }
+                )
+        except SearchProviderError as exc:
+            errors.append(f"{specialist_name}: {exc.reason}")
+            provider_attempts.append(
+                {
+                    "provider": specialist_name,
+                    "status": "fallback",
+                    "route": vertical,
+                    "reason": exc.reason,
+                    "status_code": exc.status_code,
+                }
+            )
+            logger.warning(
+                "%s specialist unavailable for %r: %s",
+                specialist_name,
+                cleaned_query,
+                exc,
+            )
+    elif settings.search_specialists_enabled:
+        provider_attempts.append(
+            {
+                "provider": "Domain specialist",
+                "status": (
+                    "skipped_sufficient"
+                    if selected["strategy"]["sufficient"]
+                    else "not_applicable"
+                ),
+            }
+        )
+    else:
+        provider_attempts.append(
+            {
+                "provider": "Domain specialist",
+                "status": "disabled",
+            }
+        )
+
+    # 4. The optional local SearXNG metasearch is the sovereign fallback.
     if not selected["strategy"]["sufficient"] and settings.searxng_enabled:
         try:
             logger.info("Executing local SearXNG search for %r", cleaned_query)
@@ -745,7 +868,75 @@ def search_web_detailed(
             }
         )
 
-    # 4. Tavily runs only when earlier providers lack sufficient evidence.
+    # 5. Brave contributes an independent Web index. HTTP 402/429 responses
+    # are explicitly classified so the chain can continue without surfacing a
+    # provider error to the user.
+    if not selected["strategy"]["sufficient"] and settings.brave_search_api_key:
+        brave_query = (
+            _focused_official_query(cleaned_query, official_domains)
+            if official_domains
+            else cleaned_query
+        )
+        try:
+            logger.info("Executing Brave Search for %r", brave_query)
+            brave_report = search_brave(
+                brave_query,
+                settings.brave_search_api_key,
+                plan["candidate_limit"],
+            )
+            brave_results = brave_report["results"]
+            candidates.extend(brave_results)
+            if brave_results:
+                engines_used.append("Brave Search")
+            search_rounds.append(
+                {
+                    "engine": "Brave Search",
+                    "kind": "independent_index",
+                    "query": brave_query,
+                    "returned": len(brave_results),
+                }
+            )
+            provider_attempts.append(
+                {
+                    "provider": "Brave Search",
+                    "status": "ok" if brave_results else "empty",
+                    "quota": brave_report.get("quota", {}),
+                }
+            )
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except SearchProviderError as exc:
+            errors.append(f"Brave Search: {exc.reason}")
+            provider_attempts.append(
+                {
+                    "provider": "Brave Search",
+                    "status": "fallback",
+                    "reason": exc.reason,
+                    "status_code": exc.status_code,
+                }
+            )
+            logger.warning(
+                "Brave Search unavailable for %r: %s",
+                cleaned_query,
+                exc,
+            )
+    else:
+        provider_attempts.append(
+            {
+                "provider": "Brave Search",
+                "status": (
+                    "skipped_sufficient"
+                    if selected["strategy"]["sufficient"]
+                    else "not_configured"
+                ),
+            }
+        )
+
+    # 6. Tavily runs only when earlier providers lack sufficient evidence.
     if not selected["strategy"]["sufficient"] and tavily_client:
         excluded_domains = [
             domain
@@ -856,7 +1047,7 @@ def search_web_detailed(
             }
         )
 
-    # 5. DuckDuckGo is the final no-key fallback.
+    # 7. DuckDuckGo is the final no-key fallback.
     if not selected["strategy"]["sufficient"]:
         try:
             logger.info(
@@ -929,7 +1120,9 @@ def search_web_detailed(
             "round_details": search_rounds,
             "provider_order": [
                 "Perplexity Sonar",
+                "Domain specialist",
                 "SearXNG",
+                "Brave Search",
                 "Tavily AI",
                 "DuckDuckGo",
             ],

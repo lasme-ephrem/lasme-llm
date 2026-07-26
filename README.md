@@ -83,10 +83,42 @@ Le bouton Web possède trois états :
 - `Web` : recherche forcée, sauf pour une salutation triviale ;
 - `Web off` : aucune requête externe.
 
-Les fournisseurs sont essayés dans cet ordre : Perplexity Sonar, SearXNG local,
-Tavily, puis DuckDuckGo. Un fournisseur suivant n’est sollicité que si le
-précédent est indisponible, à court de quota ou ne renvoie pas de preuves
-suffisantes.
+L’orchestrateur ne demande plus systématiquement le même nombre de sources.
+Perplexity Sonar reste prioritaire lorsqu’il peut produire une réponse
+directement sourcée. À défaut, une route spécialisée peut interroger GDELT
+pour l’actualité, OpenAlex pour les publications scientifiques ou Wikimedia
+pour les faits encyclopédiques. La recherche généraliste complète ensuite les
+preuves avec SearXNG, Brave Search, Tavily et enfin DuckDuckGo. Chaque étape
+s’arrête dès que les résultats sont suffisamment pertinents, indépendants et
+fiables ; les erreurs d’authentification, de quota et de disponibilité
+déclenchent une bascule transparente.
+
+```mermaid
+flowchart LR
+    A["Question + contexte"] --> B{"Donnée structurée ?"}
+    B -->|"Météo, finance, crypto"| C["API spécialisée"]
+    C --> O
+    B -->|"Non"| D["Perplexity Sonar"]
+    D -->|"Réponse sourcée"| E["Réponse directe"]
+    D -->|"Quota ou preuves faibles"| F{"Route spécialisée"}
+    F -->|"Actualité"| G["GDELT"]
+    F -->|"Science"| H["OpenAlex"]
+    F -->|"Connaissance"| I["Wikimedia"]
+    F -->|"Général"| J["SearXNG"]
+    G --> P{"Preuves suffisantes ?"}
+    H --> P
+    I --> P
+    P -->|"Oui"| N
+    P -->|"Non"| J
+    J -->|"Insuffisant"| K["Brave Search"]
+    K -->|"Insuffisant"| L["Tavily"]
+    L -->|"Insuffisant"| M["DuckDuckGo"]
+    J --> N["Extraction + classement"]
+    K --> N
+    L --> N
+    M --> N
+    N --> O["Gemma + citations"]
+```
 
 Quand Sonar fournit une réponse sourcée, l’application conserve directement
 son texte et l’ordre exact de ses citations : Gemma ne la paraphrase plus. Le
@@ -97,9 +129,12 @@ candidats, extrait le contenu principal des meilleures pages avec Trafilatura
 dans un délai borné, puis confie ces preuves à Gemma. Le nombre de sources varie
 donc selon la difficulté et la qualité des résultats.
 
-Configurer `PERPLEXITY_API_KEY` pour Sonar et `TAVILY_API_KEY` pour Tavily.
-`PERPLEXITY_SONAR_MODEL` permet de changer le modèle Sonar ; la valeur par
-défaut est `sonar`.
+Configurer `PERPLEXITY_API_KEY` pour Sonar, `BRAVE_SEARCH_API_KEY` pour Brave
+et `TAVILY_API_KEY` pour Tavily. `PERPLEXITY_SONAR_MODEL` permet de changer le
+modèle Sonar ; la valeur par défaut est `sonar`. GDELT et Wikimedia ne
+nécessitent aucune clé. OpenAlex demande une clé gratuite facultative dans
+`OPENALEX_API_KEY`. Les routes spécialisées peuvent être désactivées avec
+`SEARCH_SPECIALISTS_ENABLED=false`.
 
 SearXNG est facultatif et désactivé par défaut. Après installation de Docker :
 
@@ -112,9 +147,9 @@ Définir ensuite `SEARXNG_ENABLED=true` dans `.env` puis redémarrer le backend.
 Le service n’écoute que sur `127.0.0.1:8080`. SearXNG reste un composant externe
 AGPL-3.0 appelé par HTTP ; aucun de ses fichiers source n’est inclus ici.
 
-Les demandes de météo, de cours boursiers et de crypto-actifs peuvent utiliser
-des API structurées avant la recherche Web générale. Les URL locales, privées
-et réservées restent bloquées.
+Les demandes de météo, de cours boursiers et de crypto-actifs peuvent aussi
+utiliser des API structurées avant la recherche Web générale. Les URL locales,
+privées et réservées restent bloquées.
 
 ## Mémoire et continuité
 
@@ -201,7 +236,8 @@ Ne pas activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
 Le chat et l’inférence sont locaux. Deux fonctions peuvent envoyer du contenu
 hors de la machine :
 
-- la recherche Web envoie la requête à Perplexity, Tavily ou DuckDuckGo ;
+- la recherche Web peut envoyer la requête à Perplexity, Brave, Tavily,
+  SearXNG, DuckDuckGo, GDELT, OpenAlex ou Wikimedia selon le routage ;
 - la génération d’images envoie le prompt à Pollinations.
 
 La génération externe peut être coupée avec

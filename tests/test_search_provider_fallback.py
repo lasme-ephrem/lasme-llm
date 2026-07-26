@@ -88,6 +88,8 @@ class SequentialSearchProviderTests(unittest.TestCase):
         tavily = Mock()
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "brave_search_api_key", ""),
+            patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(
                 web_search,
                 "_search_with_sonar",
@@ -143,6 +145,8 @@ class SequentialSearchProviderTests(unittest.TestCase):
         }
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "brave_search_api_key", ""),
+            patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search,
@@ -170,7 +174,11 @@ class SequentialSearchProviderTests(unittest.TestCase):
             "quota_or_rate_limit",
         )
         self.assertEqual(
-            report["strategy"]["provider_attempts"][2]["status"],
+            next(
+                item
+                for item in report["strategy"]["provider_attempts"]
+                if item["provider"] == "Tavily AI"
+            )["status"],
             "ok",
         )
 
@@ -178,6 +186,8 @@ class SequentialSearchProviderTests(unittest.TestCase):
         tavily = Mock()
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "brave_search_api_key", ""),
+            patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", True),
             patch.object(
                 web_search,
@@ -207,7 +217,11 @@ class SequentialSearchProviderTests(unittest.TestCase):
         tavily.search.assert_not_called()
         self.assertEqual(report["engine"], "SearXNG")
         self.assertEqual(
-            report["strategy"]["provider_attempts"][1]["status"],
+            next(
+                item
+                for item in report["strategy"]["provider_attempts"]
+                if item["provider"] == "SearXNG"
+            )["status"],
             "ok",
         )
 
@@ -227,6 +241,8 @@ class SequentialSearchProviderTests(unittest.TestCase):
         ]
         with (
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "brave_search_api_key", ""),
+            patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search,
@@ -250,6 +266,52 @@ class SequentialSearchProviderTests(unittest.TestCase):
             report["strategy"]["provider_attempts"][-1]["status"],
             "ok",
         )
+
+    def test_sonar_quota_falls_back_to_brave_before_tavily(self):
+        tavily = Mock()
+        brave_result = _official_world_cup_result("Brave Search")
+        with (
+            patch.object(web_search.settings, "perplexity_api_key", "test-key"),
+            patch.object(web_search.settings, "brave_search_api_key", "brave-key"),
+            patch.object(web_search.settings, "search_specialists_enabled", False),
+            patch.object(web_search.settings, "searxng_enabled", False),
+            patch.object(
+                web_search,
+                "_search_with_sonar",
+                side_effect=web_search.SonarSearchError(
+                    "quota_or_rate_limit",
+                    429,
+                ),
+            ),
+            patch.object(
+                web_search,
+                "search_brave",
+                return_value={
+                    "results": [brave_result],
+                    "quota": {"remaining": "999"},
+                },
+            ) as brave,
+            patch.object(web_search, "tavily_client", tavily),
+            patch.object(
+                web_search,
+                "DDGS",
+                side_effect=AssertionError("DuckDuckGo should not run"),
+            ),
+        ):
+            report = web_search.search_web_detailed(
+                "Qui est le dernier vainqueur de la Coupe du monde ?"
+            )
+
+        brave.assert_called_once()
+        tavily.search.assert_not_called()
+        self.assertEqual(report["engine"], "Brave Search")
+        attempt = next(
+            item
+            for item in report["strategy"]["provider_attempts"]
+            if item["provider"] == "Brave Search"
+        )
+        self.assertEqual(attempt["status"], "ok")
+        self.assertEqual(attempt["quota"]["remaining"], "999")
 
     def test_sonar_http_statuses_are_classified_without_response_details(self):
         self.assertEqual(

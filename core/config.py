@@ -20,12 +20,18 @@ class Settings(BaseModel):
     # Search Engine Configuration
     perplexity_api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
     perplexity_sonar_model: str = os.getenv("PERPLEXITY_SONAR_MODEL", "sonar")
+    brave_search_api_key: str = os.getenv("BRAVE_SEARCH_API_KEY", "")
     searxng_enabled: bool = _env_bool("SEARXNG_ENABLED", False)
     searxng_base_url: str = os.getenv(
         "SEARXNG_BASE_URL",
         "http://127.0.0.1:8080",
     ).rstrip("/")
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+    openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
+    search_specialists_enabled: bool = _env_bool(
+        "SEARCH_SPECIALISTS_ENABLED",
+        True,
+    )
 
     # Preferred models optimized for RTX 4070 Ti SUPER (16 GB VRAM)
     coding_model: str = os.getenv("CODING_MODEL", "gemma-4-fable")
