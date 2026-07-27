@@ -407,6 +407,13 @@ if (mobileMenuBtn2) mobileMenuBtn2.addEventListener("click", openSidebar);
 if (closeSidebarBtn) closeSidebarBtn.addEventListener("click", closeSidebar);
 if (sidebarBackdrop) sidebarBackdrop.addEventListener("click", closeSidebar);
 
+const sidebarLogo = document.querySelector(".sidebar-logo");
+if (sidebarLogo) {
+    sidebarLogo.addEventListener("click", () => {
+        window.location.href = "/";
+    });
+}
+
 function setSidebarCollapsed(collapsed, persist = true) {
     const shouldCollapse = Boolean(collapsed);
     const desktopLayout = window.matchMedia("(min-width: 769px)").matches;

@@ -356,6 +356,13 @@ body.sidebar-resizing {
     align-items: center;
     gap: 0.65rem;
     padding: 0.2rem 0;
+    cursor: pointer;
+    text-decoration: none;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+}
+.sidebar-logo:hover {
+    background: var(--hover-bg, rgba(255, 255, 255, 0.06));
 }
 
 .logo-icon-svg.large {
