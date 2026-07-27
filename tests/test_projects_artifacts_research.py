@@ -146,6 +146,36 @@ class TemporaryConversationTests(unittest.IsolatedAsyncioTestCase):
         count_chunks.assert_not_called()
 
 
+class GenerationPerformanceTests(unittest.TestCase):
+    def test_ollama_timings_are_normalized_for_message_metadata(self):
+        with patch.object(server_main.time, "monotonic", return_value=102.6):
+            stats = server_main.build_generation_stats(
+                {
+                    "done": True,
+                    "prompt_eval_count": 128,
+                    "eval_count": 96,
+                    "eval_duration": 2_000_000_000,
+                    "prompt_eval_duration": 500_000_000,
+                    "load_duration": 250_000_000,
+                    "total_duration": 2_750_000_000,
+                    "done_reason": "stop",
+                },
+                model="gemma-4-chat",
+                started_at=100.0,
+                first_content_at=100.42,
+            )
+
+        self.assertEqual(stats["model"], "gemma-4-chat")
+        self.assertEqual(stats["prompt_tokens"], 128)
+        self.assertEqual(stats["output_tokens"], 96)
+        self.assertEqual(stats["tokens_per_second"], 48.0)
+        self.assertEqual(stats["generation_seconds"], 2.0)
+        self.assertEqual(stats["total_seconds"], 2.75)
+        self.assertEqual(stats["time_to_first_token"], 0.42)
+        self.assertEqual(stats["load_seconds"], 0.25)
+        self.assertEqual(stats["prompt_seconds"], 0.5)
+
+
 class ArtifactTests(unittest.TestCase):
     def test_artifact_versions_are_immutable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

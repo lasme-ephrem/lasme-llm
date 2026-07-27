@@ -759,7 +759,8 @@ async function selectSession(sessionId) {
                 cleanText,
                 imgUrl,
                 msg.metadata?.web_results || [],
-                msg.id
+                msg.id,
+                msg.metadata?.generation_stats || null
             );
             conversationHistory.push({ role: msg.role, content: msg.content });
         });
@@ -1368,6 +1369,7 @@ async function sendChatMessage(options = {}) {
     const assistantBubble = appendMessage("assistant", "...");
     let fullResponse = "";
     let webResultsMeta = [];
+    let generationStatsMeta = null;
     
     let reasoningDuration = null;
 
@@ -1624,18 +1626,13 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "generation_stats") {
-                        const detail = parsed.tokens_per_second
-                            ? `${parsed.output_tokens || 0} tokens · ${parsed.tokens_per_second} tok/s`
-                            : parsed.output_tokens
-                                ? `${parsed.output_tokens} tokens générés`
-                                : "Réponse terminée";
-                        renderAssistantActivity(
-                            assistantBubble,
-                            "generation",
-                            "done",
-                            "Génération terminée",
-                            detail
-                        );
+                        generationStatsMeta = parsed;
+                        if (isStreamVisible()) {
+                            renderGenerationPerformance(
+                                assistantBubble,
+                                generationStatsMeta
+                            );
+                        }
                     }
                     if (parsed.type === "error") {
                         const message = parsed.message || "La génération a été interrompue.";
@@ -1695,6 +1692,12 @@ async function sendChatMessage(options = {}) {
                 reasoningDuration,
                 true
             );
+            if (generationStatsMeta) {
+                renderGenerationPerformance(
+                    assistantBubble,
+                    generationStatsMeta
+                );
+            }
         }
         streamConversationHistory.push({ role: "assistant", content: fullResponse });
         if (
@@ -1755,7 +1758,8 @@ function appendMessage(
     text,
     imageUrl = null,
     webResults = [],
-    messageId = null
+    messageId = null,
+    generationStats = null
 ) {
     const msgDiv = document.createElement("div");
     msgDiv.className = `message ${role}`;
@@ -1784,6 +1788,7 @@ function appendMessage(
             bubbleDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
         } else if (text) {
             renderFullAssistantMessage(bubbleDiv, text, webResults);
+            renderGenerationPerformance(bubbleDiv, generationStats);
         }
     }
 
@@ -1892,6 +1897,99 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
         </div>
         ${safeDetail ? `<div class="assistant-activity-detail">${safeDetail}</div>` : ""}
     `;
+}
+
+function formatPerformanceNumber(value, maximumFractionDigits = 1) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    return new Intl.NumberFormat("fr-FR", {
+        maximumFractionDigits,
+        minimumFractionDigits: 0
+    }).format(number);
+}
+
+function renderGenerationPerformance(container, rawStats) {
+    if (!container) return;
+    container
+        .querySelector('.assistant-activity[data-kind="generation"]')
+        ?.remove();
+    container.querySelector(".generation-performance")?.remove();
+
+    const stats = rawStats && typeof rawStats === "object"
+        ? rawStats
+        : null;
+    if (!stats) return;
+
+    const speed = Number(stats.tokens_per_second || 0);
+    const outputTokens = Number(stats.output_tokens || 0);
+    const totalSeconds = Number(
+        stats.total_seconds || stats.generation_seconds || 0
+    );
+    const firstTokenSeconds = Number(stats.time_to_first_token || 0);
+    const promptTokens = Number(stats.prompt_tokens || 0);
+    if (!speed && !outputTokens && !totalSeconds) return;
+
+    const performance = document.createElement("div");
+    performance.className = "generation-performance";
+    performance.setAttribute("aria-label", "Performances de génération");
+
+    const visibleMetrics = [];
+    if (speed > 0) {
+        visibleMetrics.push(`
+            <span class="generation-performance-primary">
+                ${formatPerformanceNumber(speed)} tok/s
+            </span>
+        `);
+    }
+    if (outputTokens > 0) {
+        visibleMetrics.push(`
+            <span>${formatPerformanceNumber(outputTokens, 0)} tokens</span>
+        `);
+    }
+    if (totalSeconds > 0) {
+        visibleMetrics.push(`
+            <span>${formatPerformanceNumber(totalSeconds)} s</span>
+        `);
+    }
+
+    const detailParts = [];
+    if (firstTokenSeconds > 0) {
+        detailParts.push(
+            `premier token en ${formatPerformanceNumber(firstTokenSeconds, 2)} s`
+        );
+    }
+    if (promptTokens > 0) {
+        detailParts.push(
+            `${formatPerformanceNumber(promptTokens, 0)} tokens en entrée`
+        );
+    }
+    if (stats.model) {
+        const modelLabel = String(stats.model).includes("fable")
+            ? "Gemma 4 Fable"
+            : "Gemma 4 Chat";
+        detailParts.push(modelLabel);
+    }
+    performance.title = detailParts.length
+        ? `Détails : ${detailParts.join(" · ")}`
+        : "Performances de la réponse";
+
+    performance.innerHTML = `
+        <span class="generation-performance-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5.15 18.5a8.25 8.25 0 1 1 13.7 0"></path>
+                <path d="m12 13 3.65-3.15"></path>
+                <circle cx="12" cy="13" r="1.35"></circle>
+                <path d="M6.55 14.1h1M8.1 9.55l.7.7M12 7v1M15.9 9.55l-.7.7M16.45 14.1h1"></path>
+            </svg>
+        </span>
+        ${visibleMetrics
+            .map((metric, index) => (
+                `${index ? '<span class="generation-performance-separator" aria-hidden="true"></span>' : ""}${metric}`
+            ))
+            .join("")}
+    `;
+    container.appendChild(performance);
 }
 
 // Render only the final answer. Raw chain-of-thought is intentionally hidden;

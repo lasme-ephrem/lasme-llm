@@ -408,6 +408,61 @@ def compact_web_source_metadata(
     return {"web_results": sources} if sources else {}
 
 
+def build_generation_stats(
+    chunk: Dict[str, Any],
+    *,
+    model: str,
+    started_at: float,
+    first_content_at: Optional[float],
+) -> Dict[str, Any]:
+    """Normalize Ollama timings into compact, persisted message metadata."""
+    eval_count = int(chunk.get("eval_count") or 0)
+    prompt_count = int(chunk.get("prompt_eval_count") or 0)
+    eval_duration_ns = int(chunk.get("eval_duration") or 0)
+    total_duration_ns = int(chunk.get("total_duration") or 0)
+    load_duration_ns = int(chunk.get("load_duration") or 0)
+    prompt_duration_ns = int(chunk.get("prompt_eval_duration") or 0)
+    measured_total = max(0.0, time.monotonic() - started_at)
+
+    def seconds(nanoseconds: int) -> Optional[float]:
+        if nanoseconds <= 0:
+            return None
+        return round(nanoseconds / 1_000_000_000, 2)
+
+    reported_total = (
+        total_duration_ns / 1_000_000_000
+        if total_duration_ns > 0
+        else 0.0
+    )
+    stats: Dict[str, Any] = {
+        "model": model,
+        "prompt_tokens": prompt_count,
+        "output_tokens": eval_count,
+        "tokens_per_second": (
+            round(eval_count / (eval_duration_ns / 1_000_000_000), 1)
+            if eval_count and eval_duration_ns
+            else None
+        ),
+        "generation_seconds": seconds(eval_duration_ns),
+        # Prefer the user-perceived wall time when transport and scheduling
+        # make it slightly longer than Ollama's internal total_duration.
+        "total_seconds": round(max(reported_total, measured_total), 2),
+        "time_to_first_token": (
+            round(max(0.0, first_content_at - started_at), 2)
+            if first_content_at is not None
+            else None
+        ),
+        "load_seconds": seconds(load_duration_ns),
+        "prompt_seconds": seconds(prompt_duration_ns),
+        "done_reason": chunk.get("done_reason"),
+    }
+    return {
+        key: value
+        for key, value in stats.items()
+        if value is not None and value != ""
+    }
+
+
 async def build_contextual_search_query(
     messages: List[ChatMessage],
     model: str,
@@ -1811,13 +1866,43 @@ async def chat_stream(req: ChatRequest):
                 "NFC",
                 provider_answer,
             ).replace("\ufffd", "")
+            provider_usage = search_report.get("usage", {})
+            provider_elapsed_ms = int(
+                (search_report.get("strategy") or {}).get("elapsed_ms")
+                or search_report.get("elapsed_ms")
+                or 0
+            )
+            provider_stats = {
+                "provider": answer_provider,
+                "prompt_tokens": int(
+                    provider_usage.get("prompt_tokens") or 0
+                ),
+                "output_tokens": int(
+                    provider_usage.get("completion_tokens") or 0
+                ),
+                "total_seconds": (
+                    round(provider_elapsed_ms / 1_000, 2)
+                    if provider_elapsed_ms
+                    else None
+                ),
+                "done_reason": "provider_answer",
+            }
+            provider_stats = {
+                key: value
+                for key, value in provider_stats.items()
+                if value is not None and value != ""
+            }
             yield f"data: {json.dumps({'type': 'content_delta', 'content': full_assistant_reply})}\n\n"
             if not temporary:
+                message_metadata = compact_web_source_metadata(
+                    web_results_data
+                )
+                message_metadata["generation_stats"] = provider_stats
                 assistant_message_id = db.add_message(
                     session_id,
                     "assistant",
                     full_assistant_reply,
-                    metadata=compact_web_source_metadata(web_results_data),
+                    metadata=message_metadata,
                 )
                 yield f"data: {json.dumps({'type': 'message_saved', 'role': 'assistant', 'message_id': assistant_message_id})}\n\n"
                 asyncio.create_task(
@@ -1826,8 +1911,7 @@ async def chat_stream(req: ChatRequest):
                 asyncio.create_task(
                     async_update_personal_memory(selected_model)
                 )
-            provider_usage = search_report.get("usage", {})
-            yield f"data: {json.dumps({'type': 'generation_stats', 'provider': answer_provider, 'prompt_tokens': int(provider_usage.get('prompt_tokens') or 0), 'output_tokens': int(provider_usage.get('completion_tokens') or 0), 'tokens_per_second': None, 'done_reason': 'provider_answer'})}\n\n"
+            yield f"data: {json.dumps({'type': 'generation_stats', **provider_stats})}\n\n"
             if is_new_session and last_user_msg:
                 asyncio.create_task(
                     async_generate_and_update_title(
@@ -1902,6 +1986,8 @@ async def chat_stream(req: ChatRequest):
         reasoning_finished = False
         reasoning_started_at = 0.0
         generation_stats: Dict[str, Any] = {}
+        generation_started_at = time.monotonic()
+        first_content_at: Optional[float] = None
 
         async for chunk in client.stream_chat(
             model=selected_model,
@@ -1925,6 +2011,8 @@ async def chat_stream(req: ChatRequest):
 
             delta = message_chunk.get("content", "")
             if delta:
+                if first_content_at is None:
+                    first_content_at = time.monotonic()
                 if reasoning_started and not reasoning_finished:
                     reasoning_finished = True
                     duration = round(time.monotonic() - reasoning_started_at, 1)
@@ -1948,18 +2036,12 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
 
             if chunk.get("done"):
-                eval_count = int(chunk.get("eval_count") or 0)
-                eval_duration = int(chunk.get("eval_duration") or 0)
-                generation_stats = {
-                    "prompt_tokens": int(chunk.get("prompt_eval_count") or 0),
-                    "output_tokens": eval_count,
-                    "tokens_per_second": (
-                        round(eval_count / (eval_duration / 1_000_000_000), 1)
-                        if eval_count and eval_duration
-                        else None
-                    ),
-                    "done_reason": chunk.get("done_reason"),
-                }
+                generation_stats = build_generation_stats(
+                    chunk,
+                    model=selected_model,
+                    started_at=generation_started_at,
+                    first_content_at=first_content_at,
+                )
 
         if reasoning_started and not reasoning_finished:
             duration = round(time.monotonic() - reasoning_started_at, 1)
@@ -1968,11 +2050,16 @@ async def chat_stream(req: ChatRequest):
         if full_assistant_reply:
             full_assistant_reply = clean_model_text(full_assistant_reply)
             if not temporary:
+                message_metadata = compact_web_source_metadata(
+                    web_results_data
+                )
+                if generation_stats:
+                    message_metadata["generation_stats"] = generation_stats
                 assistant_message_id = db.add_message(
                     session_id,
                     "assistant",
                     full_assistant_reply,
-                    metadata=compact_web_source_metadata(web_results_data),
+                    metadata=message_metadata,
                 )
                 yield f"data: {json.dumps({'type': 'message_saved', 'role': 'assistant', 'message_id': assistant_message_id})}\n\n"
                 asyncio.create_task(
