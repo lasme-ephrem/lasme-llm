@@ -11,6 +11,11 @@ SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", ">", ">>", "<", "2>", "2>>"}
 
 
 def _parse_safe_command(command: str) -> list[str]:
+    if not settings.agent_terminal_enabled:
+        raise SecurityError(
+            "The host terminal is disabled. Use the isolated Python runner "
+            "for calculations, charts and data processing."
+        )
     if not command or not command.strip():
         raise SecurityError("Command is empty.")
     if any(token in command for token in ("\r", "\n", "`", "$(", "${")):
@@ -35,7 +40,7 @@ def _parse_safe_command(command: str) -> list[str]:
     return [part.strip('"') for part in parts]
 
 def tool_run_command(command: str, cwd: str = ".") -> str:
-    """Runs an allow-listed command inside the configured workspace."""
+    """Run a command only after the host terminal is explicitly enabled."""
     try:
         working_dir = resolve_workspace_path(cwd)
         args = _parse_safe_command(command)
@@ -66,7 +71,7 @@ TERMINAL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "run_command",
-        "description": "Execute a terminal shell command (e.g. pytest, npm test, python script, git)",
+        "description": "Execute an explicitly enabled host command. Disabled by default; use the isolated Python runner for computation.",
         "parameters": {
             "type": "object",
             "properties": {

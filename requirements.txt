@@ -4,11 +4,19 @@ httpx==0.28.1
 python-dotenv==1.2.2
 python-multipart==0.0.32
 pypdf==6.14.2
+PyMuPDF==1.26.7
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+reportlab==4.4.9
+pillow==12.1.1
+pytesseract==0.3.13
 ddgs==9.14.4
 tavily-python==0.7.26
 trafilatura==2.1.0
 typer==0.27.0
 rich==15.0.0
+pytest==9.0.2
 
 # Kept for the separate legacy Flask applications in this repository.
 Flask==3.1.3

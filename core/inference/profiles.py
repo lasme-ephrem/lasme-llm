@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 
 @dataclass(frozen=True)
@@ -13,14 +13,14 @@ class ModelProfile:
     num_predict: int
     history_tokens: int
     system_addendum: str
-    think: bool = True
+    think: Union[bool, str] = True
     keep_alive: str = "15m"
     options: Dict[str, Any] = field(default_factory=dict)
 
 
-# Gemma 4's authors recommend temperature=1, top_p=.95 and top_k=64.
-# Both local quantizations were measured successfully at 65,536 tokens on the
-# RTX 4070 Ti SUPER: ~7.2 GiB for Chat and ~9.8 GiB for Fable.
+# Gemma 4 Chat remains the resident general model. Its authors recommend
+# temperature=1, top_p=.95 and top_k=64. The 65,536-token profile was measured
+# successfully on the RTX 4070 Ti SUPER with 16 GiB of VRAM.
 GEMMA_CHAT_PROFILE = ModelProfile(
     temperature=1.0,
     num_ctx=65_536,
@@ -32,10 +32,52 @@ GEMMA_CHAT_PROFILE = ModelProfile(
         "adaptées au niveau de l'utilisateur. Pour une question complexe, "
         "raisonne silencieusement avant de donner une réponse nette."
     ),
+    keep_alive="-1",
     options={
         "top_p": 0.95,
         "top_k": 64,
         "repeat_penalty": 1.1,
+        "repeat_last_n": 256,
+    },
+)
+
+SMOL_FAST_PROFILE = ModelProfile(
+    temperature=0.45,
+    num_ctx=32_768,
+    num_predict=4_096,
+    history_tokens=22_000,
+    system_addendum=(
+        "Tu utilises le profil Lasme Rapide basé sur SmolLM3. Donne une "
+        "réponse concise, structurée et exacte. Utilise le raisonnement long "
+        "seulement lorsqu’il apporte un gain réel."
+    ),
+    think=False,
+    keep_alive="20m",
+    options={
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.08,
+        "repeat_last_n": 256,
+    },
+)
+
+QWEN_VISION_PROFILE = ModelProfile(
+    temperature=0.35,
+    num_ctx=16_384,
+    num_predict=6_144,
+    history_tokens=10_500,
+    system_addendum=(
+        "Tu utilises le profil Lasme Vision basé sur Qwen3-VL. Analyse les "
+        "images, documents visuels, tableaux, interfaces et graphiques avec "
+        "précision. Pour le texte et le code, distingue les observations "
+        "certaines des déductions et vérifie le résultat avant de répondre."
+    ),
+    think=False,
+    keep_alive="8m",
+    options={
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.08,
         "repeat_last_n": 256,
     },
 )
@@ -63,6 +105,10 @@ GEMMA_FABLE_PROFILE = ModelProfile(
 
 def get_model_profile(model: str) -> ModelProfile:
     normalized = (model or "").lower()
+    if "smol" in normalized:
+        return SMOL_FAST_PROFILE
+    if "qwen" in normalized or "vision" in normalized:
+        return QWEN_VISION_PROFILE
     if "fable" in normalized:
         return GEMMA_FABLE_PROFILE
     return GEMMA_CHAT_PROFILE

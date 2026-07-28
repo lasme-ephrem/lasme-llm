@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://cdn.jsdelivr.net; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Lasme LLM</title>
@@ -12,26 +12,22 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="apple-touch-icon" href="favicon.svg">
     
-    <!-- Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
-    
     <!-- KaTeX is local so math and its fonts also work without Internet. -->
     <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.16.9">
     
     <!-- Highlight.js Code Dark Theme -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/tokyo-night-dark.min.css">
+    <link rel="stylesheet" href="vendor/highlight/tokyo-night-dark.min.css?v=11.9.0">
     
     <!-- App Custom CSS -->
-    <link rel="stylesheet" href="style.css?v=20260727-merged-1">
+    <link rel="stylesheet" href="style.css?v=20260728-product-v6">
     
-    <!-- Markdown & Renderers CDN Scripts -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
+    <!-- Local pinned renderers keep chat and Canvas functional offline. -->
+    <script src="vendor/dompurify/purify.min.js?v=3.2.6"></script>
+    <script src="vendor/marked/marked.umd.js?v=15.0.12"></script>
+    <script src="vendor/highlight/highlight.min.js?v=11.9.0"></script>
     <script src="vendor/katex/katex.min.js?v=0.16.9"></script>
     <script src="vendor/katex/contrib/auto-render.min.js?v=0.16.9"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.8.0/dist/mermaid.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/twemoji@14.0.2/dist/twemoji.min.js" crossorigin="anonymous"></script>
+    <script src="vendor/mermaid/mermaid.min.js?v=10.8.0"></script>
 </head>
 <body>
     <div class="app-container">
@@ -109,7 +105,7 @@
                     </div>
                 </div>
 
-                <div class="workspace-context">
+                <button type="button" id="projectFilesBtn" class="workspace-context" title="Ouvrir les fichiers du projet">
                     <span class="workspace-context-icon" aria-hidden="true">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"></path>
@@ -117,7 +113,10 @@
                         </svg>
                     </span>
                     <span id="projectDocumentsSummary">Aucun document</span>
-                </div>
+                    <svg class="workspace-context-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                </button>
 
                 <select id="chatProjectSelect" aria-label="Projet actif" tabindex="-1">
                     <option value="default">Espace principal</option>
@@ -246,7 +245,7 @@
                 <div class="chat-center-wrapper">
                     <!-- Hidden File Inputs -->
                     <input type="file" id="docFileInput" accept=".pdf,.txt,.md" style="display:none;">
-                    <input type="file" id="imageFileInput" accept="image/png, image/jpeg, image/webp" style="display:none;">
+                    <input type="file" id="imageFileInput" multiple accept="image/png, image/jpeg, image/webp" style="display:none;">
 
                     <!-- Chat Messages Stream -->
                     <div class="chat-messages" id="chatMessages">
@@ -309,7 +308,7 @@
                                             <line x1="16" y1="13" x2="8" y2="13"></line>
                                             <line x1="16" y1="17" x2="8" y2="17"></line>
                                         </svg>
-                                        <span>Joindre un document (PDF, TXT)</span>
+                                        <span>Joindre un document ou une image</span>
                                     </button>
                                     <button type="button" id="menuAttachImageBtn" class="action-menu-item">
                                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366F1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -342,7 +341,8 @@
 
                                 <select id="inputModelSelect" class="input-model-dropdown" style="display:none;">
                                     <option value="gemma-4-chat" selected>Gemma 4 Chat</option>
-                                    <option value="gemma-4-fable">Gemma 4 Fable</option>
+                                    <option value="lasme-smol-fast">Lasme Rapide</option>
+                                    <option value="lasme-qwen-vision">Lasme Vision</option>
                                 </select>
 
                                 <!-- Model Selection Popover Menu -->
@@ -377,19 +377,34 @@
                                             </div>
                                             <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
-                                        <button type="button" class="intel-option" data-model="gemma-4-fable" data-label="Gemma 4 Fable">
+                                        <button type="button" class="intel-option" data-model="lasme-smol-fast" data-label="Lasme Rapide">
                                             <div class="intel-option-left">
-                                                <div class="intel-option-icon-wrap model-mark model-mark-fable" aria-hidden="true">
+                                                <div class="intel-option-icon-wrap model-mark model-mark-fast" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
-                                                        <path d="M7.1 7.3 12 4.45l4.9 2.85v5.7L12 15.85 7.1 13z" class="model-mark-line"></path>
-                                                        <path d="M12 4.45v5.7m0 0 4.9 2.85M12 10.15 7.1 13" class="model-mark-detail"></path>
-                                                        <circle cx="12" cy="10.15" r="1.75" class="model-mark-fill"></circle>
-                                                        <path d="M8.1 16.65c1.05 1.42 2.34 2.13 3.9 2.13 1.56 0 2.85-.71 3.9-2.13" class="model-mark-line"></path>
+                                                        <path d="M4 8.25h6M2.5 12h6M4 15.75h6" class="model-mark-detail"></path>
+                                                        <path d="m14.1 4.6-3 7h4l-2 7.8 7-10.2h-4.2l2.2-4.6z" class="model-mark-line"></path>
+                                                        <path d="m14.1 4.6-3 7h4l-2 7.8 7-10.2h-4.2l2.2-4.6z" class="model-mark-fill"></path>
                                                     </svg>
                                                 </div>
                                                 <div class="intel-option-text">
-                                                    <div class="intel-option-name">Gemma 4 Fable</div>
-                                                    <div class="intel-option-desc">Code et agentique · Q6</div>
+                                                    <div class="intel-option-name">Lasme Rapide</div>
+                                                    <div class="intel-option-desc">SmolLM3 3B · Q6 · très rapide</div>
+                                                </div>
+                                            </div>
+                                            <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                        </button>
+                                        <button type="button" class="intel-option" data-model="lasme-qwen-vision" data-label="Lasme Vision">
+                                            <div class="intel-option-left">
+                                                <div class="intel-option-icon-wrap model-mark model-mark-vision" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" fill="none">
+                                                        <path d="M3.4 12s3.1-5.2 8.6-5.2 8.6 5.2 8.6 5.2-3.1 5.2-8.6 5.2S3.4 12 3.4 12z" class="model-mark-line"></path>
+                                                        <circle cx="12" cy="12" r="2.65" class="model-mark-fill"></circle>
+                                                        <path d="M5 4.5H3.5V6M19 4.5h1.5V6M5 19.5H3.5V18M19 19.5h1.5V18" class="model-mark-detail"></path>
+                                                    </svg>
+                                                </div>
+                                                <div class="intel-option-text">
+                                                    <div class="intel-option-name">Lasme Vision</div>
+                                                    <div class="intel-option-desc">Qwen3-VL 8B · Q4 · images</div>
                                                 </div>
                                             </div>
                                             <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -506,6 +521,12 @@
                     <option value="code">Code source</option>
                     <option value="table">Tableau / données</option>
                     <option value="research">Dossier de recherche</option>
+                    <option value="html">Page HTML</option>
+                    <option value="interactive">Application interactive</option>
+                    <option value="diagram">Diagramme</option>
+                    <option value="mindmap">Carte mentale</option>
+                    <option value="chart">Graphique</option>
+                    <option value="presentation">Présentation</option>
                 </select>
                 <span id="canvasKindHint">Texte, formules, tableaux et blocs de code</span>
             </div>
@@ -513,12 +534,30 @@
             <select id="canvasVersionSelect" aria-label="Historique des versions"></select>
             <button type="button" id="canvasNewBtn">Nouveau</button>
             <button type="button" id="canvasSaveBtn" class="primary">Enregistrer</button>
+            <button type="button" id="canvasRunBtn" class="canvas-run-btn" hidden>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="m8 5 11 7-11 7z"></path>
+                </svg>
+                Exécuter
+            </button>
+            <select id="canvasExportFormatSelect" aria-label="Format d’export">
+                <option value="">Format auto</option>
+                <option value="html">HTML autonome</option>
+                <option value="pdf">PDF</option>
+                <option value="docx">Word</option>
+                <option value="xlsx">Excel</option>
+                <option value="pptx">PowerPoint</option>
+                <option value="csv">CSV</option>
+                <option value="md">Markdown</option>
+                <option value="txt">Texte</option>
+            </select>
             <button type="button" id="canvasExportBtn">Exporter</button>
         </div>
         <div class="canvas-workspace">
             <textarea id="canvasEditor" spellcheck="true" placeholder="Écrivez ou importez une réponse ici…"></textarea>
             <article id="canvasPreview" class="canvas-preview markdown-body"></article>
         </div>
+        <section id="canvasRunResult" class="canvas-run-result" hidden aria-live="polite"></section>
         <footer class="canvas-footer">
             <input id="canvasChangeSummary" maxlength="240" placeholder="Résumé facultatif de la modification">
             <span id="canvasStatus" aria-live="polite"></span>
@@ -620,6 +659,36 @@
                         <span>Instructions du projet</span>
                         <textarea id="projectInstructionsInput" maxlength="8000" rows="4" placeholder="Contexte, ton, objectifs et contraintes propres au projet"></textarea>
                     </label>
+                    <div class="project-classification-grid">
+                        <label>
+                            <span>Type de projet</span>
+                            <select id="projectTypeSelect">
+                                <option value="general">Général</option>
+                                <option value="research">Recherche</option>
+                                <option value="learning">Apprentissage</option>
+                                <option value="data">Données et analyse</option>
+                                <option value="coding">Développement</option>
+                                <option value="writing">Rédaction</option>
+                                <option value="media">Visuel et média</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Couleur</span>
+                            <input id="projectColorInput" type="color" value="#5B6EE1">
+                        </label>
+                    </div>
+                    <label>
+                        <span>Étiquettes</span>
+                        <input id="projectTagsInput" maxlength="400" autocomplete="off" placeholder="Ex. statistiques, cours, client">
+                        <small>Séparez les étiquettes par des virgules.</small>
+                    </label>
+                    <label class="project-favorite-field">
+                        <span>
+                            <strong>Ajouter aux favoris</strong>
+                            <small>Épingle ce projet en haut de sa catégorie.</small>
+                        </span>
+                        <input id="projectFavoriteInput" type="checkbox">
+                    </label>
                 </div>
                 <label class="project-memory-field">
                     <span>Mémoire</span>
@@ -636,6 +705,76 @@
                 <span id="projectStatus" aria-live="polite"></span>
                 <button type="button" id="projectSaveBtn" class="memory-refresh-btn">Enregistrer</button>
             </footer>
+        </section>
+    </div>
+
+    <div id="fileLibraryModal" class="memory-modal file-library-modal" style="display:none;" aria-hidden="true">
+        <div id="fileLibraryOverlay" class="memory-modal-overlay"></div>
+        <section class="memory-modal-panel file-library-panel" role="dialog" aria-modal="true" aria-labelledby="fileLibraryTitle">
+            <header class="memory-modal-header file-library-header">
+                <span class="file-library-header-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"></path>
+                        <path d="M14 2v6h6"></path>
+                        <path d="M8 13h8M8 17h5"></path>
+                    </svg>
+                </span>
+                <div>
+                    <h2 id="fileLibraryTitle">Fichiers du projet</h2>
+                    <p id="fileLibrarySubtitle">Documents originaux, index RAG et aperçus.</p>
+                </div>
+                <button type="button" id="fileLibraryCloseBtn" class="memory-close-btn" aria-label="Fermer">×</button>
+            </header>
+            <div class="file-library-toolbar">
+                <label class="file-library-search">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <circle cx="11" cy="11" r="7"></circle>
+                        <path d="m20 20-3.4-3.4"></path>
+                    </svg>
+                    <input id="fileLibrarySearchInput" type="search" placeholder="Rechercher un fichier">
+                </label>
+                <select id="fileLibraryKindFilter" aria-label="Filtrer les fichiers">
+                    <option value="all">Tous les types</option>
+                    <option value="pdf">PDF</option>
+                    <option value="word">Word</option>
+                    <option value="spreadsheet">Excel</option>
+                    <option value="presentation">PowerPoint</option>
+                    <option value="image">Images</option>
+                    <option value="text">Textes</option>
+                </select>
+                <button type="button" id="fileLibraryUploadBtn" class="file-library-upload-btn">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 16V4"></path>
+                        <path d="m7 9 5-5 5 5"></path>
+                        <path d="M5 20h14"></path>
+                    </svg>
+                    Ajouter
+                </button>
+                <input id="projectFileUploadInput" type="file" multiple hidden accept=".pdf,.txt,.md,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp">
+            </div>
+            <div class="file-library-body">
+                <aside class="file-library-list-pane">
+                    <div id="fileLibraryDropzone" class="file-library-dropzone">
+                        <span>Déposez des fichiers ici</span>
+                        <small>PDF, Word, Excel, PowerPoint, images et textes · 25 Mo max.</small>
+                    </div>
+                    <div id="fileLibraryStatus" class="file-library-status" aria-live="polite"></div>
+                    <div id="fileLibraryList" class="file-library-list"></div>
+                </aside>
+                <section id="filePreviewPane" class="file-preview-pane">
+                    <div class="file-preview-empty">
+                        <span class="file-preview-empty-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"></path>
+                                <path d="M14 2v6h6"></path>
+                                <path d="m9 15 2 2 4-5"></path>
+                            </svg>
+                        </span>
+                        <strong>Sélectionnez un fichier</strong>
+                        <span>Son aperçu et ses informations apparaîtront ici.</span>
+                    </div>
+                </section>
+            </div>
         </section>
     </div>
 
@@ -723,7 +862,7 @@
 
     <script src="math-renderer.js?v=20260725-latex"></script>
     <script src="progressive-renderer.js?v=20260725-cleanroom"></script>
-    <script src="app.js?v=20260727-merged-1"></script>
-    <script src="workspace.js?v=20260727-model-canvas-1"></script>
+    <script src="app.js?v=20260728-product-v6"></script>
+    <script src="workspace.js?v=20260728-product-v6"></script>
 </body>
 </html>

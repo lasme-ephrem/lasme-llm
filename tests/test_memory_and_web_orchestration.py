@@ -180,6 +180,98 @@ class WebOrchestrationTests(unittest.TestCase):
             ["Un", "Deux"],
         )
 
+    def test_misleading_snippet_is_not_reinjected_after_page_disagrees(self):
+        def fake_search(query, max_results, conversation_messages=None):
+            return {
+                "status": "ok",
+                "engine": "test",
+                "errors": [],
+                "results": [
+                    {
+                        "title": "Latest Python stable release",
+                        "url": "https://example.org/python",
+                        "snippet": "Python 3.99 is the latest stable release.",
+                    }
+                ],
+                "strategy": {
+                    "scope": "direct",
+                    "official_domains": ["python.org"],
+                },
+            }
+
+        report = search_extract_verify(
+            "latest stable Python version",
+            search_fn=fake_search,
+            fetch_fn=lambda url, timeout: (
+                "Recette de tarte aux pommes avec cannelle et sucre."
+            ),
+        )
+
+        self.assertEqual(report["results"], [])
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(
+            report["strategy"]["verification_status"],
+            "no_verified_evidence",
+        )
+
+    def test_provider_chain_expands_after_failed_page_verification(self):
+        calls = []
+
+        def fake_search(
+            query,
+            max_results,
+            conversation_messages=None,
+            force_full_chain=False,
+            skip_primary_provider=False,
+        ):
+            calls.append((force_full_chain, skip_primary_provider))
+            result = (
+                {
+                    "title": "Python release archive",
+                    "url": "https://bad.example/archive",
+                    "snippet": "Latest stable Python release.",
+                }
+                if not force_full_chain
+                else {
+                    "title": "Python 3.14 stable release",
+                    "url": "https://python.org/downloads/",
+                    "snippet": "Python 3.14 is the latest stable version.",
+                    "quality": "official",
+                }
+            )
+            return {
+                "status": "ok",
+                "engine": "test",
+                "errors": [],
+                "results": [result],
+                "strategy": {
+                    "scope": "direct",
+                    "official_domains": ["python.org"],
+                },
+            }
+
+        def fake_fetch(url, timeout):
+            if "bad.example" in url:
+                return "Archive historique sans version stable actuelle."
+            return (
+                "Python 3.14 is the latest stable Python release available "
+                "from the official Python downloads page."
+            )
+
+        report = search_extract_verify(
+            "latest stable Python version",
+            search_fn=fake_search,
+            fetch_fn=fake_fetch,
+        )
+
+        self.assertIn((True, True), calls)
+        self.assertTrue(report["strategy"]["expanded_after_verification"])
+        self.assertEqual(
+            report["results"][0]["url"],
+            "https://python.org/downloads/",
+        )
+        self.assertTrue(report["results"][0]["verified"])
+
     def test_specialized_intent_detection_is_conservative(self):
         self.assertEqual(
             detect_specialized_request("Quelle est la météo à Paris ?")["type"],

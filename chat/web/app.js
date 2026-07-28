@@ -1,4 +1,6 @@
 let API_BASE = "/api";
+const LASME_FAST_MODEL = "lasme-smol-fast";
+const LASME_REASONING_MODEL = "lasme-qwen-vision";
 
 // A Cloudflared/reverse-proxy URL can be opened once with ?token=... .
 // The token is moved to sessionStorage immediately and never persisted across
@@ -99,13 +101,22 @@ const selectedReasoningName = document.getElementById("selectedReasoningName");
 const mobilePickerMedia = window.matchMedia("(max-width: 768px)");
 
 function modelIconMarkup(model) {
-    if (String(model || "").includes("fable")) {
+    const normalized = String(model || "").toLowerCase();
+    if (normalized.includes("smol") || normalized.includes("fast")) {
         return `
             <svg viewBox="0 0 24 24" fill="none">
-                <path d="M7.1 7.3 12 4.45l4.9 2.85v5.7L12 15.85 7.1 13z" class="model-mark-line"></path>
-                <path d="M12 4.45v5.7m0 0 4.9 2.85M12 10.15 7.1 13" class="model-mark-detail"></path>
-                <circle cx="12" cy="10.15" r="1.75" class="model-mark-fill"></circle>
-                <path d="M8.1 16.65c1.05 1.42 2.34 2.13 3.9 2.13 1.56 0 2.85-.71 3.9-2.13" class="model-mark-line"></path>
+                <path d="M4 8.25h6M2.5 12h6M4 15.75h6" class="model-mark-detail"></path>
+                <path d="m14.1 4.6-3 7h4l-2 7.8 7-10.2h-4.2l2.2-4.6z" class="model-mark-line"></path>
+                <path d="m14.1 4.6-3 7h4l-2 7.8 7-10.2h-4.2l2.2-4.6z" class="model-mark-fill"></path>
+            </svg>
+        `;
+    }
+    if (normalized.includes("qwen") || normalized.includes("vision")) {
+        return `
+            <svg viewBox="0 0 24 24" fill="none">
+                <path d="M3.4 12s3.1-5.2 8.6-5.2 8.6 5.2 8.6 5.2-3.1 5.2-8.6 5.2S3.4 12 3.4 12z" class="model-mark-line"></path>
+                <circle cx="12" cy="12" r="2.65" class="model-mark-fill"></circle>
+                <path d="M5 4.5H3.5V6M19 4.5h1.5V6M5 19.5H3.5V18M19 19.5h1.5V18" class="model-mark-detail"></path>
             </svg>
         `;
     }
@@ -120,9 +131,13 @@ function modelIconMarkup(model) {
 
 function updateModelIdentity(model) {
     if (!modelTriggerIcon) return;
-    const isFable = String(model || "").includes("fable");
-    modelTriggerIcon.classList.toggle("model-mark-chat", !isFable);
-    modelTriggerIcon.classList.toggle("model-mark-fable", isFable);
+    const normalized = String(model || "").toLowerCase();
+    const identity = normalized.includes("smol") || normalized.includes("fast")
+        ? "fast"
+        : (normalized.includes("qwen") || normalized.includes("vision") ? "vision" : "chat");
+    ["chat", "fast", "vision", "fable"].forEach(name => {
+        modelTriggerIcon.classList.toggle(`model-mark-${name}`, name === identity);
+    });
     modelTriggerIcon.innerHTML = modelIconMarkup(model);
 }
 
@@ -291,8 +306,8 @@ const imageBadgePreview = document.getElementById("imageBadgePreview");
 const imageBadgeName = document.getElementById("imageBadgeName");
 const clearImageBtn = document.getElementById("clearImageBtn");
 
-let attachedImageBase64 = null;
-let attachedImageDataUrl = null;
+let attachedImageBase64Items = [];
+let attachedImageDataUrls = [];
 
 // Plus Action Popover Menu Toggle Logic
 if (attachFileBtn && inputActionWrapper) {
@@ -363,29 +378,37 @@ if (imageViewerOverlay) imageViewerOverlay.addEventListener("click", closeImageV
 
 // Multimodal Image Attachment Handler
 if (imageFileInput) {
-    imageFileInput.addEventListener("change", () => {
+    imageFileInput.addEventListener("change", async () => {
         if (!imageFileInput.files || imageFileInput.files.length === 0) return;
-        const file = imageFileInput.files[0];
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            attachedImageDataUrl = e.target.result;
-            // Clean base64 string without data:image/png;base64, prefix
-            attachedImageBase64 = attachedImageDataUrl.split(",")[1];
-            
+        const files = Array.from(imageFileInput.files).slice(0, 4);
+        const readDataUrl = file => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+        });
+        try {
+            const urls = await Promise.all(files.map(readDataUrl));
+            attachedImageDataUrls = urls;
+            attachedImageBase64Items = urls.map(url => url.split(",")[1]).filter(Boolean);
             if (attachedImageBadge && imageBadgePreview && imageBadgeName) {
-                imageBadgePreview.src = attachedImageDataUrl;
-                imageBadgeName.textContent = file.name;
+                imageBadgePreview.src = urls[0];
+                imageBadgeName.textContent = files.length > 1
+                    ? `${files[0].name} · +${files.length - 1}`
+                    : files[0].name;
                 attachedImageBadge.style.display = "inline-flex";
             }
-        };
-        reader.readAsDataURL(file);
+        } catch (_) {
+            attachedImageBase64Items = [];
+            attachedImageDataUrls = [];
+        }
     });
 }
 
 if (clearImageBtn) {
     clearImageBtn.addEventListener("click", () => {
-        attachedImageBase64 = null;
-        attachedImageDataUrl = null;
+        attachedImageBase64Items = [];
+        attachedImageDataUrls = [];
         if (attachedImageBadge) attachedImageBadge.style.display = "none";
         if (imageFileInput) imageFileInput.value = "";
     });
@@ -1316,11 +1339,15 @@ async function sendChatMessage(options = {}) {
     const text = replayExistingLastUser
         ? String(replayMessage?.content || "").trim()
         : chatInput.value.trim();
-    if (!text && !attachedImageBase64) return;
+    if (!text && !attachedImageBase64Items.length) return;
     const requestIsTemporary = temporaryChatEnabled;
 
-    const currentImageB64 = replayExistingLastUser ? null : attachedImageBase64;
-    const currentImageDataUrl = replayExistingLastUser ? null : attachedImageDataUrl;
+    const currentImageB64Items = replayExistingLastUser
+        ? []
+        : [...attachedImageBase64Items];
+    const currentImageDataUrls = replayExistingLastUser
+        ? []
+        : [...attachedImageDataUrls];
 
     // Reset attached image UI
     if (!replayExistingLastUser && clearImageBtn) clearImageBtn.click();
@@ -1344,7 +1371,7 @@ async function sendChatMessage(options = {}) {
     const existingUserMessages = chatMessages.querySelectorAll(".message.user");
     const userBubble = replayExistingLastUser
         ? existingUserMessages[existingUserMessages.length - 1]?.querySelector(".bubble")
-        : appendMessage("user", userPromptText, currentImageDataUrl);
+        : appendMessage("user", userPromptText, currentImageDataUrls[0] || null);
     if (
         requestIsTemporary
         && userBubble
@@ -1359,8 +1386,8 @@ async function sendChatMessage(options = {}) {
     }
     
     const userMsgObj = { role: "user", content: userPromptText };
-    if (currentImageB64) {
-        userMsgObj.images = [currentImageB64];
+    if (currentImageB64Items.length) {
+        userMsgObj.images = currentImageB64Items;
     }
     if (!replayExistingLastUser) conversationHistory.push(userMsgObj);
     const streamConversationHistory = conversationHistory;
@@ -1418,12 +1445,18 @@ async function sendChatMessage(options = {}) {
                 project_id: currentProjectId,
                 question: userPromptText,
                 model: selectedModel,
+                selected_file_ids: (
+                    window.LasmeWorkspace?.getSelectedFileIds?.() || []
+                ),
                 temporary: requestIsTemporary
             }
             : {
                 session_id: streamSessionId,
                 project_id: currentProjectId,
                 document_scope_id: currentDocumentScopeId,
+                selected_file_ids: (
+                    window.LasmeWorkspace?.getSelectedFileIds?.() || []
+                ),
                 model: selectedModel,
                 messages: cleanHistory,
                 intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "balanced",
@@ -2204,11 +2237,23 @@ function renderRichContent(container, text, webResults) {
         return;
     }
 
-    // Keep citations in the expandable source drawer instead of interrupting
-    // the prose with repeated domain badges.
-    text = text
-        .replace(/(?:\s*\[\d+(?:\s*[,–-]\s*\d+)*\])+/g, "")
-        .replace(/[ \t]+([,.;:!?])/g, "$1");
+    // Keep valid Web citations in the expandable source drawer. Numeric
+    // arrays such as Python/JSON "[1]" must remain untouched when no matching
+    // Web source exists.
+    const sourceCount = Array.isArray(webResults) ? webResults.length : 0;
+    if (sourceCount > 0) {
+        text = text.replace(
+            /\s*\[(\d+(?:\s*[,–-]\s*\d+)*)\]/g,
+            (fullMatch, body) => {
+                const numbers = String(body).match(/\d+/g)?.map(Number) || [];
+                const valid = numbers.length > 0 && numbers.every(
+                    number => number >= 1 && number <= sourceCount
+                );
+                return valid ? "" : fullMatch;
+            }
+        );
+    }
+    text = text.replace(/[ \t]+([,.;:!?])/g, "$1");
 
     const preparedMath = window.LasmeMath
         ? window.LasmeMath.prepareForMarkdown(text)
@@ -2319,6 +2364,9 @@ function renderRichContent(container, text, webResults) {
         wrapper.appendChild(pre);
     });
 
+    enhanceResponseTables(container);
+    linkDocumentCitations(container);
+
     // STEP 7: Mermaid Diagrams Rendering
     if (typeof mermaid !== "undefined") {
         container.querySelectorAll("pre code.language-mermaid").forEach((block) => {
@@ -2337,7 +2385,120 @@ function renderRichContent(container, text, webResults) {
     replaceFlagsWithSvg(container);
 }
 
-// Bulletproof Country Flag Emoji Replacer for Windows
+function tableToTsv(table) {
+    return Array.from(table.rows)
+        .map(row => Array.from(row.cells)
+            .map(cell => cell.innerText.replace(/\s+/g, " ").trim())
+            .join("\t"))
+        .join("\n");
+}
+
+function tableToCsv(table) {
+    const quote = value => `"${String(value).replace(/"/g, '""')}"`;
+    return Array.from(table.rows)
+        .map(row => Array.from(row.cells)
+            .map(cell => quote(cell.innerText.replace(/\s+/g, " ").trim()))
+            .join(","))
+        .join("\r\n");
+}
+
+function enhanceResponseTables(container) {
+    container.querySelectorAll("table").forEach((table, index) => {
+        if (table.closest(".response-table-artifact")) return;
+        const shell = document.createElement("section");
+        shell.className = "response-table-artifact";
+        const toolbar = document.createElement("header");
+        toolbar.className = "response-table-toolbar";
+        const label = document.createElement("span");
+        label.textContent = `Tableau ${index + 1}`;
+        const actions = document.createElement("span");
+        actions.className = "response-table-actions";
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.title = "Copier le tableau";
+        copy.textContent = "Copier";
+        copy.addEventListener("click", async () => {
+            await navigator.clipboard.writeText(tableToTsv(table));
+            copy.textContent = "Copié";
+            setTimeout(() => { copy.textContent = "Copier"; }, 1600);
+        });
+        const exportButton = document.createElement("button");
+        exportButton.type = "button";
+        exportButton.title = "Exporter au format CSV";
+        exportButton.textContent = "CSV";
+        exportButton.addEventListener("click", () => {
+            const blob = new Blob(["\uFEFF", tableToCsv(table)], {
+                type: "text/csv;charset=utf-8"
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `tableau-${index + 1}.csv`;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 0);
+        });
+        actions.append(copy, exportButton);
+        toolbar.append(label, actions);
+        const scroll = document.createElement("div");
+        scroll.className = "response-table-scroll";
+        table.parentNode.insertBefore(shell, table);
+        scroll.appendChild(table);
+        shell.append(toolbar, scroll);
+    });
+}
+
+function linkDocumentCitations(container) {
+    const pattern = /\[Document\s*:\s*([^,\]\n]+?)(?:\s*,\s*p(?:age)?\.?\s*(\d+))?\]\s*(?:\{file:([a-zA-Z0-9:_-]+)\})?/gi;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+        if (
+            node.nodeValue
+            && pattern.test(node.nodeValue)
+            && !node.parentElement?.closest("code, pre, .document-citation")
+        ) {
+            nodes.push(node);
+        }
+        pattern.lastIndex = 0;
+    }
+    nodes.forEach(textNode => {
+        const source = textNode.nodeValue;
+        const fragment = document.createDocumentFragment();
+        let cursor = 0;
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(source))) {
+            fragment.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "document-citation";
+            button.textContent = match[2]
+                ? `${match[1].trim()} · p. ${match[2]}`
+                : match[1].trim();
+            button.title = "Ouvrir le document source";
+            button.addEventListener("click", () => {
+                const page = match[2] ? Number(match[2]) : null;
+                const opened = match[3]
+                    ? window.LasmeWorkspace?.openFile?.(match[3], page)
+                    : false;
+                if (!opened) {
+                    window.LasmeWorkspace?.openFileByName?.(
+                        match[1].trim(),
+                        page
+                    );
+                }
+            });
+            fragment.appendChild(button);
+            cursor = pattern.lastIndex;
+        }
+        fragment.appendChild(document.createTextNode(source.slice(cursor)));
+        textNode.replaceWith(fragment);
+    });
+    pattern.lastIndex = 0;
+}
+
+// Deterministic country-code badge for Windows and offline installations.
 function replaceFlagsWithSvg(container) {
     if (!container) return;
     const flagRegex = /([\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF])/g;
@@ -2355,10 +2516,12 @@ function replaceFlagsWithSvg(container) {
             const span = document.createElement("span");
             span.className = "emoji-flag-span";
             span.innerHTML = textNode.nodeValue.replace(flagRegex, (match) => {
-                const codePoints = Array.from(match)
-                    .map(c => c.codePointAt(0).toString(16))
-                    .join('-');
-                return `<img class="emoji flag-emoji" src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/${codePoints}.svg" alt="${match}" style="height:1.25em; width:1.25em; vertical-align:-0.18em; display:inline-block; margin:0 2px;">`;
+                const countryCode = Array.from(match)
+                    .map(character => String.fromCharCode(
+                        character.codePointAt(0) - 0x1F1E6 + 65
+                    ))
+                    .join("");
+                return `<span class="flag-fallback" role="img" aria-label="${countryCode}">${countryCode}</span>`;
             });
             parent.replaceChild(span, textNode);
         }
@@ -2554,7 +2717,7 @@ if (ideRunAgentBtn) {
             const resp = await fetch(`${API_BASE}/coding/agent/stream`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt: prompt, model: "gemma-4-fable" })
+                body: JSON.stringify({ prompt: prompt, model: LASME_REASONING_MODEL })
             });
 
             const reader = resp.body.getReader();
@@ -2836,7 +2999,7 @@ async function runAntigravityTask() {
         const resp = await fetch(`${API_BASE}/coding/agent/stream`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt: prompt, model: "gemma-4-fable" })
+                body: JSON.stringify({ prompt: prompt, model: LASME_REASONING_MODEL })
         });
 
         const reader = resp.body.getReader();
@@ -3493,7 +3656,7 @@ async function sendCodingAgentMessage() {
         const resp = await fetch(`${API_BASE}/coding/agent/stream`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt: prompt, model: "gemma-4-fable", web_search: useWeb })
+                body: JSON.stringify({ prompt: prompt, model: LASME_REASONING_MODEL, web_search: useWeb })
         });
 
         const reader = resp.body.getReader();

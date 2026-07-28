@@ -44,7 +44,7 @@ class LasmeCodingAgent:
         self.model = model_name
         tools_schema = (
             CODING_TOOLS_SCHEMAS
-            + [TERMINAL_TOOL_SCHEMA]
+            + ([TERMINAL_TOOL_SCHEMA] if settings.agent_terminal_enabled else [])
             + GIT_TOOLS_SCHEMAS
             + SUBAGENT_TOOLS_SCHEMAS
         )
@@ -74,6 +74,8 @@ class LasmeCodingAgent:
             "list_subagents": tool_list_subagents,
             "kill_subagent": tool_kill_subagent
         }
+        if not settings.agent_terminal_enabled:
+            self.tools_map.pop("run_command", None)
         if not settings.allow_destructive_agent_tools:
             self.tools_map.pop("delete_file", None)
             self.tools_map.pop("move_file", None)

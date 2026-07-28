@@ -19,6 +19,13 @@ PROXY_HEADERS = (
     "x-real-ip",
     "cf-ray",
 )
+INSECURE_ACCESS_TOKENS = {
+    "replace-with-a-long-random-token",
+    "change-me",
+    "changeme",
+    "your-token",
+    "votre-jeton",
+}
 
 
 class SecurityError(ValueError):
@@ -34,8 +41,19 @@ def is_direct_local_request(request: Request) -> bool:
     return client_host in LOCAL_HOSTS and not is_proxied_request(request)
 
 
+def configured_access_token() -> str:
+    token = settings.access_token.strip()
+    if (
+        len(token) < 24
+        or token.casefold() in INSECURE_ACCESS_TOKENS
+        or "replace-with" in token.casefold()
+    ):
+        return ""
+    return token
+
+
 def request_has_valid_token(request: Request) -> bool:
-    configured = settings.access_token.strip()
+    configured = configured_access_token()
     if not configured:
         return False
     supplied = request.headers.get("x-lasme-token", "").strip()
@@ -51,7 +69,7 @@ def request_has_valid_token(request: Request) -> bool:
 
 
 def request_has_valid_query_token(request: Request) -> bool:
-    configured = settings.access_token.strip()
+    configured = configured_access_token()
     supplied = request.query_params.get("token", "").strip()
     return (
         bool(configured)

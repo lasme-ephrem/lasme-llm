@@ -10,7 +10,7 @@ class RemoteAPISecurityTests(unittest.TestCase):
     def setUp(self):
         self.previous_token = settings.access_token
         self.previous_remote_coding = settings.allow_remote_coding
-        settings.access_token = "test-secret-token"
+        settings.access_token = "test-secret-token-very-long-123"
         settings.allow_remote_coding = False
         self.client = TestClient(app)
 
@@ -25,14 +25,14 @@ class RemoteAPISecurityTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/sessions",
-            headers={"X-Lasme-Token": "test-secret-token"},
+            headers={"X-Lasme-Token": "test-secret-token-very-long-123"},
         )
         self.assertEqual(response.status_code, 200)
 
     def test_remote_coding_api_stays_disabled_with_valid_token(self):
         response = self.client.get(
             "/api/coding/tree",
-            headers={"X-Lasme-Token": "test-secret-token"},
+            headers={"X-Lasme-Token": "test-secret-token-very-long-123"},
         )
         self.assertEqual(response.status_code, 403)
 

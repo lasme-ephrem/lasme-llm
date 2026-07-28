@@ -37,14 +37,19 @@ class SecurityTests(unittest.TestCase):
                 validate_public_http_url(url)
 
     def test_terminal_blocks_shell_control_and_unknown_executables(self):
-        with self.assertRaises(SecurityError):
-            _parse_safe_command("python -m unittest | powershell")
-        with self.assertRaises(SecurityError):
-            _parse_safe_command("powershell -Command Get-ChildItem")
-        self.assertEqual(
-            _parse_safe_command("python -m unittest"),
-            ["python", "-m", "unittest"],
-        )
+        previous = settings.agent_terminal_enabled
+        settings.agent_terminal_enabled = False
+        try:
+            for command in (
+                "python -c \"open(r'C:\\Windows\\win.ini').read()\"",
+                "node -e \"require('fs').rmSync('C:/outside')\"",
+                "git -C C:\\Users\\lasme status",
+                "python -m unittest",
+            ):
+                with self.subTest(command=command), self.assertRaises(SecurityError):
+                    _parse_safe_command(command)
+        finally:
+            settings.agent_terminal_enabled = previous
 
     def test_web_results_prefer_editorial_sources_over_social_reposts(self):
         results = [

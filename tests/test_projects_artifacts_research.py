@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from chat.server import main as server_main
 from core.artifacts.store import ArtifactStore
+from core.files.store import ProjectFileStore
 from core.memory.database import (
     DEFAULT_PROJECT_DESCRIPTION,
     DEFAULT_PROJECT_ID,
@@ -40,6 +42,40 @@ class ProjectConversationTests(unittest.TestCase):
             self.assertEqual(project["memory_mode"], "off")
             self.assertFalse(manager.delete_project(DEFAULT_PROJECT_ID))
 
+    def test_legacy_fable_sessions_are_migrated_to_chat_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "legacy.db"
+            manager = DatabaseManager(database_path)
+            session = manager.create_session(model="gemma-4-chat")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "UPDATE sessions SET model = 'gemma-4-fable' "
+                    "WHERE id = ?",
+                    (session["id"],),
+                )
+                connection.execute("PRAGMA user_version = 1")
+                connection.commit()
+            finally:
+                connection.close()
+
+            migrated = DatabaseManager(database_path)
+
+            self.assertEqual(
+                migrated.get_session(session["id"])["model"],
+                "gemma-4-chat",
+            )
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "PRAGMA user_version"
+                    ).fetchone()[0],
+                    2,
+                )
+            finally:
+                connection.close()
+
     def test_project_isolation_and_non_destructive_branch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = DatabaseManager(Path(temp_dir) / "projects.db")
@@ -72,6 +108,50 @@ class ProjectConversationTests(unittest.TestCase):
             self.assertEqual(branch_messages[0]["content"], "Explique la version corrigée.")
             self.assertEqual(branch["project_id"], project["id"])
             self.assertEqual(branch["parent_session_id"], source["id"])
+
+    def test_project_deletion_cascades_all_project_owned_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_path = root / "project-cascade.db"
+            manager = DatabaseManager(database_path)
+            artifacts = ArtifactStore(database_path)
+            files = ProjectFileStore(
+                db_path=database_path,
+                storage_root=root / "originals",
+            )
+            rag = RAGDocumentStore(database_path)
+            project = manager.create_project("Projet jetable")
+            session = manager.create_session(
+                "Conversation",
+                project_id=project["id"],
+            )
+            manager.add_message(session["id"], "user", "Message privé")
+            artifact = artifacts.create(
+                project_id=project["id"],
+                title="Note",
+                content="Contenu privé",
+            )
+            file_record, _ = files.add(
+                project_id=project["id"],
+                filename="source.md",
+                content=b"# Source\nDonnee privee.",
+            )
+            rag.add_document(
+                project["id"],
+                "source.md",
+                files.read(file_record["id"]),
+                file_id=file_record["id"],
+            )
+
+            self.assertTrue(manager.delete_project(project["id"]))
+            files.remove_project_storage(project["id"])
+
+            self.assertIsNone(manager.get_project(project["id"]))
+            self.assertIsNone(manager.get_session(session["id"]))
+            self.assertIsNone(artifacts.get(artifact["id"]))
+            self.assertEqual(rag.list_documents(project["id"]), [])
+            self.assertIsNone(files.get(file_record["id"]))
+            self.assertFalse((root / "originals" / project["id"]).exists())
 
 
 class TemporaryConversationTests(unittest.IsolatedAsyncioTestCase):

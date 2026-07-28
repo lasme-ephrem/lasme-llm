@@ -2,7 +2,19 @@ let chatProjects = [];
 let editingProjectId = null;
 let activeCanvasArtifact = null;
 let canvasArtifacts = [];
+let projectFiles = [];
+let activeProjectFileId = null;
+let selectedProjectFileIds = new Set();
 const WORKSPACE_PRIMARY_PROJECT_ID = "default";
+const PROJECT_TYPE_LABELS = {
+    general: "Général",
+    research: "Recherche",
+    learning: "Apprentissage",
+    data: "Données et analyse",
+    coding: "Développement",
+    writing: "Rédaction",
+    media: "Visuel et média"
+};
 
 const chatProjectSelect = document.getElementById("chatProjectSelect");
 const workspaceSwitcher = document.querySelector(".workspace-switcher");
@@ -25,13 +37,30 @@ const projectEditableFields = document.getElementById("projectEditableFields");
 const projectNameInput = document.getElementById("projectNameInput");
 const projectDescriptionInput = document.getElementById("projectDescriptionInput");
 const projectInstructionsInput = document.getElementById("projectInstructionsInput");
+const projectTypeSelect = document.getElementById("projectTypeSelect");
+const projectColorInput = document.getElementById("projectColorInput");
+const projectTagsInput = document.getElementById("projectTagsInput");
+const projectFavoriteInput = document.getElementById("projectFavoriteInput");
 const projectMemoryModeSelect = document.getElementById("projectMemoryModeSelect");
 const projectSaveBtn = document.getElementById("projectSaveBtn");
 const projectDeleteBtn = document.getElementById("projectDeleteBtn");
 const projectStatus = document.getElementById("projectStatus");
 const projectDocumentsSummary = document.getElementById("projectDocumentsSummary");
+const projectFilesBtn = document.getElementById("projectFilesBtn");
+const fileLibraryModal = document.getElementById("fileLibraryModal");
+const fileLibraryOverlay = document.getElementById("fileLibraryOverlay");
+const fileLibraryCloseBtn = document.getElementById("fileLibraryCloseBtn");
+const fileLibrarySubtitle = document.getElementById("fileLibrarySubtitle");
+const fileLibrarySearchInput = document.getElementById("fileLibrarySearchInput");
+const fileLibraryKindFilter = document.getElementById("fileLibraryKindFilter");
+const fileLibraryUploadBtn = document.getElementById("fileLibraryUploadBtn");
+const projectFileUploadInput = document.getElementById("projectFileUploadInput");
+const fileLibraryDropzone = document.getElementById("fileLibraryDropzone");
+const fileLibraryStatus = document.getElementById("fileLibraryStatus");
+const fileLibraryList = document.getElementById("fileLibraryList");
+const filePreviewPane = document.getElementById("filePreviewPane");
 
-function projectIconMarkup(isPrimary, size = 18) {
+function projectIconMarkup(isPrimary, size = 18, projectType = "general") {
     if (isPrimary) {
         return `
             <svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
@@ -41,9 +70,46 @@ function projectIconMarkup(isPrimary, size = 18) {
             </svg>
         `;
     }
+    const typeIcons = {
+        research: `
+            <path d="M4 19.5h16"></path>
+            <path d="M7 17V9l5-5 5 5v8"></path>
+            <path d="M10 17v-4h4v4"></path>
+            <circle cx="12" cy="8.5" r="1.5"></circle>
+        `,
+        learning: `
+            <path d="m3 9 9-5 9 5-9 5z"></path>
+            <path d="M7 12v4.5c2.8 2 7.2 2 10 0V12"></path>
+            <path d="M21 9v6"></path>
+        `,
+        data: `
+            <path d="M4 19V9"></path>
+            <path d="M10 19V5"></path>
+            <path d="M16 19v-7"></path>
+            <path d="M22 19H2"></path>
+        `,
+        coding: `
+            <path d="m8 9-4 3 4 3"></path>
+            <path d="m16 9 4 3-4 3"></path>
+            <path d="m14 5-4 14"></path>
+        `,
+        writing: `
+            <path d="M4 20h16"></path>
+            <path d="m14.7 4.3 5 5L9 20H4v-5z"></path>
+            <path d="m12.5 6.5 5 5"></path>
+        `,
+        media: `
+            <rect x="3" y="5" width="18" height="14" rx="3"></rect>
+            <path d="m8 15 3-3 2 2 3-4 3 5"></path>
+            <circle cx="8.5" cy="9" r="1.2"></circle>
+        `,
+        general: `
+            <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"></path>
+        `
+    };
     return `
         <svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"></path>
+            ${typeIcons[projectType] || typeIcons.general}
         </svg>
     `;
 }
@@ -59,7 +125,10 @@ const canvasVersionLabel = document.getElementById("canvasVersionLabel");
 const canvasVersionSelect = document.getElementById("canvasVersionSelect");
 const canvasNewBtn = document.getElementById("canvasNewBtn");
 const canvasSaveBtn = document.getElementById("canvasSaveBtn");
+const canvasRunBtn = document.getElementById("canvasRunBtn");
+const canvasRunResult = document.getElementById("canvasRunResult");
 const canvasExportBtn = document.getElementById("canvasExportBtn");
+const canvasExportFormatSelect = document.getElementById("canvasExportFormatSelect");
 const canvasEditor = document.getElementById("canvasEditor");
 const canvasPreview = document.getElementById("canvasPreview");
 const canvasChangeSummary = document.getElementById("canvasChangeSummary");
@@ -92,15 +161,30 @@ async function loadProjectDocuments() {
         );
         if (!response.ok) return;
         const payload = await response.json();
-        const documents = payload.documents || [];
-        projectDocumentsSummary.textContent = documents.length
-            ? `${documents.length} document${documents.length > 1 ? "s" : ""} · ${documents.map(item => item.filename).join(", ")}`
+        projectFiles = Array.isArray(payload.files)
+            ? payload.files
+            : (payload.documents || []);
+        const availableIds = new Set(projectFiles.map(item => item.id));
+        selectedProjectFileIds = new Set(
+            Array.from(selectedProjectFileIds).filter(id => availableIds.has(id))
+        );
+        const indexedCount = projectFiles.filter(item => item.status === "ready").length;
+        projectDocumentsSummary.textContent = projectFiles.length
+            ? `${projectFiles.length} fichier${projectFiles.length > 1 ? "s" : ""} · ${indexedCount} prêt${indexedCount > 1 ? "s" : ""}`
             : "Aucun document";
-        projectDocumentsSummary.title = documents
-            .map(item => `${item.filename} · ${item.page_count} page(s)`)
+        projectDocumentsSummary.title = projectFiles
+            .map(item => `${item.display_name || item.filename} · ${item.page_count || 0} page(s)`)
             .join("\n");
+        if (fileLibraryStatus && !fileLibraryStatus.classList.contains("error")) {
+            fileLibraryStatus.textContent = selectedProjectFileIds.size
+                ? `${selectedProjectFileIds.size} fichier${selectedProjectFileIds.size > 1 ? "s" : ""} ciblé${selectedProjectFileIds.size > 1 ? "s" : ""}.`
+                : "Sans sélection, tous les fichiers prêts enrichissent la réponse.";
+        }
+        renderFileLibrary();
     } catch (_) {
+        projectFiles = [];
         projectDocumentsSummary.textContent = "Documents indisponibles";
+        renderFileLibrary();
     }
 }
 
@@ -119,7 +203,15 @@ function syncProjectSelector() {
     workspaceSwitcher?.classList.toggle("primary-workspace", isPrimary);
     projectSwitcherTrigger?.classList.toggle("is-primary", isPrimary);
     if (activeProjectIcon) {
-        activeProjectIcon.innerHTML = projectIconMarkup(isPrimary, 20);
+        activeProjectIcon.innerHTML = projectIconMarkup(
+            isPrimary,
+            20,
+            project?.project_type || "general"
+        );
+        activeProjectIcon.style.setProperty(
+            "--project-color",
+            project?.color || (isPrimary ? "#5B6EE1" : "#0BAE83")
+        );
     }
     if (activeProjectName) {
         activeProjectName.textContent = project?.name || "Espace principal";
@@ -170,8 +262,20 @@ async function activateChatProject(projectId) {
 function renderProjectMenu() {
     if (!projectMenuList) return;
     projectMenuList.innerHTML = "";
+    let lastGroup = "";
     chatProjects.forEach(project => {
         const isPrimary = project.id === WORKSPACE_PRIMARY_PROJECT_ID;
+        const projectType = project.project_type || "general";
+        const group = isPrimary ? "principal" : projectType;
+        if (group !== lastGroup) {
+            const heading = document.createElement("div");
+            heading.className = "workspace-menu-group";
+            heading.textContent = isPrimary
+                ? "Espace permanent"
+                : (PROJECT_TYPE_LABELS[projectType] || PROJECT_TYPE_LABELS.general);
+            projectMenuList.appendChild(heading);
+            lastGroup = group;
+        }
         const button = document.createElement("button");
         button.type = "button";
         button.className = [
@@ -189,12 +293,16 @@ function renderProjectMenu() {
         const icon = document.createElement("span");
         icon.className = "workspace-menu-project-icon";
         icon.setAttribute("aria-hidden", "true");
-        icon.innerHTML = projectIconMarkup(isPrimary, 17);
+        icon.innerHTML = projectIconMarkup(isPrimary, 17, projectType);
+        icon.style.setProperty(
+            "--project-color",
+            project.color || (isPrimary ? "#5B6EE1" : "#0BAE83")
+        );
 
         const copy = document.createElement("span");
         copy.className = "workspace-menu-project-copy";
         const name = document.createElement("strong");
-        name.textContent = project.name;
+        name.textContent = `${project.favorite ? "★ " : ""}${project.name}`;
         const detail = document.createElement("small");
         const count = Number(project.session_count) || 0;
         detail.textContent = isPrimary
@@ -241,6 +349,16 @@ function openProjectModal(createNew = false) {
     projectDescriptionInput.value = project?.description || "";
     projectInstructionsInput.value = project?.instructions || "";
     projectMemoryModeSelect.value = project?.memory_mode || "project";
+    if (projectTypeSelect) projectTypeSelect.value = project?.project_type || "general";
+    if (projectColorInput) {
+        projectColorInput.value = project?.color || (isPrimary ? "#5B6EE1" : "#0BAE83");
+    }
+    if (projectTagsInput) {
+        projectTagsInput.value = Array.isArray(project?.tags)
+            ? project.tags.join(", ")
+            : "";
+    }
+    if (projectFavoriteInput) projectFavoriteInput.checked = Boolean(project?.favorite);
 
     projectModal.classList.toggle("primary-project-mode", isPrimary);
     projectPrimaryNotice.hidden = !isPrimary;
@@ -248,6 +366,10 @@ function openProjectModal(createNew = false) {
     projectNameInput.disabled = isPrimary;
     projectDescriptionInput.disabled = isPrimary;
     projectInstructionsInput.disabled = isPrimary;
+    if (projectTypeSelect) projectTypeSelect.disabled = isPrimary;
+    if (projectColorInput) projectColorInput.disabled = isPrimary;
+    if (projectTagsInput) projectTagsInput.disabled = isPrimary;
+    if (projectFavoriteInput) projectFavoriteInput.disabled = isPrimary;
     projectModalTitle.textContent = isPrimary
         ? "Espace principal"
         : (createNew ? "Nouveau projet" : "Paramètres du projet");
@@ -300,7 +422,14 @@ projectSaveBtn?.addEventListener("click", async () => {
             description: projectDescriptionInput.value.trim(),
             instructions: projectInstructionsInput.value.trim(),
             memory_mode: projectMemoryModeSelect.value,
-            default_model: inputModelSelect?.value || "gemma-4-chat"
+            default_model: inputModelSelect?.value || "gemma-4-chat",
+            project_type: projectTypeSelect?.value || "general",
+            color: projectColorInput?.value || "#0BAE83",
+            tags: (projectTagsInput?.value || "")
+                .split(",")
+                .map(item => item.trim())
+                .filter(Boolean),
+            favorite: Boolean(projectFavoriteInput?.checked)
         };
     const endpoint = editingProjectId
         ? `${API_BASE}/projects/${encodeURIComponent(editingProjectId)}`
@@ -344,6 +473,417 @@ projectDeleteBtn?.addEventListener("click", async () => {
     closeProjectModal();
 });
 
+const FILE_KIND_META = {
+    pdf: { label: "PDF", color: "#E25555" },
+    word: { label: "Word", color: "#3B73D1" },
+    spreadsheet: { label: "Excel", color: "#1F9D68" },
+    presentation: { label: "PowerPoint", color: "#E56B3F" },
+    image: { label: "Image", color: "#9B59D0" },
+    text: { label: "Texte", color: "#60758A" }
+};
+
+function fileKindIcon(kind) {
+    const icons = {
+        image: `<rect x="3" y="4" width="18" height="16" rx="3"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m5 17 4.5-4.5 3 3 2.5-3 4 4.5"></path>`,
+        spreadsheet: `<rect x="3" y="3" width="18" height="18" rx="3"></rect><path d="M3 9h18M9 3v18M9 15h12"></path>`,
+        presentation: `<rect x="4" y="3" width="16" height="13" rx="2"></rect><path d="M8 21l4-5 4 5M9 8h6M9 11h4"></path>`,
+        word: `<path d="M6 2h9l4 4v16H6z"></path><path d="M15 2v5h4M9 12h7M9 16h7"></path>`,
+        pdf: `<path d="M6 2h9l4 4v16H6z"></path><path d="M15 2v5h4M9 12h6M9 16h4"></path>`,
+        text: `<path d="M6 2h9l4 4v16H6z"></path><path d="M15 2v5h4M9 12h7M9 16h7"></path>`
+    };
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${icons[kind] || icons.text}</svg>`;
+}
+
+function formatProjectFileSize(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return `${value} o`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} Ko`;
+    return `${(value / (1024 * 1024)).toFixed(1)} Mo`;
+}
+
+function closeFilePreview() {
+    activeProjectFileId = null;
+    filePreviewPane?.classList.remove("open");
+    renderFileLibrary();
+}
+
+function closeFileLibrary() {
+    fileLibraryModal.style.display = "none";
+    fileLibraryModal.setAttribute("aria-hidden", "true");
+    closeFilePreview();
+}
+
+function openFileLibrary() {
+    const project = chatProjects.find(item => item.id === currentProjectId);
+    if (fileLibrarySubtitle) {
+        fileLibrarySubtitle.textContent = `${project?.name || "Projet"} · fichiers originaux et contexte utilisé par le chat`;
+    }
+    fileLibraryModal.style.display = "flex";
+    fileLibraryModal.setAttribute("aria-hidden", "false");
+    void loadProjectDocuments();
+    setTimeout(() => fileLibrarySearchInput?.focus(), 0);
+}
+
+function toggleProjectFileSelection(fileId, selected) {
+    if (selected) selectedProjectFileIds.add(fileId);
+    else selectedProjectFileIds.delete(fileId);
+    if (fileLibraryStatus) {
+        fileLibraryStatus.classList.remove("error");
+        fileLibraryStatus.textContent = selectedProjectFileIds.size
+            ? `${selectedProjectFileIds.size} fichier${selectedProjectFileIds.size > 1 ? "s" : ""} ciblé${selectedProjectFileIds.size > 1 ? "s" : ""}.`
+            : "Sans sélection, tous les fichiers prêts enrichissent la réponse.";
+    }
+    renderFileLibrary();
+}
+
+function renderFileLibrary() {
+    if (!fileLibraryList) return;
+    const query = (fileLibrarySearchInput?.value || "").trim().toLocaleLowerCase();
+    const kind = fileLibraryKindFilter?.value || "all";
+    const filtered = projectFiles.filter(file => {
+        const name = String(file.display_name || file.filename || "").toLocaleLowerCase();
+        return (!query || name.includes(query)) && (kind === "all" || file.kind === kind);
+    });
+    fileLibraryList.replaceChildren();
+    if (!filtered.length) {
+        const empty = document.createElement("div");
+        empty.className = "file-library-empty-list";
+        const strong = document.createElement("strong");
+        strong.textContent = projectFiles.length ? "Aucun résultat" : "Aucun fichier";
+        const small = document.createElement("span");
+        small.textContent = projectFiles.length
+            ? "Modifiez votre recherche ou le filtre."
+            : "Ajoutez un document pour enrichir ce projet.";
+        empty.append(strong, small);
+        fileLibraryList.appendChild(empty);
+        return;
+    }
+
+    filtered.forEach(file => {
+        const card = document.createElement("div");
+        card.className = `project-file-card${file.id === activeProjectFileId ? " active" : ""}`;
+        card.setAttribute("role", "button");
+        card.tabIndex = 0;
+
+        const icon = document.createElement("span");
+        icon.className = "project-file-icon";
+        icon.style.setProperty(
+            "--file-color",
+            (FILE_KIND_META[file.kind] || FILE_KIND_META.text).color
+        );
+        icon.innerHTML = fileKindIcon(file.kind);
+
+        const copy = document.createElement("span");
+        copy.className = "project-file-copy";
+        const title = document.createElement("strong");
+        title.textContent = file.display_name || file.filename;
+        const meta = document.createElement("small");
+        const details = [
+            (FILE_KIND_META[file.kind] || FILE_KIND_META.text).label,
+            file.metadata?.legacy_index
+                ? "Index historique"
+                : formatProjectFileSize(file.size_bytes),
+            file.page_count ? `${file.page_count} page${file.page_count > 1 ? "s" : ""}` : "",
+            file.status === "ready" ? `${file.chunk_count || 0} passages` : file.status
+        ].filter(Boolean);
+        meta.textContent = details.join(" · ");
+        copy.append(title, meta);
+
+        const controls = document.createElement("span");
+        controls.className = "project-file-controls";
+        const contextToggle = document.createElement("button");
+        contextToggle.type = "button";
+        contextToggle.className = `project-file-context${selectedProjectFileIds.has(file.id) ? " selected" : ""}`;
+        contextToggle.disabled = file.status !== "ready";
+        contextToggle.title = selectedProjectFileIds.has(file.id)
+            ? "Retirer du contexte ciblé"
+            : "Utiliser uniquement les fichiers sélectionnés dans la prochaine réponse";
+        contextToggle.setAttribute(
+            "aria-label",
+            selectedProjectFileIds.has(file.id) ? "Retirer du contexte" : "Ajouter au contexte"
+        );
+        contextToggle.innerHTML = selectedProjectFileIds.has(file.id)
+            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m5 12 4 4 10-10"></path></svg>`
+            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 5v14M5 12h14"></path></svg>`;
+        contextToggle.addEventListener("click", event => {
+            event.stopPropagation();
+            toggleProjectFileSelection(file.id, !selectedProjectFileIds.has(file.id));
+        });
+        const status = document.createElement("span");
+        status.className = `project-file-status ${file.status || ""}`;
+        status.title = file.error || file.status || "";
+        controls.append(contextToggle, status);
+        card.append(icon, copy, controls);
+
+        const open = () => void openProjectFile(file.id);
+        card.addEventListener("click", open);
+        card.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                open();
+            }
+        });
+        fileLibraryList.appendChild(card);
+    });
+}
+
+function fileActionIcon(kind) {
+    const icons = {
+        back: `<path d="m15 18-6-6 6-6"></path>`,
+        download: `<path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path>`,
+        refresh: `<path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9A7 7 0 0 1 18 6l2 2"></path><path d="M17.9 15A7 7 0 0 1 6 18l-2-2"></path>`,
+        delete: `<path d="M4 7h16"></path><path d="M9 7V4h6v3"></path><path d="m6 7 1 14h10l1-14"></path><path d="M10 11v6M14 11v6"></path>`
+    };
+    return `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${icons[kind]}</svg>`;
+}
+
+async function openProjectFile(fileId, page = null) {
+    const file = projectFiles.find(item => item.id === fileId);
+    if (!file || !filePreviewPane) return;
+    activeProjectFileId = fileId;
+    renderFileLibrary();
+    filePreviewPane.classList.add("open");
+    filePreviewPane.replaceChildren();
+
+    const topbar = document.createElement("div");
+    topbar.className = "file-preview-topbar";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "file-preview-back";
+    back.title = "Revenir aux fichiers";
+    back.innerHTML = fileActionIcon("back");
+    back.addEventListener("click", closeFilePreview);
+    const title = document.createElement("span");
+    title.className = "file-preview-title";
+    const name = document.createElement("strong");
+    name.textContent = file.display_name || file.filename;
+    const detail = document.createElement("small");
+    detail.textContent = file.metadata?.legacy_index
+        ? `${(FILE_KIND_META[file.kind] || FILE_KIND_META.text).label} · index historique sans original`
+        : `${(FILE_KIND_META[file.kind] || FILE_KIND_META.text).label} · ${formatProjectFileSize(file.size_bytes)}`;
+    title.append(name, detail);
+    const actions = document.createElement("span");
+    actions.className = "file-preview-actions";
+    const download = document.createElement("a");
+    download.href = file.download_url;
+    download.title = "Télécharger l’original";
+    download.setAttribute("download", "");
+    download.innerHTML = fileActionIcon("download");
+    const reindex = document.createElement("button");
+    reindex.type = "button";
+    reindex.title = "Reconstruire l’index documentaire";
+    reindex.innerHTML = fileActionIcon("refresh");
+    reindex.addEventListener("click", async () => {
+        reindex.disabled = true;
+        if (fileLibraryStatus) {
+            fileLibraryStatus.classList.remove("error");
+            fileLibraryStatus.textContent = `Réindexation de ${file.display_name || file.filename}…`;
+        }
+        const response = await fetch(
+            `${API_BASE}/files/${encodeURIComponent(file.id)}/reindex`,
+            { method: "POST" }
+        );
+        const payload = await response.json();
+        if (!response.ok && fileLibraryStatus) {
+            fileLibraryStatus.classList.add("error");
+            fileLibraryStatus.textContent = payload.detail || "Réindexation impossible.";
+        }
+        await loadProjectDocuments();
+        reindex.disabled = false;
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger";
+    remove.title = "Supprimer le fichier";
+    remove.innerHTML = fileActionIcon("delete");
+    remove.addEventListener("click", async () => {
+        if (!window.confirm(`Supprimer « ${file.display_name || file.filename} » du projet ?`)) return;
+        const response = await fetch(`${API_BASE}/files/${encodeURIComponent(file.id)}`, {
+            method: "DELETE"
+        });
+        if (!response.ok) {
+            if (fileLibraryStatus) {
+                fileLibraryStatus.textContent = "Suppression impossible.";
+                fileLibraryStatus.classList.add("error");
+            }
+            return;
+        }
+        selectedProjectFileIds.delete(file.id);
+        closeFilePreview();
+        await loadProjectDocuments();
+    });
+    if (!file.metadata?.legacy_index) actions.append(reindex);
+    if (file.download_url) actions.append(download);
+    actions.append(remove);
+    topbar.append(back, title, actions);
+
+    const content = document.createElement("div");
+    content.className = "file-preview-content";
+    const loading = document.createElement("div");
+    loading.className = "file-preview-empty";
+    loading.textContent = "Préparation de l’aperçu…";
+    content.appendChild(loading);
+    filePreviewPane.append(topbar, content);
+
+    try {
+        const response = await fetch(`${API_BASE}/files/${encodeURIComponent(file.id)}/preview`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "Aperçu indisponible");
+        content.replaceChildren();
+        if (payload.mode === "pdf") {
+            const frame = document.createElement("iframe");
+            frame.title = `Aperçu de ${file.display_name || file.filename}`;
+            frame.setAttribute("sandbox", "");
+            frame.referrerPolicy = "no-referrer";
+            frame.src = `${payload.url}${page ? `#page=${Math.max(1, Number(page) || 1)}` : ""}`;
+            content.appendChild(frame);
+        } else if (payload.mode === "image") {
+            const stack = document.createElement("div");
+            stack.className = "file-image-preview-stack";
+            const image = document.createElement("img");
+            image.src = payload.url;
+            image.alt = file.display_name || file.filename;
+            stack.appendChild(image);
+            const visualAnalysis = String(
+                payload.file?.metadata?.visual_analysis
+                || file.metadata?.visual_analysis
+                || ""
+            ).trim();
+            if (visualAnalysis) {
+                const analysis = document.createElement("section");
+                analysis.className = "file-vision-analysis";
+                const heading = document.createElement("h3");
+                heading.textContent = "Lecture par Lasme Vision";
+                const body = document.createElement("pre");
+                body.textContent = visualAnalysis;
+                analysis.append(heading, body);
+                stack.appendChild(analysis);
+            }
+            content.appendChild(stack);
+        } else {
+            const sections = document.createElement("div");
+            sections.className = "file-preview-sections";
+            (payload.sections || []).forEach((section, index) => {
+                const block = document.createElement("section");
+                block.className = "file-preview-section";
+                const heading = document.createElement("h3");
+                heading.textContent = section.title || `Section ${index + 1}`;
+                const body = document.createElement("pre");
+                body.textContent = section.text || section.content || "";
+                block.append(heading, body);
+                sections.appendChild(block);
+            });
+            if (!sections.children.length) {
+                sections.textContent = "Ce fichier ne contient aucun texte prévisualisable.";
+            }
+            content.appendChild(sections);
+        }
+    } catch (error) {
+        content.replaceChildren();
+        const unavailable = document.createElement("div");
+        unavailable.className = "file-preview-empty";
+        unavailable.textContent = error.message || "Aperçu indisponible.";
+        content.appendChild(unavailable);
+    }
+}
+
+async function uploadProjectFiles(files) {
+    const queue = Array.from(files || []).filter(Boolean);
+    if (!queue.length) return;
+    if (fileLibraryStatus) {
+        fileLibraryStatus.classList.remove("error");
+        fileLibraryStatus.textContent = `Import de ${queue.length} fichier${queue.length > 1 ? "s" : ""}…`;
+    }
+    for (let index = 0; index < queue.length; index += 1) {
+        const file = queue[index];
+        if (fileLibraryStatus) {
+            fileLibraryStatus.textContent = `${index + 1}/${queue.length} · Indexation de ${file.name}`;
+        }
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("scope_id", currentProjectId);
+        try {
+            const response = await fetch(`${API_BASE}/documents/upload`, {
+                method: "POST",
+                body: formData
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                const detail = typeof payload.detail === "object"
+                    ? payload.detail.message
+                    : payload.detail;
+                throw new Error(detail || `Échec de ${file.name}`);
+            }
+            if (payload.file?.id) selectedProjectFileIds.add(payload.file.id);
+        } catch (error) {
+            if (fileLibraryStatus) {
+                fileLibraryStatus.classList.add("error");
+                fileLibraryStatus.textContent = error.message || "Import impossible.";
+            }
+            await loadProjectDocuments();
+            return;
+        }
+    }
+    if (fileLibraryStatus) {
+        fileLibraryStatus.textContent = `${queue.length} fichier${queue.length > 1 ? "s" : ""} prêt${queue.length > 1 ? "s" : ""}.`;
+    }
+    if (projectFileUploadInput) projectFileUploadInput.value = "";
+    await loadProjectDocuments();
+}
+
+projectFilesBtn?.addEventListener("click", openFileLibrary);
+fileLibraryCloseBtn?.addEventListener("click", closeFileLibrary);
+fileLibraryOverlay?.addEventListener("click", closeFileLibrary);
+fileLibraryUploadBtn?.addEventListener("click", () => projectFileUploadInput?.click());
+projectFileUploadInput?.addEventListener("change", () => {
+    void uploadProjectFiles(projectFileUploadInput.files);
+});
+fileLibrarySearchInput?.addEventListener("input", renderFileLibrary);
+fileLibraryKindFilter?.addEventListener("change", renderFileLibrary);
+fileLibraryDropzone?.addEventListener("click", () => projectFileUploadInput?.click());
+["dragenter", "dragover"].forEach(eventName => {
+    fileLibraryDropzone?.addEventListener(eventName, event => {
+        event.preventDefault();
+        fileLibraryDropzone.classList.add("dragging");
+    });
+});
+["dragleave", "drop"].forEach(eventName => {
+    fileLibraryDropzone?.addEventListener(eventName, event => {
+        event.preventDefault();
+        fileLibraryDropzone.classList.remove("dragging");
+    });
+});
+fileLibraryDropzone?.addEventListener("drop", event => {
+    void uploadProjectFiles(event.dataTransfer?.files);
+});
+
+window.LasmeWorkspace = {
+    ...(window.LasmeWorkspace || {}),
+    getSelectedFileIds: () => Array.from(selectedProjectFileIds),
+    openFile: (fileId, page = null) => {
+        if (!projectFiles.some(item => item.id === fileId)) return false;
+        openFileLibrary();
+        void openProjectFile(fileId, page);
+        return true;
+    },
+    openFileByName: (filename, page = null) => {
+        const normalized = String(filename || "").trim().toLocaleLowerCase();
+        const file = projectFiles.find(item => {
+            const displayName = String(item.display_name || "")
+                .trim()
+                .toLocaleLowerCase();
+            const originalName = String(item.filename || "")
+                .trim()
+                .toLocaleLowerCase();
+            return displayName === normalized || originalName === normalized;
+        });
+        if (!file) return false;
+        openFileLibrary();
+        void openProjectFile(file.id, page);
+        return true;
+    }
+};
+
 function setCanvasOpen(open) {
     canvasPanel?.classList.toggle("open", open);
     canvasPanel?.setAttribute("aria-hidden", open ? "false" : "true");
@@ -364,12 +904,28 @@ const CANVAS_KIND_HINTS = {
     markdown: "Note structurée écrite en Markdown",
     code: "Un fichier de code source principal",
     table: "Données tabulaires et comparaisons",
-    research: "Rapport documenté avec résultats et sources"
+    research: "Rapport documenté avec résultats et sources",
+    html: "Page HTML autonome, prévisualisée dans un espace isolé",
+    interactive: "Mini-application HTML/CSS/JavaScript interactive et isolée",
+    diagram: "Diagramme Mermaid : flux, séquence, architecture ou chronologie",
+    mindmap: "Carte mentale Mermaid structurée par niveaux",
+    chart: "Graphique Mermaid xychart ou diagramme de données",
+    presentation: "Trame de présentation exportable vers PowerPoint"
 };
 
 function detectCanvasKind(content) {
     const source = String(content || "").trim();
     if (!source) return "document";
+    if (/^```(?:html)\s*\n/i.test(source) || /<!doctype html|<html[\s>]/i.test(source)) {
+        return "html";
+    }
+    const mermaidBlock = source.match(/```mermaid\s*\n([\s\S]*?)```/i);
+    if (mermaidBlock) {
+        const body = mermaidBlock[1].trim();
+        if (/^mindmap\b/i.test(body)) return "mindmap";
+        if (/^xychart-beta\b/i.test(body)) return "chart";
+        return "diagram";
+    }
 
     const fencedBlocks = Array.from(
         source.matchAll(/```([A-Za-z0-9_+#.-]*)\s*\n([\s\S]*?)```/g)
@@ -452,11 +1008,116 @@ function renderCanvasDocumentPreview(source) {
     });
 }
 
+function canvasHtmlDocument(source) {
+    const value = String(source || "");
+    const policy = [
+        "default-src 'none'",
+        "img-src data: blob:",
+        "font-src data:",
+        "style-src 'unsafe-inline'",
+        "script-src 'unsafe-inline'",
+        "connect-src 'none'",
+        "media-src data: blob:",
+        "frame-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'"
+    ].join("; ");
+    const meta = `<meta http-equiv="Content-Security-Policy" content="${policy}">`;
+    if (/<head[\s>]/i.test(value)) {
+        return value.replace(/<head([^>]*)>/i, `<head$1>${meta}`);
+    }
+    if (/<html[\s>]/i.test(value)) {
+        return value.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`);
+    }
+    return `<!doctype html><html lang="fr"><head>${meta}<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{min-height:100%;margin:0;font-family:system-ui,sans-serif}</style></head><body>${value}</body></html>`;
+}
+
+let canvasPreviewTimer = null;
+let canvasPreviewRequestId = 0;
+
+function renderCanvasHtmlPreview(source) {
+    canvasPreview.replaceChildren();
+    const frame = document.createElement("iframe");
+    frame.className = "canvas-html-preview";
+    frame.title = "Aperçu isolé de l’artefact HTML";
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    const fenced = String(source || "").trim().match(
+        /^```html\s*\n([\s\S]*?)```\s*$/i
+    );
+    const documentSource = canvasHtmlDocument(fenced ? fenced[1] : source);
+    canvasPreview.appendChild(frame);
+    const loading = document.createElement("div");
+    loading.className = "canvas-preview-loading";
+    loading.textContent = "Préparation de l’aperçu sécurisé…";
+    canvasPreview.appendChild(loading);
+
+    const requestId = ++canvasPreviewRequestId;
+    clearTimeout(canvasPreviewTimer);
+    canvasPreviewTimer = setTimeout(async () => {
+        try {
+            const response = await fetch(`${API_BASE}/artifact-previews`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ content: documentSource })
+            });
+            if (!response.ok) {
+                let detail = `HTTP ${response.status}`;
+                try {
+                    const errorPayload = await response.json();
+                    detail = errorPayload.detail || detail;
+                } catch (_) {
+                    // Keep the HTTP status when the response is not JSON.
+                }
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            if (requestId !== canvasPreviewRequestId || !frame.isConnected) return;
+            frame.addEventListener("load", () => loading.remove(), { once: true });
+            frame.src = payload.url;
+        } catch (error) {
+            if (requestId !== canvasPreviewRequestId || !frame.isConnected) return;
+            frame.remove();
+            loading.classList.add("is-error");
+            loading.textContent = error?.message || "Aperçu HTML indisponible.";
+        }
+    }, 180);
+}
+
+function renderCanvasDiagramPreview(source) {
+    canvasPreview.replaceChildren();
+    const diagram = document.createElement("div");
+    diagram.className = "canvas-mermaid-preview mermaid";
+    const fenced = String(source || "").trim().match(
+        /```(?:mermaid)?\s*\n([\s\S]*?)```/i
+    );
+    diagram.textContent = fenced ? fenced[1] : source;
+    canvasPreview.appendChild(diagram);
+    if (typeof mermaid !== "undefined") {
+        try {
+            Promise.resolve(mermaid.run({ nodes: [diagram] })).catch(() => {
+                diagram.classList.add("render-error");
+            });
+        } catch (_) {
+            diagram.classList.add("render-error");
+        }
+    }
+}
+
 function renderCanvasPreview() {
     if (!canvasPreview || !canvasEditor) return;
     const source = canvasEditor.value;
     updateCanvasKindHint();
+    const fencedLanguage = source.trim().match(/^```([A-Za-z0-9_+#.-]+)/)?.[1]?.toLowerCase() || "";
+    if (canvasRunBtn) {
+        canvasRunBtn.hidden = !(
+            canvasKindSelect?.value === "code"
+            && (!fencedLanguage || ["py", "python"].includes(fencedLanguage))
+        );
+    }
     if (!source.trim()) {
+        canvasPreviewRequestId += 1;
+        clearTimeout(canvasPreviewTimer);
         canvasPreview.innerHTML = `
             <div class="canvas-empty-state">
                 <span class="canvas-empty-icon" aria-hidden="true">
@@ -478,11 +1139,112 @@ function renderCanvasPreview() {
         renderCanvasCodePreview(source);
         return;
     }
+    if (["html", "interactive"].includes(canvasKindSelect?.value)) {
+        renderCanvasHtmlPreview(source);
+        return;
+    }
+    if (["diagram", "mindmap", "chart"].includes(canvasKindSelect?.value)) {
+        renderCanvasDiagramPreview(source);
+        return;
+    }
     renderCanvasDocumentPreview(source);
 }
 
-canvasEditor?.addEventListener("input", renderCanvasPreview);
-canvasKindSelect?.addEventListener("change", renderCanvasPreview);
+function clearCanvasRunResult() {
+    if (!canvasRunResult) return;
+    canvasRunResult.hidden = true;
+    canvasRunResult.replaceChildren();
+}
+
+canvasEditor?.addEventListener("input", () => {
+    clearCanvasRunResult();
+    renderCanvasPreview();
+});
+canvasKindSelect?.addEventListener("change", () => {
+    clearCanvasRunResult();
+    renderCanvasPreview();
+});
+
+function extractCanvasPythonCode(source) {
+    const fenced = String(source || "").trim().match(
+        /^```(?:py|python)?\s*\n([\s\S]*?)```\s*$/i
+    );
+    return fenced ? fenced[1] : String(source || "");
+}
+
+function renderCanvasRunResult(result) {
+    if (!canvasRunResult) return;
+    canvasRunResult.hidden = false;
+    canvasRunResult.replaceChildren();
+    const header = document.createElement("header");
+    const label = document.createElement("strong");
+    label.textContent = result.status === "success"
+        ? "Exécution réussie"
+        : (result.status === "timeout" ? "Temps limite atteint" : "Erreur d’exécution");
+    const timing = document.createElement("span");
+    timing.textContent = `${Math.round(Number(result.duration_ms) || 0)} ms · Docker isolé`;
+    header.append(label, timing);
+    canvasRunResult.appendChild(header);
+    if (result.stdout) {
+        const output = document.createElement("pre");
+        output.className = "canvas-run-stdout";
+        output.textContent = result.stdout;
+        canvasRunResult.appendChild(output);
+    }
+    if (result.stderr) {
+        const error = document.createElement("pre");
+        error.className = "canvas-run-stderr";
+        error.textContent = result.stderr;
+        canvasRunResult.appendChild(error);
+    }
+    if (Array.isArray(result.files) && result.files.length) {
+        const files = document.createElement("div");
+        files.className = "canvas-run-files";
+        result.files.forEach(file => {
+            const link = document.createElement("a");
+            link.href = file.url;
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.textContent = `${file.name} · ${formatProjectFileSize(file.size_bytes)}`;
+            if (/\.(png|jpe?g|webp|svg)$/i.test(file.name)) {
+                const image = document.createElement("img");
+                image.src = file.url;
+                image.alt = file.name;
+                link.prepend(image);
+            }
+            files.appendChild(link);
+        });
+        canvasRunResult.appendChild(files);
+    }
+}
+
+canvasRunBtn?.addEventListener("click", async () => {
+    const code = extractCanvasPythonCode(canvasEditor?.value || "");
+    if (!code.trim()) return;
+    canvasRunBtn.disabled = true;
+    canvasRunBtn.classList.add("running");
+    canvasRunResult.hidden = false;
+    canvasRunResult.textContent = "Exécution isolée en cours…";
+    try {
+        const response = await fetch(`${API_BASE}/runner/python`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code, timeout_seconds: 15 })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "Runner indisponible");
+        renderCanvasRunResult(payload.result);
+    } catch (error) {
+        canvasRunResult.replaceChildren();
+        const message = document.createElement("div");
+        message.className = "canvas-run-error";
+        message.textContent = error.message || "Exécution impossible.";
+        canvasRunResult.appendChild(message);
+    } finally {
+        canvasRunBtn.disabled = false;
+        canvasRunBtn.classList.remove("running");
+    }
+});
 
 function resetCanvas(
     content = "",
@@ -500,6 +1262,7 @@ function resetCanvas(
     canvasVersionLabel.textContent = "Non enregistré";
     canvasChangeSummary.value = "";
     canvasStatus.textContent = status;
+    clearCanvasRunResult();
     renderCanvasPreview();
 }
 
@@ -652,8 +1415,33 @@ canvasExportBtn?.addEventListener("click", async () => {
         canvasStatus.textContent = "Enregistrez d’abord l’artefact.";
         return;
     }
+    const requestedFormat = canvasExportFormatSelect?.value || "";
+    if (
+        ["diagram", "mindmap", "chart"].includes(activeCanvasArtifact.kind)
+        && (!requestedFormat || requestedFormat === "svg")
+    ) {
+        const svg = canvasPreview?.querySelector("svg");
+        if (!svg) {
+            canvasStatus.textContent = "Le diagramme doit être affiché avant l’export SVG.";
+            return;
+        }
+        const source = new XMLSerializer().serializeToString(svg);
+        const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${(activeCanvasArtifact.title || "diagramme")
+            .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+            .replace(/^-+|-+$/g, "") || "diagramme"}.svg`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        return;
+    }
+    const query = requestedFormat
+        ? `?format=${encodeURIComponent(requestedFormat)}`
+        : "";
     const response = await fetch(
-        `${API_BASE}/artifacts/${encodeURIComponent(activeCanvasArtifact.id)}/export`
+        `${API_BASE}/artifacts/${encodeURIComponent(activeCanvasArtifact.id)}/export${query}`
     );
     if (!response.ok) return;
     const blob = await response.blob();

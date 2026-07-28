@@ -281,6 +281,25 @@ class AdaptiveSearchRankingTests(unittest.TestCase):
         self.assertEqual(ranked[0]["hostname"], "fifa.com")
         self.assertGreater(ranked[0]["score"], ranked[1]["score"])
 
+    def test_first_low_relevance_candidate_is_not_accepted(self):
+        report = adaptive_select_results(
+            [
+                {
+                    "title": "Recette de cuisine",
+                    "snippet": "Préparer une tarte aux pommes.",
+                    "url": "https://example.com/tarte",
+                    "engine": "DuckDuckGo",
+                }
+            ],
+            "bilan actuel de Lionel Messi en Coupe du monde 2026",
+        )
+
+        self.assertEqual(report["results"], [])
+        self.assertEqual(
+            report["strategy"]["stop_reason"],
+            "no_relevant_source",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

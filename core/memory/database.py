@@ -2,19 +2,68 @@ import sqlite3
 import uuid
 import datetime
 import json
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "lasme_llm.db"
+SCHEMA_VERSION = 2
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Espace principal"
 DEFAULT_PROJECT_DESCRIPTION = "Espace permanent pour vos conversations générales."
+PROJECT_TYPES = {
+    "general",
+    "research",
+    "learning",
+    "data",
+    "coding",
+    "writing",
+    "media",
+}
+PROJECT_COLORS = {
+    "general": "#5B6EE1",
+    "research": "#7C5CE7",
+    "learning": "#D97706",
+    "data": "#2563EB",
+    "coding": "#0F766E",
+    "writing": "#DB2777",
+    "media": "#EA580C",
+}
 
 class DatabaseManager:
     def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+        self.db_path = Path(db_path)
+        self._backup_before_migration()
         self._init_db()
+
+    def _backup_before_migration(self) -> None:
+        if self.db_path != DB_PATH or not self.db_path.is_file():
+            return
+        try:
+            with sqlite3.connect(self.db_path) as source:
+                current_version = int(
+                    source.execute("PRAGMA user_version").fetchone()[0]
+                )
+                if current_version >= SCHEMA_VERSION:
+                    return
+                backup_root = (
+                    self.db_path.parent / ".runtime" / "db_backups"
+                )
+                backup_root.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime(
+                    "%Y%m%d-%H%M%S-%f"
+                )
+                backup_path = backup_root / (
+                    f"{self.db_path.stem}-v{current_version}-{timestamp}.db"
+                )
+                with sqlite3.connect(backup_path) as destination:
+                    source.backup(destination)
+        except sqlite3.Error:
+            # A backup failure must not silently mutate an unknown schema.
+            raise RuntimeError(
+                "Unable to create the pre-migration database backup."
+            )
 
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)
@@ -81,6 +130,10 @@ class DatabaseManager:
                     instructions TEXT NOT NULL DEFAULT '',
                     default_model TEXT NOT NULL DEFAULT 'gemma-4-chat',
                     memory_mode TEXT NOT NULL DEFAULT 'project',
+                    project_type TEXT NOT NULL DEFAULT 'general',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    color TEXT NOT NULL DEFAULT '#5B6EE1',
+                    favorite INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -101,10 +154,36 @@ class DatabaseManager:
                     now,
                 ),
             )
+            project_columns = {
+                row["name"]
+                for row in cursor.execute("PRAGMA table_info(projects)").fetchall()
+            }
+            project_migrations = {
+                "project_type": (
+                    "ALTER TABLE projects ADD COLUMN "
+                    "project_type TEXT NOT NULL DEFAULT 'general'"
+                ),
+                "tags": (
+                    "ALTER TABLE projects ADD COLUMN "
+                    "tags TEXT NOT NULL DEFAULT '[]'"
+                ),
+                "color": (
+                    "ALTER TABLE projects ADD COLUMN "
+                    "color TEXT NOT NULL DEFAULT '#5B6EE1'"
+                ),
+                "favorite": (
+                    "ALTER TABLE projects ADD COLUMN "
+                    "favorite INTEGER NOT NULL DEFAULT 0"
+                ),
+            }
+            for column, statement in project_migrations.items():
+                if column not in project_columns:
+                    cursor.execute(statement)
             cursor.execute(
                 """
                 UPDATE projects
-                SET name = ?, description = ?, instructions = ''
+                SET name = ?, description = ?, instructions = '',
+                    project_type = 'general', color = '#5B6EE1'
                 WHERE id = ?
                 """,
                 (
@@ -112,6 +191,10 @@ class DatabaseManager:
                     DEFAULT_PROJECT_DESCRIPTION,
                     DEFAULT_PROJECT_ID,
                 ),
+            )
+            cursor.execute(
+                "UPDATE projects SET default_model = 'gemma-4-chat' "
+                "WHERE default_model = 'gemma-4-fable'"
             )
             session_columns = {
                 row["name"]
@@ -139,6 +222,10 @@ class DatabaseManager:
                 cursor.execute(
                     "ALTER TABLE sessions ADD COLUMN branch_from_message_id TEXT"
                 )
+            cursor.execute(
+                "UPDATE sessions SET model = 'gemma-4-chat' "
+                "WHERE model = 'gemma-4-fable'"
+            )
             message_columns = {
                 row["name"]
                 for row in cursor.execute("PRAGMA table_info(messages)").fetchall()
@@ -154,6 +241,7 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_sessions_project "
                 "ON sessions(project_id, updated_at)"
             )
+            cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -385,6 +473,29 @@ class DatabaseManager:
             prompts.append(content)
         return prompts
 
+    @staticmethod
+    def _serialize_project(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+        project = dict(row)
+        try:
+            tags = json.loads(project.get("tags") or "[]")
+        except (TypeError, ValueError):
+            tags = []
+        project["tags"] = [
+            str(tag).strip()[:32]
+            for tag in tags
+            if str(tag).strip()
+        ][:12]
+        project["favorite"] = bool(project.get("favorite"))
+        project_type = str(project.get("project_type") or "general")
+        project["project_type"] = (
+            project_type if project_type in PROJECT_TYPES else "general"
+        )
+        project["color"] = (
+            str(project.get("color") or "").strip()
+            or PROJECT_COLORS[project["project_type"]]
+        )
+        return project
+
     def list_projects(self) -> List[Dict[str, Any]]:
         with self._connection() as conn:
             rows = conn.execute(
@@ -394,11 +505,12 @@ class DatabaseManager:
                 FROM projects p
                 LEFT JOIN sessions s ON s.project_id = p.id
                 GROUP BY p.id
-                ORDER BY CASE WHEN p.id = ? THEN 0 ELSE 1 END, p.updated_at DESC
+                ORDER BY CASE WHEN p.id = ? THEN 0 ELSE 1 END,
+                         p.favorite DESC, p.project_type, p.updated_at DESC
                 """,
                 (DEFAULT_PROJECT_ID,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._serialize_project(row) for row in rows]
 
     def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
         with self._connection() as conn:
@@ -406,7 +518,7 @@ class DatabaseManager:
                 "SELECT * FROM projects WHERE id = ?",
                 ((project_id or DEFAULT_PROJECT_ID).strip(),),
             ).fetchone()
-        return dict(row) if row else None
+        return self._serialize_project(row) if row else None
 
     def create_project(
         self,
@@ -416,16 +528,33 @@ class DatabaseManager:
         instructions: str = "",
         default_model: str = "gemma-4-chat",
         memory_mode: str = "project",
+        project_type: str = "general",
+        tags: Optional[List[str]] = None,
+        color: str = "",
+        favorite: bool = False,
     ) -> Dict[str, Any]:
         project_id = str(uuid.uuid4())
         now = datetime.datetime.now().isoformat()
+        normalized_type = (
+            project_type if project_type in PROJECT_TYPES else "general"
+        )
+        normalized_tags = [
+            str(tag).strip()[:32]
+            for tag in (tags or [])
+            if str(tag).strip()
+        ][:12]
+        normalized_color = (
+            color.strip() if color.strip().startswith("#")
+            else PROJECT_COLORS[normalized_type]
+        )
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO projects
                     (id, name, description, instructions, default_model,
-                     memory_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     memory_mode, project_type, tags, color, favorite,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -434,6 +563,14 @@ class DatabaseManager:
                     instructions.strip(),
                     default_model,
                     memory_mode,
+                    normalized_type,
+                    json.dumps(
+                        normalized_tags,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    normalized_color,
+                    1 if favorite else 0,
                     now,
                     now,
                 ),
@@ -455,14 +592,39 @@ class DatabaseManager:
                 "instructions",
                 "default_model",
                 "memory_mode",
+                "project_type",
+                "tags",
+                "color",
+                "favorite",
             }
         )
         updates: List[str] = []
         values: List[Any] = []
         for key, value in changes.items():
             if key in allowed and value is not None:
+                if key == "project_type":
+                    value = value if value in PROJECT_TYPES else "general"
+                elif key == "tags":
+                    value = json.dumps(
+                        [
+                            str(tag).strip()[:32]
+                            for tag in (value or [])
+                            if str(tag).strip()
+                        ][:12],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                elif key == "favorite":
+                    value = 1 if bool(value) else 0
+                elif key == "color":
+                    candidate = str(value).strip()
+                    if not re.fullmatch(r"#[0-9a-fA-F]{6}", candidate):
+                        continue
+                    value = candidate
                 updates.append(f"{key} = ?")
-                values.append(str(value).strip())
+                values.append(
+                    value if key in {"favorite", "tags"} else str(value).strip()
+                )
         if not updates:
             return self.get_project(project_id)
         updates.append("updated_at = ?")
@@ -480,19 +642,64 @@ class DatabaseManager:
     def delete_project(self, project_id: str) -> bool:
         if project_id == DEFAULT_PROJECT_ID:
             return False
-        now = datetime.datetime.now().isoformat()
         with self._connection() as conn:
-            conn.execute(
-                "UPDATE sessions SET project_id = ?, updated_at = ? "
-                "WHERE project_id = ?",
-                (DEFAULT_PROJECT_ID, now, project_id),
-            )
-            cursor = conn.execute(
-                "DELETE FROM projects WHERE id = ?",
+            if not conn.execute(
+                "SELECT 1 FROM projects WHERE id = ?",
                 (project_id,),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
+            ).fetchone():
+                return False
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if "artifact_versions" in tables and "artifacts" in tables:
+                    conn.execute(
+                        "DELETE FROM artifact_versions "
+                        "WHERE artifact_id IN ("
+                        "SELECT id FROM artifacts WHERE project_id = ?"
+                        ")",
+                        (project_id,),
+                    )
+                if "artifacts" in tables:
+                    conn.execute(
+                        "DELETE FROM artifacts WHERE project_id = ?",
+                        (project_id,),
+                    )
+                if "rag_chunks" in tables and "rag_documents" in tables:
+                    conn.execute(
+                        "DELETE FROM rag_chunks "
+                        "WHERE document_id IN ("
+                        "SELECT id FROM rag_documents WHERE scope_id = ?"
+                        ")",
+                        (project_id,),
+                    )
+                if "rag_documents" in tables:
+                    conn.execute(
+                        "DELETE FROM rag_documents WHERE scope_id = ?",
+                        (project_id,),
+                    )
+                if "project_files" in tables:
+                    conn.execute(
+                        "DELETE FROM project_files WHERE project_id = ?",
+                        (project_id,),
+                    )
+                conn.execute(
+                    "DELETE FROM sessions WHERE project_id = ?",
+                    (project_id,),
+                )
+                cursor = conn.execute(
+                    "DELETE FROM projects WHERE id = ?",
+                    (project_id,),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except Exception:
+                conn.rollback()
+                raise
 
     def create_session(
         self,

@@ -526,6 +526,9 @@ def search_web_detailed(
     query: str,
     max_results: int | None = None,
     conversation_messages: Optional[List[Dict[str, str]]] = None,
+    *,
+    force_full_chain: bool = False,
+    skip_primary_provider: bool = False,
 ) -> Dict[str, Any]:
     """Search, rerank and stop once enough independent evidence is available."""
     candidates: List[Dict[str, Any]] = []
@@ -594,7 +597,7 @@ def search_web_detailed(
     provider_attempts: List[Dict[str, Any]] = []
 
     # 2. Perplexity Sonar is the primary grounded search provider.
-    if settings.perplexity_api_key:
+    if settings.perplexity_api_key and not skip_primary_provider:
         sonar_query = (
             _focused_official_query(cleaned_query, official_domains)
             if official_domains
@@ -698,7 +701,11 @@ def search_web_detailed(
         provider_attempts.append(
             {
                 "provider": "Perplexity Sonar",
-                "status": "not_configured",
+                "status": (
+                    "skipped_verification_retry"
+                    if skip_primary_provider
+                    else "not_configured"
+                ),
             }
         )
 
@@ -710,7 +717,7 @@ def search_web_detailed(
         if settings.search_specialists_enabled
         else None
     )
-    if not selected["strategy"]["sufficient"] and vertical:
+    if (force_full_chain or not selected["strategy"]["sufficient"]) and vertical:
         specialist_name = {
             "academic": "OpenAlex",
             "news": "GDELT",
@@ -816,7 +823,9 @@ def search_web_detailed(
         )
 
     # 4. The optional local SearXNG metasearch is the sovereign fallback.
-    if not selected["strategy"]["sufficient"] and settings.searxng_enabled:
+    if (
+        force_full_chain or not selected["strategy"]["sufficient"]
+    ) and settings.searxng_enabled:
         try:
             logger.info("Executing local SearXNG search for %r", cleaned_query)
             searxng_results = _search_with_searxng(
@@ -871,7 +880,9 @@ def search_web_detailed(
     # 5. Brave contributes an independent Web index. HTTP 402/429 responses
     # are explicitly classified so the chain can continue without surfacing a
     # provider error to the user.
-    if not selected["strategy"]["sufficient"] and settings.brave_search_api_key:
+    if (
+        force_full_chain or not selected["strategy"]["sufficient"]
+    ) and settings.brave_search_api_key:
         brave_query = (
             _focused_official_query(cleaned_query, official_domains)
             if official_domains
@@ -937,7 +948,9 @@ def search_web_detailed(
         )
 
     # 6. Tavily runs only when earlier providers lack sufficient evidence.
-    if not selected["strategy"]["sufficient"] and tavily_client:
+    if (
+        force_full_chain or not selected["strategy"]["sufficient"]
+    ) and tavily_client:
         excluded_domains = [
             domain
             for domain in LOW_SIGNAL_DOMAINS
@@ -969,7 +982,7 @@ def search_web_detailed(
             )
 
         for round_name, round_query, domain_filter in search_attempts:
-            if selected["strategy"]["sufficient"]:
+            if selected["strategy"]["sufficient"] and not force_full_chain:
                 break
             try:
                 logger.info(
@@ -1048,7 +1061,7 @@ def search_web_detailed(
         )
 
     # 7. DuckDuckGo is the final no-key fallback.
-    if not selected["strategy"]["sufficient"]:
+    if force_full_chain or not selected["strategy"]["sufficient"]:
         try:
             logger.info(
                 "Evidence is incomplete; executing DuckDuckGo for %r",
