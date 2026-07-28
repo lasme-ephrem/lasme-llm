@@ -504,7 +504,17 @@ def adaptive_select_results(
 
         best = max(remaining, key=marginal_score)
         remaining.remove(best)
-        if float(best.get("score", 0.0)) < 0.2 and selected:
+        has_direct_authoritative_answer = (
+            best.get("quality") == "official"
+            and float(best.get("answerability_score", 0.0)) >= 0.58
+        )
+        if (
+            float(best.get("score", 0.0)) < 0.2
+            or (
+                float(best.get("coverage", 0.0)) < 0.12
+                and not has_direct_authoritative_answer
+            )
+        ):
             break
         selected.append(best)
         family = str(best.get("source_family", ""))

@@ -5,3 +5,14 @@ The conversation, search, memory, and interface features in this repository
 were designed and implemented independently. All application implementation
 code remains original to this project. Third-party components retain their
 respective license and attribution notices.
+
+Browser assets redistributed with Lasme LLM:
+
+- DOMPurify, Apache License 2.0 or Mozilla Public License 2.0
+- highlight.js, BSD 3-Clause License
+- KaTeX, MIT License
+- marked, MIT License
+- Mermaid, MIT License
+
+The corresponding license texts are stored beside each component under
+chat/web/vendor.

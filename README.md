@@ -1,293 +1,293 @@
 # Lasme LLM
 
-Application locale de chat et d’assistance au développement basée sur Ollama.
+Assistant IA local, multimodal et souverain, optimisé pour Ollama et une
+RTX 4070 Ti SUPER 16 Go. Lasme LLM réunit conversations naturelles, recherche
+Web sourcée, bibliothèque documentaire, RAG hybride, Canvas interactif,
+exports bureautiques et exécution Python isolée.
 
 <p align="center">
   <img
     src="docs/assets/lasme-llm-demo.gif"
-    alt="Démonstration de Lasme LLM : recherche Web, streaming, sources et formule LaTeX"
+    alt="Démonstration de Lasme LLM"
     width="960"
   >
 </p>
 
-<p align="center">
-  <em>Recherche Web, réponse en streaming, citations et rendu LaTeX — démonstration locale accélérée.</em>
-</p>
+## Points forts
 
-<details>
-  <summary>Afficher une capture statique</summary>
-  <br>
-  <img
-    src="docs/assets/lasme-llm-grounded-chat.png"
-    alt="Réponse scientifique sourcée avec formule de diffusion de Rayleigh"
-    width="960"
-  >
-</details>
+- **Chat local en streaming** : conversations branchables, édition d’un ancien
+  message, régénération, réponses temporaires et métriques d’inférence.
+- **Trois profils spécialisés** : Gemma 4 Chat pour la qualité générale,
+  SmolLM3 pour la vitesse et Qwen3-VL pour les images, les documents visuels,
+  le code et les tâches de raisonnement.
+- **Recherche Web adaptative** : Sonar, moteurs spécialisés, SearXNG, Brave,
+  Tavily et DuckDuckGo avec bascule selon la qualité, la disponibilité et les
+  quotas.
+- **RAG documentaire v2** : PDF, Word, Excel, PowerPoint, Markdown, texte et
+  images, avec citations cliquables vers le fichier et la page.
+- **Espaces de travail** : projets typés, favoris, couleurs, instructions,
+  mémoire et fichiers isolés.
+- **Canvas** : documents, code, tableaux, rapports, présentations, diagrammes
+  Mermaid, cartes mentales et mini-applications HTML/CSS/JavaScript.
+- **Exports réels** : DOCX, XLSX, PPTX, PDF, HTML, CSV, Markdown, texte et SVG.
+- **Runner Python sécurisé** : calculs, graphiques et fichiers dans un
+  conteneur Docker sans réseau, en lecture seule et avec des limites strictes.
+- **Rendu local** : Markdown, LaTeX/KaTeX, coloration de code et Mermaid sont
+  livrés avec l’application, sans CDN ni police distante.
 
 ## Architecture
 
-```text
-Navigateur
-   │ HTTP + SSE
-   ▼
-FastAPI — http://127.0.0.1:8000
-   ├── projets, conversations branchables et mémoire SQLite
-   ├── RAG hybride persistant, isolé par projet
-   ├── Canvas et artefacts versionnés
-   ├── recherche approfondie avec plan et progression
-   ├── recherche Web : recherche → extraction → vérification
-   ├── données structurées : météo, actions et crypto
-   ├── génération d’images externe facultative
-   └── espace de développement local sécurisé
-             │
-             ▼
-Ollama — http://127.0.0.1:11434
-   ├── gemma-4-chat:latest — Q4_0
-   └── gemma-4-fable:latest — Q6_K
+```mermaid
+flowchart TD
+    UI["Interface Web responsive"] --> API["FastAPI · :8000"]
+    API --> DB["SQLite · projets, conversations, mémoire, artefacts"]
+    API --> FILES["Bibliothèque de fichiers originaux"]
+    API --> RAG["RAG hybride · lexical + vecteur + MMR"]
+    API --> SEARCH["Orchestrateur de recherche Web"]
+    API --> RUNNER["Runner Python Docker isolé"]
+    API --> OLLAMA["Ollama · :11434"]
+
+    OLLAMA --> GEMMA["Gemma 4 Chat · Q4_0"]
+    OLLAMA --> SMOL["SmolLM3 3B · UD-Q6_K_XL"]
+    OLLAMA --> VISION["Qwen3-VL 8B · UD-Q4_K_XL"]
+
+    SEARCH --> SONAR["Perplexity Sonar"]
+    SEARCH --> SPECIALISTS["GDELT · OpenAlex · Wikimedia"]
+    SEARCH --> GENERAL["SearXNG · Brave · Tavily · DuckDuckGo"]
 ```
 
-Cloudflared est uniquement un tunnel HTTPS vers FastAPI. Ce n’est pas un
-serveur d’inférence supplémentaire.
+Cloudflared, lorsqu’il est utilisé, est seulement un tunnel HTTPS vers FastAPI.
+Il ne constitue pas un serveur d’inférence.
 
 ## Modèles
 
-| Nom affiché | Identifiant Ollama | Usage | Contexte applicatif |
-| --- | --- | --- | --- |
-| Gemma 4 Chat | `gemma-4-chat` | Conversation générale | 65 536 tokens |
-| Gemma 4 Fable | `gemma-4-fable` | Raisonnement, code et tâches agentiques | 65 536 tokens |
+| Interface | Identifiant Ollama | Rôle | Contexte |
+| --- | --- | --- | ---: |
+| Gemma 4 Chat | `gemma-4-chat` | Modèle général par défaut, résident | 65 536 |
+| Lasme Rapide | `lasme-smol-fast` | Réponses courtes et très rapides | 32 768 |
+| Lasme Vision | `lasme-qwen-vision` | Images, tableaux, code, raisonnement | 16 384 |
 
-Les fichiers GGUF ne sont pas conservés dans ce dépôt. Ollama gère son propre
-stockage. L’application n’installe ni ne télécharge automatiquement de modèle.
-
-L’analyse d’images est désactivée tant que `VISION_MODEL` ne référence pas un
-modèle Ollama compatible. Cette désactivation évite de réintroduire implicitement
-un ancien modèle Qwen.
+Les deux modèles additionnels proviennent des dépôts GGUF officiels
+[Unsloth SmolLM3-3B-GGUF](https://huggingface.co/unsloth/SmolLM3-3B-GGUF)
+et
+[Unsloth Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen3-VL-8B-Instruct-GGUF).
+Le script `scripts/install_fast_models.ps1` crée les alias Ollama propres sans
+laisser de modèle temporaire visible. Aucun GGUF n’est versionné dans Git.
 
 ## Installation
 
+Prérequis : Python, Ollama et, pour le runner Python et SearXNG, Docker
+Desktop.
+
 ```powershell
+git clone https://github.com/lasme-ephrem/lasme-llm.git
+Set-Location lasme-llm
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python -m uvicorn chat.server.main:app --host 127.0.0.1 --port 8000
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_fast_models.ps1
+docker build -t lasme-python-runner:latest .\infra\runner
 ```
 
-Ouvrir ensuite <http://127.0.0.1:8000/>.
+Renseigner uniquement les fournisseurs souhaités dans `.env`, puis démarrer
+l’ensemble :
 
-## Espaces de travail, conversations et Canvas
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1
+```
 
-Les conversations peuvent être regroupées dans des projets. Chaque projet
-possède ses propres instructions, son modèle par défaut, ses documents et sa
-politique de mémoire. Le projet `Général` conserve la mémoire personnelle
-globale ; un nouveau projet utilise par défaut une mémoire isolée.
+Ouvrir <http://127.0.0.1:8000/>.
 
-Les actions affichées sous les messages permettent de copier, créer une
-branche, modifier un ancien message puis régénérer depuis ce point, ou ouvrir
-une réponse dans Canvas. Ces opérations ne modifient jamais la conversation
-originale.
+Pour arrêter FastAPI et SearXNG sans couper Ollama :
 
-Canvas offre une vue édition/aperçu pour les documents, Markdown, code,
-tableaux et rapports de recherche. Chaque sauvegarde crée une version
-immuable, consultable et exportable.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop_local.ps1
+```
 
-## Recherche Web et recherche approfondie
+## Projets et bibliothèque de fichiers
 
-Le bouton Web possède quatre états :
+L’**Espace principal** est toujours disponible et ne peut être ni renommé ni
+supprimé. Les autres projets peuvent être classés comme général, recherche,
+apprentissage, données, développement, rédaction ou média. Chaque projet
+isole ses conversations, instructions, fichiers, artefacts et mode de mémoire.
 
-- `Web auto` : recherche seulement pour les informations actuelles, les
-  demandes explicites de vérification et les relances qui nécessitent une mise
-  à jour ;
-- `Web` : recherche forcée, sauf pour une salutation triviale ;
-- `Recherche` : affiche un plan, recoupe plusieurs axes de recherche puis
-  produit un rapport cité automatiquement conservé dans Canvas ;
-- `Web off` : aucune requête externe.
+La bibliothèque accepte jusqu’à 25 Mo par fichier :
 
-L’orchestrateur ne demande plus systématiquement le même nombre de sources.
-Perplexity Sonar reste prioritaire lorsqu’il peut produire une réponse
-directement sourcée. À défaut, une route spécialisée peut interroger GDELT
-pour l’actualité, OpenAlex pour les publications scientifiques ou Wikimedia
-pour les faits encyclopédiques. La recherche généraliste complète ensuite les
-preuves avec SearXNG, Brave Search, Tavily et enfin DuckDuckGo. Chaque étape
-s’arrête dès que les résultats sont suffisamment pertinents, indépendants et
-fiables ; les erreurs d’authentification, de quota et de disponibilité
-déclenchent une bascule transparente.
+| Format | Lecture et indexation |
+| --- | --- |
+| PDF | Texte avec mise en page, pages, Vision locale puis secours OCR |
+| DOCX | Titres, paragraphes et tableaux |
+| XLSX | Feuilles, cellules, valeurs et formules |
+| PPTX | Diapositives, tableaux et notes |
+| TXT / MD | Structure textuelle |
+| PNG / JPG / WEBP | Qwen3-VL, puis secours OCR |
+
+Les originaux sont conservés dans `.runtime/project_files`, dédupliqués par
+empreinte SHA-256 et téléchargeables. L’extension, la signature binaire et la
+structure interne des formats Office sont vérifiées avant stockage ; le type
+MIME déclaré par le navigateur n’est jamais considéré comme fiable. Un PDF ou
+une image peut être ouvert directement depuis la bibliothèque. Les citations
+`[Document : fichier, p. X]` ouvrent la bonne ressource et la bonne page.
+
+Les anciens index RAG dont l’original n’est plus disponible restent visibles
+comme **index historiques** : ils peuvent encore être consultés ou supprimés,
+mais doivent être réimportés pour retrouver le téléchargement. Un bouton
+**Réindexer** permet aussi de relancer proprement l’analyse d’un original
+conservé après une interruption.
+
+Le classement RAG combine recherche lexicale, représentation vectorielle
+locale, nom de fichier, section, correspondances exactes et diversification
+MMR. Les relances utilisent le sujet récent de la conversation. Une recherche
+approfondie peut fusionner les preuves des documents avec celles du Web.
+
+## Canvas et artefacts
+
+Canvas est un espace de travail à deux volets : source éditable à gauche et
+aperçu à droite. Un artefact n’est pas une simple détection du contenu de la
+réponse ; c’est un document durable, versionné et exportable.
+
+| Modalité | Usage |
+| --- | --- |
+| Document mixte / Markdown | Cours, rapports, formules, code et tableaux |
+| Code | Édition et exécution Python isolée |
+| Tableau | Données structurées et export CSV/XLSX |
+| Dossier de recherche | Rapport documenté avec résultats et sources |
+| Présentation | Contenu structuré et export PPTX |
+| Diagramme / carte mentale / graphique | Rendu Mermaid et export SVG |
+| HTML / interactif | Mini-application autonome HTML/CSS/JavaScript |
+
+Les aperçus HTML sont servis par une URL éphémère et affichés dans un iframe
+sandboxé. Ils peuvent exécuter leur JavaScript, mais ne disposent ni du réseau,
+ni des API de l’application, ni des formulaires, ni des permissions du
+navigateur.
+
+## Runner Python
+
+Le bouton **Exécuter** de Canvas apparaît pour le code Python. Chaque tâche est
+lancée dans l’image `lasme-python-runner:latest` avec :
+
+- réseau désactivé ;
+- système de fichiers racine en lecture seule ;
+- capacités Linux supprimées et `no-new-privileges` ;
+- utilisateur non privilégié dédié (UID 10001) ;
+- mémoire, CPU, processus et durée limités ;
+- dossier de sortie temporaire dédié ;
+- au plus 32 fichiers, 20 Mo par fichier et 64 Mo au total ;
+- suppression automatique des anciennes tâches.
+
+Le résultat peut contenir la sortie standard, les erreurs, des graphiques PNG
+et des fichiers CSV, JSON ou texte. Les routes du runner restent locales,
+sauf activation explicite du codage distant — déconseillée sur un tunnel
+public.
+
+## Recherche Web
+
+`Web auto` décide si une information actuelle ou une vérification est
+nécessaire. `Web` force la recherche, `Recherche` lance une étude approfondie
+et `Web off` garde la réponse entièrement locale.
 
 ```mermaid
 flowchart LR
-    A["Question + contexte"] --> B{"Donnée structurée ?"}
-    B -->|"Météo, finance, crypto"| C["API spécialisée"]
-    C --> O
-    B -->|"Non"| D["Perplexity Sonar"]
-    D -->|"Réponse sourcée"| E["Réponse directe"]
-    D -->|"Quota ou preuves faibles"| F{"Route spécialisée"}
-    F -->|"Actualité"| G["GDELT"]
-    F -->|"Science"| H["OpenAlex"]
-    F -->|"Connaissance"| I["Wikimedia"]
-    F -->|"Général"| J["SearXNG"]
-    G --> P{"Preuves suffisantes ?"}
-    H --> P
-    I --> P
-    P -->|"Oui"| N
-    P -->|"Non"| J
-    J -->|"Insuffisant"| K["Brave Search"]
-    K -->|"Insuffisant"| L["Tavily"]
-    L -->|"Insuffisant"| M["DuckDuckGo"]
-    J --> N["Extraction + classement"]
-    K --> N
-    L --> N
-    M --> N
-    N --> O["Gemma + citations"]
+    Q["Question + contexte"] --> S{"Donnée structurée ?"}
+    S -->|"météo, finance, crypto"| API["API spécialisée"]
+    S -->|"non"| P["Perplexity Sonar"]
+    P -->|"réponse solide sans document local"| DIRECT["Réponse sourcée"]
+    P -->|"quota, panne ou RAG actif"| ROUTE["Fusion de preuves"]
+    ROUTE --> SPEC["GDELT · OpenAlex · Wikimedia"]
+    SPEC --> SCORE{"Preuves suffisantes ?"}
+    SCORE -->|"non"| SX["SearXNG"]
+    SX --> BRAVE["Brave Search"]
+    BRAVE --> TAVILY["Tavily"]
+    TAVILY --> DDG["DuckDuckGo"]
+    API --> FINAL["Réponse finale vérifiable"]
+    DIRECT --> FINAL
+    SCORE -->|"oui"| FINAL
+    DDG --> FINAL
 ```
 
-Quand Sonar fournit une réponse sourcée, l’application conserve directement
-son texte et l’ordre exact de ses citations : Gemma ne la paraphrase plus. Le
-fil récent de la conversation est transmis pour comprendre correctement les
-relances, mais les anciennes réponses ne sont jamais considérées comme des
-faits fiables. Pour les autres fournisseurs, l’orchestrateur classe les
-candidats, extrait le contenu principal des meilleures pages avec Trafilatura
-dans un délai borné, puis confie ces preuves à Gemma. Le nombre de sources varie
-donc selon la difficulté et la qualité des résultats.
+Le nombre de sources est adaptatif. Les candidats sont dédupliqués et classés
+selon pertinence, autorité, fraîcheur, contenu de preuve et diversité des
+domaines. Les pages retenues sont extraites dans un délai borné et leur contenu
+réel est vérifié une seconde fois. Si les extraits se révèlent insuffisants,
+l’orchestrateur élargit automatiquement la chaîne de fournisseurs sans
+facturer une seconde requête Sonar. Lorsqu’un
+document local participe à la réponse, même une bonne réponse Sonar est
+fusionnée avec les extraits RAG afin de conserver les deux familles de
+citations et de signaler les divergences.
 
-Configurer `PERPLEXITY_API_KEY` pour Sonar, `BRAVE_SEARCH_API_KEY` pour Brave
-et `TAVILY_API_KEY` pour Tavily. `PERPLEXITY_SONAR_MODEL` permet de changer le
-modèle Sonar ; la valeur par défaut est `sonar`. GDELT et Wikimedia ne
-nécessitent aucune clé. OpenAlex demande une clé gratuite facultative dans
-`OPENALEX_API_KEY`. Les routes spécialisées peuvent être désactivées avec
-`SEARCH_SPECIALISTS_ENABLED=false`.
-
-SearXNG est facultatif et désactivé par défaut. Après installation de Docker :
-
-```powershell
-$env:SEARXNG_SECRET = "une-valeur-locale-longue-et-aleatoire"
-docker compose -f infra/searxng/compose.yaml up -d
-```
-
-Définir ensuite `SEARXNG_ENABLED=true` dans `.env` puis redémarrer le backend.
-Le service n’écoute que sur `127.0.0.1:8080`. SearXNG reste un composant externe
-AGPL-3.0 appelé par HTTP ; aucun de ses fichiers source n’est inclus ici.
-
-Les demandes de météo, de cours boursiers et de crypto-actifs peuvent aussi
-utiliser des API structurées avant la recherche Web générale. Les URL locales,
-privées et réservées restent bloquées.
-
-## Mémoire et continuité
-
-Deux niveaux complémentaires évitent de renvoyer tout l’historique au modèle :
-
-- une compaction progressive propre à chaque conversation conserve les
-  décisions, corrections, contraintes et tâches en cours ;
-- une mémoire personnelle inter-conversations retient uniquement des
-  préférences durables.
-
-La mémoire personnelle est consultable depuis l’en-tête. Chaque élément peut
-être corrigé, désactivé ou supprimé, et l’enregistrement automatique peut être
-coupé entièrement. Les anciens extraits Web et documents ne sont jamais
-recopiés tels quels dans les résumés.
-
-## Raisonnement
-
-L’interface expose quatre niveaux :
-
-- Rapide : pas de thinking, sortie limitée ;
-- Équilibré : reasoning `medium` lorsqu’il est utile ;
-- Approfondi : reasoning `high` ;
-- Maximum : reasoning `max` et budget de sortie maximal.
-
-Le raisonnement interne fourni séparément par Ollama n’est ni affiché ni stocké
-dans la mémoire. Seule la réponse finale est conservée.
-
-## Performances et streaming
-
-Le chemin de génération est conçu pour réduire à la fois la latence réelle et
-la latence perçue :
-
-- le client HTTP vers Ollama est persistant et réutilise ses connexions ;
-- l’historique est limité aux messages récents et pertinents, complétés par une
-  mémoire compacte ;
-- le mode Rapide désactive le raisonnement et les autres niveaux n’augmentent
-  le budget de calcul que lorsque cela est demandé ;
-- `Web auto` évite une recherche externe pour les questions stables, tout en
-  conservant la recherche pour les relances liées à un sujet actuel ;
-- les tâches secondaires comme le titre et la mémoire sont exécutées sans
-  bloquer le flux principal ;
-- les événements SSE sont affichés progressivement dès leur réception ;
-- le rendu Markdown est regroupé par trames pour éviter un recalcul coûteux à
-  chaque token ;
-- chaque conversation possède son propre contrôleur de génération : changer de
-  conversation n’interrompt plus automatiquement le flux précédent ;
-- l’interface affiche l’occupation du contexte et propose trois relances
-  facultatives après une réponse.
-
-Sur la configuration de référence — RTX 4070 Ti SUPER 16 Go — le débit observé
-se situe généralement autour de 45 à 60 tokens par seconde. Ce chiffre dépend
-du modèle, de la longueur du contexte, du niveau de raisonnement et de
-l’utilisation de la recherche Web.
-
-## Documents
-
-Les fichiers PDF, TXT et Markdown sont limités à 10 Mo. Le texte extrait est
-stocké dans SQLite au niveau du projet actif. Le découpage conserve la page et
-la position de chaque extrait. Le classement hybride fusionne BM25 avec une
-représentation vectorielle locale tolérante aux accents, flexions et petites
-variations d’écriture. Les extraits injectés au modèle portent le nom du
-document, la page et le numéro du fragment pour produire des citations
-documentaires vérifiables.
-
-## Accès distant avec Cloudflared
-
-Les API provenant d’un proxy exigent `LASME_ACCESS_TOKEN`. Les routes
-`/api/coding/*` restent interdites à distance par défaut.
-
-1. Définir un long jeton aléatoire dans `.env`.
-2. Redémarrer FastAPI.
-3. Lancer le tunnel vers `http://127.0.0.1:8000`.
-4. Sur le téléphone, ouvrir une seule fois :
+Variables principales :
 
 ```text
-https://adresse-du-tunnel.trycloudflare.com/?token=VOTRE_JETON
+PERPLEXITY_API_KEY=
+BRAVE_SEARCH_API_KEY=
+SEARXNG_ENABLED=false
+SEARXNG_BASE_URL=http://127.0.0.1:8080
+TAVILY_API_KEY=
+OPENALEX_API_KEY=
 ```
 
-Le navigateur retire immédiatement le jeton de l’URL et le garde uniquement
-pour la session courante.
+SearXNG est un service séparé sous AGPL-3.0, appelé par HTTP. Aucun de son code
+source n’est inclus dans ce dépôt.
 
-Ne pas activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
+## Mémoire, continuité et qualité des réponses
+
+Le contexte envoyé au modèle combine les tours récents, des messages anciens
+réellement pertinents, un résumé progressif et, selon le projet, une mémoire
+personnelle contrôlable. Les anciennes pages Web ou documents bruts ne sont
+jamais recopiés aveuglément dans la mémoire.
+
+La présentation s’adapte à l’intention : réponse directe, explication, cours,
+tutoriel, comparaison, rapport, analyse de données ou artefact. Les cours
+utilisent une introduction, une progression numérotée, des exemples puis une
+conclusion. Les demandes factuelles récentes privilégient les preuves et
+doivent exprimer l’incertitude plutôt qu’inventer.
+
+Sous chaque réponse, Lasme affiche le débit de génération, le nombre de tokens,
+la durée totale, le délai du premier token et la taille du contexte d’entrée.
+
+Les migrations SQLite sont versionnées. Avant toute migration d’une base de
+production existante, une sauvegarde cohérente est créée automatiquement dans
+`.runtime/db_backups`.
+
+## Accès distant
+
+Toute API reçue via un proxy exige `LASME_ACCESS_TOKEN`. Après lancement de
+Cloudflared, ouvrir une fois :
+
+```text
+https://votre-tunnel.trycloudflare.com/?token=VOTRE_JETON
+```
+
+Le jeton est retiré de l’URL puis conservé dans un cookie de session sécurisé.
+Ne jamais activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
 [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Vie privée
 
-Le chat et l’inférence sont locaux. Deux fonctions peuvent envoyer du contenu
-hors de la machine :
-
-- la recherche Web peut envoyer la requête à Perplexity, Brave, Tavily,
-  SearXNG, DuckDuckGo, GDELT, OpenAlex ou Wikimedia selon le routage ;
-- la génération d’images envoie le prompt à Pollinations.
-
-La génération externe peut être coupée avec
+L’inférence, les conversations, les fichiers, le RAG, Canvas et le runner sont
+locaux. Selon la configuration, une requête de recherche peut être envoyée à
+un fournisseur Web. La génération d’images externe peut envoyer un prompt à
+Pollinations et se désactive avec
 `LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false`.
 
 ## Validation
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q chat core coding tests
+.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m compileall -q chat core coding scripts tests
 node --check chat\web\app.js
 node --check chat\web\workspace.js
+node --test tests\js\math-renderer.test.cjs
 .\.venv\Scripts\python.exe -m pip check
-```
-
-Un test comparatif manuel des deux modèles est disponible avec :
-
-```powershell
 .\.venv\Scripts\python.exe -m scripts.evaluate_models
 ```
 
-Les dossiers `python_academy`, `pylearn`, `app` et `templates` sont des
-prototypes séparés. Ils ne sont pas démarrés par l’application de chat.
+Les ressources tierces livrées dans `chat/web/vendor` conservent leurs fichiers
+de licence. Les prototypes historiques ignorés par Git ne font pas partie de
+l’application de production.
 
 ## Licence
 
-Ce projet original est distribué sous
-[Apache License 2.0](LICENSE), une licence permissive qui inclut une concession
-explicite de brevets. Les fonctionnalités de l’application ont été conçues et
-implémentées indépendamment. Voir [NOTICE](NOTICE).
+Lasme LLM est distribué sous [Apache License 2.0](LICENSE). Voir
+[NOTICE](NOTICE) pour les attributions et la déclaration d’implémentation
+indépendante.

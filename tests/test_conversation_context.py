@@ -90,6 +90,10 @@ class ConversationContextTests(unittest.TestCase):
             "privilégiant laervation",
         )
         self.assertEqual(clean_model_text("Lâ€™équipe"), "L’équipe")
+        self.assertEqual(
+            clean_model_text("La fonction θ vérifie ∑ xᵢ = μ."),
+            "La fonction θ vérifie ∑ xᵢ = μ.",
+        )
 
     def test_greeting_never_triggers_search(self):
         self.assertFalse(

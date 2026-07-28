@@ -1,9 +1,14 @@
+import base64
 import json
 import datetime
 import asyncio
+import mimetypes
 import re
+import secrets
 import time
 import unicodedata
+from contextlib import asynccontextmanager
+from urllib.parse import quote
 import httpx
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
@@ -37,10 +42,13 @@ from core.memory.personal import (
     refresh_generated_memories,
 )
 from core.rag.store import rag_store
-from core.artifacts import artifact_store
+from core.files import canonical_mime_type, project_file_store
+from core.artifacts import EXPORT_FORMATS, artifact_store, export_artifact as build_artifact_export
+from core.runner import python_runner
 from core.research import build_research_plan, merge_research_results
 from core.memory.database import DEFAULT_PROJECT_ID
 from core.security import (
+    configured_access_token,
     is_direct_local_request,
     request_has_valid_query_token,
     request_has_valid_token,
@@ -48,8 +56,22 @@ from core.security import (
 )
 from coding.agent import LasmeCodingAgent
 
-app = FastAPI(title="LLM-lasme API", version="0.9.0")
+client = LasmeLLMClient()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        yield
+    finally:
+        await client.aclose()
+
+
+app = FastAPI(title="Lasme LLM API", version="1.0.0", lifespan=lifespan)
 _favicon_cache: Dict[str, tuple[bytes, str]] = {}
+_artifact_preview_cache: Dict[str, tuple[float, str]] = {}
+_ARTIFACT_PREVIEW_TTL_SECONDS = 15 * 60
+_ARTIFACT_PREVIEW_CACHE_LIMIT = 64
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,10 +97,11 @@ async def protect_remote_api(request: Request, call_next):
         is_local = is_direct_local_request(request)
         has_token = request_has_valid_token(request)
         if not is_local and not has_token:
+            secure_token = configured_access_token()
             message = (
                 "Remote API access is disabled until LASME_ACCESS_TOKEN is "
-                "configured and supplied."
-                if not settings.access_token
+                "configured with a strong random value and supplied."
+                if not secure_token
                 else "A valid Lasme access token is required."
             )
             return JSONResponse({"detail": message}, status_code=401)
@@ -94,11 +117,22 @@ async def protect_remote_api(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    is_project_file_preview = (
+        request.url.path.startswith("/api/files/")
+        and request.url.path.endswith("/content")
+    )
+    is_artifact_preview = request.url.path.startswith("/api/artifact-previews/")
+    response.headers.setdefault(
+        "X-Frame-Options",
+        "SAMEORIGIN"
+        if is_project_file_preview or is_artifact_preview
+        else "DENY",
+    )
     if valid_query_token:
+        secure_token = configured_access_token()
         response.set_cookie(
             key="lasme_access_token",
-            value=settings.access_token.strip(),
+            value=secure_token,
             httponly=True,
             secure=True,
             samesite="lax",
@@ -160,9 +194,6 @@ async def get_site_favicon(domain: str):
     )
 
 
-client = LasmeLLMClient()
-
-
 def _allowed_model_names() -> set[str]:
     return {
         name
@@ -170,10 +201,23 @@ def _allowed_model_names() -> set[str]:
             settings.chat_model,
             settings.coding_model,
             settings.reasoning_model,
+            settings.fast_model,
             settings.vision_model,
         }
         if name
     }
+
+
+def _model_key(name: str) -> str:
+    return str(name or "").strip().removesuffix(":latest")
+
+
+def _model_is_available(model: str, available: List[str]) -> bool:
+    expected = _model_key(model)
+    return bool(expected) and any(
+        _model_key(candidate) == expected
+        for candidate in available
+    )
 
 
 def _validate_model_name(model: str) -> str:
@@ -181,23 +225,20 @@ def _validate_model_name(model: str) -> str:
         raise HTTPException(status_code=400, detail=f"Model is not allowed: {model}")
     return model
 
-
-@app.on_event("shutdown")
-async def close_http_clients():
-    await client.aclose()
-
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(default="", max_length=100_000)
-    images: Optional[List[str]] = Field(default=None, max_length=1)
+    images: Optional[List[str]] = Field(default=None, max_length=4)
 
     @field_validator("images")
     @classmethod
     def validate_image_payload(cls, images: Optional[List[str]]):
         if images:
             encoded_limit = int(settings.max_upload_bytes * 1.4) + 256
-            if len(images[0]) > encoded_limit:
+            if any(len(image) > encoded_limit for image in images):
                 raise ValueError("Image attachment exceeds the configured size limit.")
+            if sum(len(image) for image in images) > encoded_limit * 2:
+                raise ValueError("Combined image attachments exceed the configured limit.")
         return images
 
 _memory_update_locks: Dict[str, asyncio.Lock] = {}
@@ -207,6 +248,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     project_id: Optional[str] = DEFAULT_PROJECT_ID
     document_scope_id: Optional[str] = None
+    selected_file_ids: List[str] = Field(default_factory=list, max_length=20)
     model: Optional[str] = settings.chat_model
     messages: List[ChatMessage] = Field(min_length=1, max_length=200)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
@@ -249,6 +291,37 @@ class ProjectCreateRequest(BaseModel):
     instructions: str = Field(default="", max_length=8_000)
     default_model: str = Field(default=settings.chat_model, max_length=100)
     memory_mode: Literal["project", "global", "off"] = "project"
+    project_type: Literal[
+        "general",
+        "research",
+        "learning",
+        "data",
+        "coding",
+        "writing",
+        "media",
+    ] = "general"
+    tags: List[str] = Field(default_factory=list, max_length=12)
+    color: str = Field(default="", max_length=7)
+    favorite: bool = False
+
+    @field_validator("tags")
+    @classmethod
+    def validate_project_tags(cls, tags: List[str]) -> List[str]:
+        return [
+            normalized
+            for normalized in (
+                str(tag).strip()[:32]
+                for tag in tags
+            )
+            if normalized
+        ][:12]
+
+    @field_validator("color")
+    @classmethod
+    def validate_project_color(cls, color: str) -> str:
+        if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise ValueError("Project color must use #RRGGBB.")
+        return color
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -257,6 +330,51 @@ class ProjectUpdateRequest(BaseModel):
     instructions: Optional[str] = Field(default=None, max_length=8_000)
     default_model: Optional[str] = Field(default=None, max_length=100)
     memory_mode: Optional[Literal["project", "global", "off"]] = None
+    project_type: Optional[
+        Literal[
+            "general",
+            "research",
+            "learning",
+            "data",
+            "coding",
+            "writing",
+            "media",
+        ]
+    ] = None
+    tags: Optional[List[str]] = Field(default=None, max_length=12)
+    color: Optional[str] = Field(default=None, max_length=7)
+    favorite: Optional[bool] = None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_updated_project_tags(
+        cls,
+        tags: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        if tags is None:
+            return None
+        return [
+            normalized
+            for normalized in (
+                str(tag).strip()[:32]
+                for tag in tags
+            )
+            if normalized
+        ][:12]
+
+    @field_validator("color")
+    @classmethod
+    def validate_updated_project_color(
+        cls,
+        color: Optional[str],
+    ) -> Optional[str]:
+        if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise ValueError("Project color must use #RRGGBB.")
+        return color
+
+
+class ProjectFileUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=180)
 
 
 class ArtifactCreateRequest(BaseModel):
@@ -265,7 +383,19 @@ class ArtifactCreateRequest(BaseModel):
     source_message_id: Optional[str] = Field(default=None, max_length=100)
     title: str = Field(default="Sans titre", max_length=160)
     content: str = Field(default="", max_length=1_000_000)
-    kind: Literal["document", "code", "markdown", "table", "research"] = "document"
+    kind: Literal[
+        "document",
+        "code",
+        "markdown",
+        "table",
+        "research",
+        "html",
+        "interactive",
+        "diagram",
+        "mindmap",
+        "chart",
+        "presentation",
+    ] = "document"
     language: str = Field(default="", max_length=40)
 
 
@@ -273,7 +403,29 @@ class ArtifactUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=160)
     content: str = Field(max_length=1_000_000)
     change_summary: str = Field(default="", max_length=240)
-    kind: Optional[Literal["document", "code", "markdown", "table", "research"]] = None
+    kind: Optional[Literal[
+        "document",
+        "code",
+        "markdown",
+        "table",
+        "research",
+        "html",
+        "interactive",
+        "diagram",
+        "mindmap",
+        "chart",
+        "presentation",
+    ]] = None
+
+
+class ArtifactPreviewRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=500_000)
+
+
+class PythonRunRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=50_000)
+    timeout_seconds: int = Field(default=15, ge=1, le=20)
+    inputs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DeepResearchRequest(BaseModel):
@@ -281,6 +433,7 @@ class DeepResearchRequest(BaseModel):
     project_id: str = Field(default=DEFAULT_PROJECT_ID, max_length=100)
     question: str = Field(min_length=3, max_length=20_000)
     model: Optional[str] = settings.reasoning_model
+    selected_file_ids: List[str] = Field(default_factory=list, max_length=20)
     temporary: bool = False
 
 
@@ -382,7 +535,11 @@ def clean_model_text(value: str) -> str:
         if category.startswith("C"):
             continue
         if category.startswith("L") and ord(character) > 127:
-            if "LATIN" not in unicodedata.name(character, ""):
+            character_name = unicodedata.name(character, "")
+            if not any(
+                allowed_script in character_name
+                for allowed_script in {"LATIN", "GREEK"}
+            ):
                 continue
         cleaned.append(character)
     return "".join(cleaned)
@@ -694,6 +851,98 @@ def is_simple_factual_lookup(query: str) -> bool:
     return bool(set(words).intersection(factual_markers))
 
 
+def response_presentation_profile(query: str) -> tuple[str, str]:
+    """Select a useful answer shape without forcing every reply into a template."""
+    normalized = unicodedata.normalize("NFKD", (query or "").casefold())
+    normalized = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+    words = set(re.findall(r"[a-z0-9_-]+", normalized))
+    if not words:
+        return "direct", "Réponds naturellement et brièvement."
+
+    if words.intersection({"cours", "chapitre", "lecon", "enseigne", "pedagogique"}):
+        return (
+            "course",
+            "Construis un véritable mini-cours : une introduction qui situe la "
+            "notion, une progression numérotée du fondamental vers l’avancé, des "
+            "définitions précises, au moins un exemple utile, puis une conclusion "
+            "qui synthétise les acquis. Ajoute formules ou code uniquement si la "
+            "demande ou la matière le justifie.",
+        )
+    if words.intersection(
+        {"tutoriel", "procedure", "etapes", "guide", "installer", "configurer", "realiser"}
+    ):
+        return (
+            "tutorial",
+            "Présente un guide exécutable : résultat attendu, prérequis courts, "
+            "étapes numérotées avec vérification à chaque étape, puis contrôle final "
+            "et pièges fréquents. Les commandes doivent être directement copiables.",
+        )
+    if words.intersection({"rapport", "audit", "etude", "dossier", "recherche"}):
+        return (
+            "report",
+            "Structure comme un rapport professionnel : résumé initial, périmètre "
+            "et méthode, constats étayés, limites, recommandations priorisées, puis "
+            "conclusion. Sépare clairement faits, inférences et recommandations.",
+        )
+    if words.intersection({"compare", "comparaison", "versus", "difference", "choisir"}):
+        return (
+            "comparison",
+            "Commence par la conclusion décisionnelle, puis compare avec un tableau "
+            "seulement s’il existe plusieurs critères utiles. Termine par une "
+            "recommandation conditionnelle claire.",
+        )
+    if (
+        "mermaid" in words
+        or "diagramme" in words
+        or "mindmap" in words
+        or {"carte", "mentale"}.issubset(words)
+        or {"graphe", "visuel"}.intersection(words)
+    ):
+        return (
+            "visualization",
+            "Crée une visualisation Mermaid valide et autonome dans un unique bloc "
+            "```mermaid```. Choisis mindmap pour une carte mentale, flowchart pour "
+            "un processus ou une architecture, sequenceDiagram pour des échanges, "
+            "timeline pour une chronologie et xychart-beta pour des données. Utilise "
+            "des libellés courts, échappe les ponctuations complexes et n’invente "
+            "aucune valeur absente de la demande.",
+        )
+    if words.intersection(
+        {"canvas", "artefact", "artifact", "html", "application", "dashboard", "simulateur"}
+    ):
+        return (
+            "artifact",
+            "Fournis un livrable exploitable, autonome et cohérent. Pour un artefact "
+            "HTML, produis une page complète responsive avec HTML, CSS et JavaScript "
+            "dans un seul fichier, sans dépendance réseau sauf demande explicite.",
+        )
+    if words.intersection({"tableau", "csv", "excel", "donnees", "statistiques"}):
+        return (
+            "data",
+            "Présente les données avec unités, définitions de colonnes et ordre "
+            "logique. Utilise un tableau Markdown lorsque cela rend réellement la "
+            "comparaison plus précise, puis résume les enseignements importants.",
+        )
+    if words.intersection(
+        {"explique", "comprendre", "theorie", "notion", "principe", "comment", "pourquoi"}
+    ):
+        return (
+            "explanation",
+            "Explique d’abord l’idée centrale en langage clair, puis développe par "
+            "étapes avec un exemple concret. Conclus par l’essentiel à retenir ; "
+            "évite les sections artificielles si la réponse reste courte.",
+        )
+    return (
+        "direct",
+        "Réponds directement et naturellement. N’ajoute ni introduction formelle "
+        "ni conclusion artificielle à une question simple.",
+    )
+
+
 def should_enable_reasoning(
     query: str,
     model: str,
@@ -844,24 +1093,74 @@ async def async_update_personal_memory(model: str):
 @app.get("/api/health")
 async def health_check():
     checks: Dict[str, Any] = {
-        "database": {"status": "ok"},
-        "ollama": {"status": "unknown", "models": []},
+        "database": {"status": "ok", "required": True},
+        "ollama": {
+            "status": "unknown",
+            "models": [],
+            "required": True,
+        },
     }
     try:
         db.list_sessions()
     except Exception as exc:
-        checks["database"] = {"status": "error", "error": type(exc).__name__}
+        checks["database"] = {
+            "status": "error",
+            "error": type(exc).__name__,
+            "required": True,
+        }
     try:
         models = await client.list_models()
+        model_names = [
+            str(model.get("name") or "")
+            for model in models
+            if model.get("name")
+        ]
+        required_models = list(
+            dict.fromkeys(
+                [
+                    settings.chat_model,
+                    settings.fast_model,
+                    settings.vision_model,
+                ]
+            )
+        )
+        missing_models = [
+            model
+            for model in required_models
+            if not _model_is_available(model, model_names)
+        ]
         checks["ollama"] = {
-            "status": "ok",
-            "models": [model.get("name") for model in models],
+            "status": "ok" if not missing_models else "error",
+            "models": model_names,
+            "required_models": required_models,
+            "missing_models": missing_models,
+            "required": True,
         }
     except Exception as exc:
-        checks["ollama"] = {"status": "error", "error": type(exc).__name__}
+        checks["ollama"] = {
+            "status": "error",
+            "error": type(exc).__name__,
+            "required": True,
+        }
+    runner_available = await python_runner.available()
+    checks["runner"] = {
+        "status": "ok" if runner_available else "unavailable",
+        "required": True,
+        "engine": "docker",
+    }
+    ocr = rag_store.ocr_capabilities()
+    checks["ocr"] = {
+        "status": "ok" if ocr.get("available") else "unavailable",
+        "required": False,
+        **ocr,
+    }
     overall = (
         "ok"
-        if all(check["status"] == "ok" for check in checks.values())
+        if all(
+            check["status"] == "ok"
+            for check in checks.values()
+            if check.get("required", True)
+        )
         else "degraded"
     )
     return {
@@ -879,12 +1178,49 @@ async def get_models():
 
 @app.get("/api/capabilities")
 async def get_capabilities():
+    try:
+        installed_models = [
+            str(model.get("name") or "")
+            for model in await client.list_models()
+            if model.get("name")
+        ]
+    except Exception:
+        installed_models = []
+    vision_available = _model_is_available(
+        settings.vision_model,
+        installed_models,
+    )
+    fast_available = _model_is_available(
+        settings.fast_model,
+        installed_models,
+    )
     return {
-        "vision_enabled": bool(settings.vision_model),
+        "vision_enabled": vision_available,
+        "vision_model": settings.vision_model,
+        "fast_model": settings.fast_model,
+        "fast_model_enabled": fast_available,
+        "installed_models": installed_models,
+        "ocr": rag_store.ocr_capabilities(),
         "external_image_generation_enabled": settings.external_image_generation_enabled,
         "remote_coding_enabled": settings.allow_remote_coding,
+        "agent_terminal_enabled": settings.agent_terminal_enabled,
+        "python_runner_enabled": await python_runner.available(),
         "projects_enabled": True,
+        "project_file_library_enabled": True,
+        "supported_project_files": [
+            "pdf",
+            "txt",
+            "md",
+            "docx",
+            "xlsx",
+            "pptx",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+        ],
         "canvas_enabled": True,
+        "artifact_exports": sorted(EXPORT_FORMATS),
         "deep_research_enabled": True,
         "hybrid_rag_enabled": True,
     }
@@ -906,6 +1242,10 @@ async def create_project(payload: ProjectCreateRequest):
             instructions=payload.instructions,
             default_model=model,
             memory_mode=payload.memory_mode,
+            project_type=payload.project_type,
+            tags=payload.tags,
+            color=payload.color,
+            favorite=payload.favorite,
         )
     }
 
@@ -935,9 +1275,14 @@ async def update_project(project_id: str, payload: ProjectUpdateRequest):
 async def delete_project(project_id: str):
     if project_id == DEFAULT_PROJECT_ID:
         raise HTTPException(status_code=400, detail="The default project cannot be deleted.")
-    rag_store.clear(project_id)
+    if not db.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
     if not db.delete_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
+    await asyncio.to_thread(
+        project_file_store.remove_project_storage,
+        project_id,
+    )
     return {"status": "deleted"}
 
 
@@ -1087,43 +1432,773 @@ async def refresh_personal_memory():
     return {"status": "ok", "generated": generated}
 
 # --- RAG DOCUMENT ENDPOINTS ---
+async def _index_project_image(
+    *,
+    scope_id: str,
+    filename: str,
+    content: bytes,
+    file_id: str,
+    mime_type: str,
+) -> tuple[int, Dict[str, Any]]:
+    """Describe and index an image with the local vision model.
+
+    OCR remains a fallback for installations where the vision model is not
+    available. The stored original is never modified.
+    """
+    encoded = base64.b64encode(content).decode("ascii")
+    prompt = (
+        "Analyse cette image destinée à une base documentaire RAG. "
+        "Retourne uniquement une transcription et une description factuelles, "
+        "en français, structurées avec les rubriques suivantes lorsqu'elles "
+        "sont pertinentes : TEXTE VISIBLE, DESCRIPTION, DONNÉES STRUCTURÉES, "
+        "GRAPHIQUE OU SCHÉMA, ÉLÉMENTS INCERTAINS. Transcris fidèlement tous "
+        "les textes lisibles. Pour un tableau, restitue les en-têtes et les "
+        "lignes. Pour un graphique, relève les axes, légendes, valeurs et "
+        "tendances visibles. N'invente aucune information absente de l'image."
+    )
+    try:
+        reply = await asyncio.wait_for(
+            client.chat(
+                model=settings.vision_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [encoded],
+                    }
+                ],
+                temperature=0.0,
+                think=False,
+                num_ctx=8_192,
+                num_predict=2_048,
+            ),
+            timeout=120.0,
+        )
+        analysis = clean_model_text(
+            reply.get("message", {}).get("content", "")
+        ).strip()
+        if not analysis:
+            raise ValueError("The vision model returned an empty analysis.")
+        chunks = await asyncio.to_thread(
+            rag_store.add_extracted_text,
+            scope_id,
+            filename,
+            analysis,
+            file_id=file_id,
+            mime_type=mime_type,
+            section_title="Analyse visuelle",
+        )
+        return chunks, {
+            "indexer": "vision",
+            "vision_model": settings.vision_model,
+            "visual_analysis": analysis[:4_000],
+        }
+    except Exception as vision_error:
+        chunks = await asyncio.to_thread(
+            rag_store.add_document,
+            scope_id,
+            filename,
+            content,
+            file_id=file_id,
+            mime_type=mime_type,
+        )
+        return chunks, {
+            "indexer": "ocr_fallback",
+            "vision_error": type(vision_error).__name__,
+        }
+
+
+async def _index_project_pdf(
+    *,
+    scope_id: str,
+    filename: str,
+    content: bytes,
+    file_id: str,
+    mime_type: str,
+) -> tuple[int, Dict[str, Any]]:
+    """Index PDF text, then enrich scanned/visual pages with the local VLM."""
+    parser_error: Optional[Exception] = None
+    parser_chunks = 0
+    try:
+        parser_chunks = await asyncio.to_thread(
+            rag_store.add_document,
+            scope_id,
+            filename,
+            content,
+            file_id=file_id,
+            mime_type=mime_type,
+        )
+    except ValueError as exc:
+        parser_error = exc
+
+    try:
+        rendered_pages, total_pages = await asyncio.to_thread(
+            rag_store.render_pdf_pages_for_vision,
+            content,
+        )
+    except ValueError:
+        rendered_pages, total_pages = [], 0
+
+    analyses: List[tuple[int, str, str]] = []
+    vision_errors: List[str] = []
+    if rendered_pages and settings.vision_model:
+        semaphore = asyncio.Semaphore(2)
+
+        async def analyze_page(
+            page_number: int,
+            png: bytes,
+            reason: str,
+        ) -> tuple[int, str, str] | Exception:
+            prompt = (
+                f"Analyse factuellement la page {page_number} sur "
+                f"{total_pages} de ce PDF. "
+                "Transcris tout texte visible et décris précisément les "
+                "tableaux, graphiques, axes, légendes, valeurs, schémas et "
+                "illustrations utiles. N'invente rien. Structure la réponse "
+                "en TEXTE VISIBLE, DONNÉES STRUCTURÉES et ÉLÉMENTS VISUELS. "
+                f"Type de page détecté : {reason}."
+            )
+            try:
+                async with semaphore:
+                    reply = await asyncio.wait_for(
+                        client.chat(
+                            model=settings.vision_model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": prompt,
+                                    "images": [
+                                        base64.b64encode(png).decode("ascii")
+                                    ],
+                                }
+                            ],
+                            temperature=0.0,
+                            think=False,
+                            num_ctx=8_192,
+                            num_predict=1_536,
+                        ),
+                        timeout=90.0,
+                    )
+                analysis = clean_model_text(
+                    reply.get("message", {}).get("content", "")
+                ).strip()
+                if not analysis:
+                    raise ValueError("Empty visual PDF analysis.")
+                return (
+                    page_number,
+                    f"Page {page_number} · analyse visuelle",
+                    analysis,
+                )
+            except Exception as exc:
+                return exc
+
+        page_results = await asyncio.gather(
+            *[
+                analyze_page(page_number, png, reason)
+                for page_number, png, reason in rendered_pages
+            ]
+        )
+        for result in page_results:
+            if isinstance(result, Exception):
+                vision_errors.append(type(result).__name__)
+            else:
+                analyses.append(result)
+
+    visual_chunks = 0
+    if analyses:
+        if parser_chunks:
+            visual_chunks = await asyncio.to_thread(
+                rag_store.append_extracted_pages,
+                file_id,
+                analyses,
+            )
+        else:
+            visual_chunks = await asyncio.to_thread(
+                rag_store.add_extracted_pages,
+                scope_id,
+                filename,
+                analyses,
+                file_id=file_id,
+                mime_type=mime_type,
+            )
+    elif parser_error is not None:
+        raise ValueError(
+            "Le PDF ne contient aucun texte extractible et l'analyse Vision "
+            "n'a pas pu produire de transcription."
+        ) from parser_error
+
+    return parser_chunks + visual_chunks, {
+        "indexer": (
+            "document_parser+vision"
+            if analyses and parser_chunks
+            else ("vision_pdf" if analyses else "document_parser")
+        ),
+        "vision_model": settings.vision_model if analyses else "",
+        "vision_pages": [page[0] for page in analyses],
+        "vision_page_limit": len(rendered_pages),
+        "total_pages": total_pages,
+        "vision_errors": vision_errors[:10],
+    }
+
+
 @app.post("/api/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
     scope_id: str = Form(...),
 ):
+    project = db.get_project(scope_id)
+    if not project:
+        raise HTTPException(
+            status_code=404,
+            detail="Project not found.",
+        )
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
         raise HTTPException(
             status_code=413,
             detail=f"Document exceeds the {settings.max_upload_bytes // (1024 * 1024)} MB limit.",
         )
+    filename = file.filename or "document"
     try:
-        chunks_added = rag_store.add_document(scope_id, file.filename or "document", content)
+        stored_file, duplicate = await asyncio.to_thread(
+            project_file_store.add,
+            project_id=scope_id,
+            filename=filename,
+            content=content,
+            mime_type=file.content_type or "",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if duplicate and stored_file.get("status") == "ready":
+        return {
+            "status": "duplicate",
+            "file": stored_file,
+            "filename": stored_file["display_name"],
+            "chunks": stored_file["chunk_count"],
+            "total_chunks_in_scope": rag_store.count_chunks(scope_id),
+        }
+
+    project_file_store.update(
+        stored_file["id"],
+        status="indexing",
+        error="",
+    )
+    try:
+        indexing_metadata: Dict[str, Any] = {}
+        if stored_file.get("kind") == "image" and settings.vision_model:
+            chunks_added, indexing_metadata = await _index_project_image(
+                scope_id=scope_id,
+                filename=filename,
+                content=content,
+                file_id=stored_file["id"],
+                mime_type=stored_file["mime_type"],
+            )
+        elif stored_file.get("kind") == "pdf":
+            chunks_added, indexing_metadata = await _index_project_pdf(
+                scope_id=scope_id,
+                filename=filename,
+                content=content,
+                file_id=stored_file["id"],
+                mime_type=stored_file["mime_type"],
+            )
+        else:
+            chunks_added = await asyncio.to_thread(
+                rag_store.add_document,
+                scope_id,
+                filename,
+                content,
+                file_id=stored_file["id"],
+                mime_type=stored_file["mime_type"],
+            )
+            indexing_metadata = {"indexer": "document_parser"}
+        document = next(
+            (
+                item
+                for item in rag_store.list_documents(scope_id)
+                if item.get("file_id") == stored_file["id"]
+            ),
+            {},
+        )
+        stored_file = project_file_store.update(
+            stored_file["id"],
+            status="ready",
+            page_count=int(document.get("page_count") or 0),
+            chunk_count=chunks_added,
+            error="",
+            metadata={
+                "indexed_at": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
+                **indexing_metadata,
+            },
+        ) or stored_file
+    except Exception as exc:
+        project_file_store.update(
+            stored_file["id"],
+            status="error",
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "file": project_file_store.get(stored_file["id"]),
+            },
+        ) from exc
     return {
         "status": "success",
-        "filename": file.filename,
+        "file": stored_file,
+        "filename": stored_file["display_name"],
         "chunks": chunks_added,
         "total_chunks_in_scope": rag_store.count_chunks(scope_id),
     }
 
 @app.delete("/api/documents/clear")
 async def clear_documents(scope_id: str):
-    removed = rag_store.clear(scope_id)
-    return {"status": "cleared", "documents_removed": removed}
+    removed_from_index = rag_store.clear(scope_id)
+    removed_files = project_file_store.clear_project(scope_id)
+    return {
+        "status": "cleared",
+        "documents_removed": max(removed_from_index, removed_files),
+        "files_removed": removed_files,
+    }
+
+
+_LEGACY_RAG_FILE_PREFIX = "legacy:"
+
+
+def _legacy_rag_document_id(file_id: str) -> Optional[str]:
+    value = (file_id or "").strip()
+    if not value.startswith(_LEGACY_RAG_FILE_PREFIX):
+        return None
+    document_id = value[len(_LEGACY_RAG_FILE_PREFIX):].strip()
+    return document_id or None
+
+
+def _legacy_rag_file_record(document: Dict[str, Any]) -> Dict[str, Any]:
+    filename = str(document.get("filename") or "Document historique")
+    extension = Path(filename).suffix.lower()
+    kind = {
+        ".pdf": "pdf",
+        ".md": "markdown",
+        ".docx": "word",
+        ".xlsx": "spreadsheet",
+        ".pptx": "presentation",
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webp": "image",
+    }.get(extension, "text")
+    synthetic_id = f"{_LEGACY_RAG_FILE_PREFIX}{document['id']}"
+    return {
+        "id": synthetic_id,
+        "legacy_document_id": document["id"],
+        "project_id": document.get("scope_id"),
+        "filename": filename,
+        "display_name": filename,
+        "extension": extension,
+        "mime_type": canonical_mime_type(extension),
+        "kind": kind,
+        "size_bytes": 0,
+        "page_count": int(document.get("page_count") or 0),
+        "chunk_count": int(document.get("chunk_count") or 0),
+        "status": "ready",
+        "error": "",
+        "metadata": {
+            "legacy_index": True,
+            "notice": (
+                "Index historique conservé. L'original n'est plus disponible; "
+                "réimportez-le pour restaurer le téléchargement."
+            ),
+        },
+        "preview_url": "",
+        "download_url": "",
+        "created_at": document.get("created_at"),
+        "updated_at": document.get("created_at"),
+    }
+
+
+def _get_legacy_rag_file(
+    file_id: str,
+    *,
+    project_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    document_id = _legacy_rag_document_id(file_id)
+    if not document_id:
+        return None
+    document = rag_store.get_document(document_id)
+    if not document:
+        return None
+    linked_file_id = document.get("file_id")
+    if linked_file_id and project_file_store.get(str(linked_file_id)):
+        return None
+    if project_id and document.get("scope_id") != project_id:
+        return None
+    return _legacy_rag_file_record(document)
+
+
+def _resolve_selected_rag_file_ids(
+    file_ids: List[str],
+    project_id: str,
+) -> List[str]:
+    resolved: List[str] = []
+    for file_id in file_ids:
+        record = project_file_store.get(file_id)
+        if (
+            record
+            and record.get("project_id") == project_id
+            and record.get("status") == "ready"
+        ):
+            resolved.append(file_id)
+            continue
+        legacy = _get_legacy_rag_file(file_id, project_id=project_id)
+        if legacy:
+            resolved.append(legacy["legacy_document_id"])
+    return list(dict.fromkeys(resolved))
 
 
 @app.get("/api/documents")
 async def list_documents(scope_id: str):
-    return {"documents": rag_store.list_documents(scope_id)}
+    files = project_file_store.list(scope_id)
+    visible_file_ids = {item["id"] for item in files}
+    legacy_files = [
+        _legacy_rag_file_record(document)
+        for document in rag_store.list_documents(scope_id)
+        if (
+            not document.get("file_id")
+            or document.get("file_id") not in visible_file_ids
+        )
+    ]
+    files = [*files, *legacy_files]
+    return {"documents": files, "files": files}
+
+
+@app.get("/api/files/{file_id}")
+async def get_project_file(file_id: str):
+    legacy = _get_legacy_rag_file(file_id)
+    if legacy:
+        return {"file": legacy}
+    record = project_file_store.get(file_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return {"file": record}
+
+
+@app.put("/api/files/{file_id}")
+async def update_project_file(
+    file_id: str,
+    payload: ProjectFileUpdateRequest,
+):
+    legacy = _get_legacy_rag_file(file_id)
+    if legacy:
+        if not payload.display_name:
+            return {"file": legacy}
+        try:
+            renamed = rag_store.rename_document(
+                legacy["legacy_document_id"],
+                payload.display_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not renamed:
+            raise HTTPException(status_code=404, detail="File not found.")
+        document = rag_store.get_document(legacy["legacy_document_id"])
+        return {"file": _legacy_rag_file_record(document or {})}
+    try:
+        record = project_file_store.update(
+            file_id,
+            display_name=payload.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if payload.display_name:
+        rag_store.rename_document(file_id, record["display_name"])
+    return {"file": record}
+
+
+@app.post("/api/files/{file_id}/reindex")
+async def reindex_project_file(file_id: str):
+    record = project_file_store.get(file_id)
+    if not record:
+        if _get_legacy_rag_file(file_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Re-import the original file to rebuild a legacy index.",
+            )
+        raise HTTPException(status_code=404, detail="File not found.")
+    try:
+        content = project_file_store.read(file_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=410,
+            detail="The stored original is missing.",
+        ) from exc
+    project_file_store.update(file_id, status="indexing", error="")
+    try:
+        if record["kind"] == "image" and settings.vision_model:
+            chunks, metadata = await _index_project_image(
+                scope_id=record["project_id"],
+                filename=record["filename"],
+                content=content,
+                file_id=file_id,
+                mime_type=record["mime_type"],
+            )
+        elif record["kind"] == "pdf":
+            chunks, metadata = await _index_project_pdf(
+                scope_id=record["project_id"],
+                filename=record["filename"],
+                content=content,
+                file_id=file_id,
+                mime_type=record["mime_type"],
+            )
+        else:
+            chunks = await asyncio.to_thread(
+                rag_store.add_document,
+                record["project_id"],
+                record["filename"],
+                content,
+                file_id=file_id,
+                mime_type=record["mime_type"],
+            )
+            metadata = {"indexer": "document_parser"}
+        indexed = next(
+            (
+                item
+                for item in rag_store.list_documents(record["project_id"])
+                if item.get("file_id") == file_id
+            ),
+            {},
+        )
+        updated = project_file_store.update(
+            file_id,
+            status="ready",
+            page_count=int(indexed.get("page_count") or 0),
+            chunk_count=chunks,
+            error="",
+            metadata={
+                "indexed_at": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
+                **metadata,
+            },
+        )
+        return {"status": "ready", "file": updated, "chunks": chunks}
+    except Exception as exc:
+        project_file_store.update(
+            file_id,
+            status="error",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _content_disposition(filename: str, *, inline: bool) -> str:
+    fallback = re.sub(r"[^a-zA-Z0-9._-]+", "_", filename) or "document"
+    encoded = quote(filename, safe="")
+    mode = "inline" if inline else "attachment"
+    return f"{mode}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _project_file_response_headers(
+    filename: str,
+    *,
+    inline: bool,
+) -> Dict[str, str]:
+    return {
+        "Content-Disposition": _content_disposition(
+            filename,
+            inline=inline,
+        ),
+        "Cache-Control": "private, max-age=300" if inline else "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Content-Security-Policy": (
+            "sandbox; default-src 'none'; frame-ancestors 'self';"
+        ),
+    }
+
+
+@app.get("/api/files/{file_id}/content")
+async def preview_project_file(file_id: str):
+    legacy = _get_legacy_rag_file(file_id)
+    if legacy:
+        sections = rag_store.preview_indexed_document(
+            legacy["legacy_document_id"],
+        )
+        text = "\n\n".join(section["text"] for section in sections)
+        return Response(
+            content=text,
+            media_type="text/plain",
+            headers=_project_file_response_headers(
+                legacy["display_name"],
+                inline=True,
+            ),
+        )
+    record = project_file_store.get(file_id)
+    path = project_file_store.path_for(file_id)
+    if not record or not path:
+        raise HTTPException(status_code=404, detail="File not found.")
+    inline = record["kind"] in {"pdf", "image"}
+    return FileResponse(
+        path,
+        media_type=canonical_mime_type(record["extension"]),
+        headers=_project_file_response_headers(
+            record["display_name"],
+            inline=inline,
+        ),
+    )
+
+
+@app.get("/api/files/{file_id}/download")
+async def download_project_file(file_id: str):
+    if _get_legacy_rag_file(file_id):
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "The original file is unavailable for this historical index. "
+                "Re-import the document to restore downloads."
+            ),
+        )
+    record = project_file_store.get(file_id)
+    path = project_file_store.path_for(file_id)
+    if not record or not path:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(
+        path,
+        media_type=canonical_mime_type(record["extension"]),
+        headers=_project_file_response_headers(
+            record["display_name"],
+            inline=False,
+        ),
+    )
+
+
+@app.get("/api/files/{file_id}/preview")
+async def get_project_file_preview(file_id: str):
+    legacy = _get_legacy_rag_file(file_id)
+    if legacy:
+        return {
+            "mode": "sections",
+            "file": legacy,
+            "sections": rag_store.preview_indexed_document(
+                legacy["legacy_document_id"],
+            ),
+        }
+    record = project_file_store.get(file_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if record["kind"] in {"pdf", "image"}:
+        return {
+            "mode": record["kind"],
+            "file": record,
+            "url": record["preview_url"],
+        }
+    try:
+        sections = await asyncio.to_thread(
+            rag_store.preview,
+            record["filename"],
+            project_file_store.read(file_id),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "mode": "structured",
+        "file": record,
+        "sections": sections,
+    }
+
+
+@app.delete("/api/files/{file_id}")
+async def delete_project_file(file_id: str):
+    legacy = _get_legacy_rag_file(file_id)
+    if legacy:
+        rag_store.delete_document(legacy["legacy_document_id"])
+        return {"status": "deleted", "legacy": True}
+    record = project_file_store.get(file_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found.")
+    rag_store.delete_document(file_id)
+    project_file_store.delete(file_id)
+    return {"status": "deleted", "file_id": file_id}
 
 
 # --- CANVAS / VERSIONED ARTIFACTS ---
 @app.get("/api/artifacts")
 async def list_artifacts(project_id: str = DEFAULT_PROJECT_ID):
     return {"artifacts": artifact_store.list(project_id)}
+
+
+def _prune_artifact_previews(now: Optional[float] = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired = [
+        token
+        for token, (expires_at, _) in _artifact_preview_cache.items()
+        if expires_at <= current
+    ]
+    for token in expired:
+        _artifact_preview_cache.pop(token, None)
+    while len(_artifact_preview_cache) >= _ARTIFACT_PREVIEW_CACHE_LIMIT:
+        oldest = min(
+            _artifact_preview_cache,
+            key=lambda item: _artifact_preview_cache[item][0],
+        )
+        _artifact_preview_cache.pop(oldest, None)
+
+
+@app.post("/api/artifact-previews")
+async def create_artifact_preview(payload: ArtifactPreviewRequest):
+    """Create a short-lived isolated URL for an unsaved HTML Canvas."""
+    now = time.monotonic()
+    _prune_artifact_previews(now)
+    token = secrets.token_urlsafe(24)
+    _artifact_preview_cache[token] = (
+        now + _ARTIFACT_PREVIEW_TTL_SECONDS,
+        payload.content,
+    )
+    return {
+        "url": f"/api/artifact-previews/{token}",
+        "expires_in": _ARTIFACT_PREVIEW_TTL_SECONDS,
+    }
+
+
+@app.get("/api/artifact-previews/{token}")
+async def get_artifact_preview(token: str):
+    """Serve a Canvas in a sandbox with no application or network access."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,80}", token):
+        raise HTTPException(status_code=404, detail="Preview not found.")
+    now = time.monotonic()
+    _prune_artifact_previews(now)
+    cached = _artifact_preview_cache.get(token)
+    if not cached or cached[0] <= now:
+        _artifact_preview_cache.pop(token, None)
+        raise HTTPException(status_code=404, detail="Preview expired or not found.")
+    return Response(
+        content=cached[1].encode("utf-8"),
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                "img-src data: blob:; "
+                "font-src data:; "
+                "style-src 'unsafe-inline'; "
+                "script-src 'unsafe-inline'; "
+                "connect-src 'none'; "
+                "media-src data: blob:; "
+                "frame-src 'none'; "
+                "worker-src 'none'; "
+                "object-src 'none'; "
+                "form-action 'none'; "
+                "base-uri 'none'"
+            ),
+            "Permissions-Policy": (
+                "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+            ),
+        },
+    )
 
 
 @app.post("/api/artifacts")
@@ -1164,7 +2239,11 @@ async def delete_artifact(artifact_id: str):
 
 
 @app.get("/api/artifacts/{artifact_id}/export")
-async def export_artifact(artifact_id: str, version: Optional[int] = None):
+async def export_artifact(
+    artifact_id: str,
+    version: Optional[int] = None,
+    format: Optional[str] = None,
+):
     artifact = artifact_store.get(artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found.")
@@ -1181,19 +2260,83 @@ async def export_artifact(artifact_id: str, version: Optional[int] = None):
         if not selected_version:
             raise HTTPException(status_code=404, detail="Artifact version not found.")
         selected = selected_version["content"]
-    extension = {
-        "code": artifact.get("language") or "txt",
+    default_format = {
+        "code": "txt",
         "markdown": "md",
         "research": "md",
         "table": "csv",
+        "html": "html",
+        "interactive": "html",
+        "diagram": "svg",
+        "presentation": "pptx",
     }.get(artifact.get("kind"), "md")
-    safe_title = re.sub(r"[^a-zA-Z0-9_-]+", "-", artifact["title"]).strip("-")
-    filename = f"{safe_title or 'artifact'}.{extension}"
+    output_format = (format or default_format).lower().strip()
+    if output_format not in EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail="Unsupported export format.")
+    try:
+        payload, media_type, filename = await asyncio.to_thread(
+            build_artifact_export,
+            artifact["title"],
+            selected,
+            kind=artifact.get("kind") or "document",
+            output_format=output_format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(
-        content=selected.encode("utf-8"),
-        media_type="text/plain; charset=utf-8",
+        content=payload,
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/api/runner/status")
+async def get_python_runner_status():
+    return {
+        "available": await python_runner.available(),
+        "engine": "docker",
+        "network": "disabled",
+        "max_seconds": 20,
+    }
+
+
+@app.post("/api/runner/python")
+async def run_python(payload: PythonRunRequest, request: Request):
+    if (
+        not is_direct_local_request(request)
+        and not settings.allow_remote_coding
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="The Python runner is local-only.",
+        )
+    try:
+        await asyncio.to_thread(python_runner.cleanup)
+        result = await python_runner.run(
+            payload.code,
+            timeout_seconds=payload.timeout_seconds,
+            inputs=payload.inputs,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"result": result.model_dump()}
+
+
+@app.get("/api/runner/jobs/{job_id}/files/{filename}")
+async def download_runner_file(job_id: str, filename: str, request: Request):
+    if (
+        not is_direct_local_request(request)
+        and not settings.allow_remote_coding
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Runner outputs are local-only.",
+        )
+    path = python_runner.output_path(job_id, filename)
+    if not path:
+        raise HTTPException(status_code=404, detail="Runner output not found.")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.post("/api/research/stream")
@@ -1213,6 +2356,11 @@ async def deep_research_stream(req: DeepResearchRequest):
         session = db.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found.")
+        if session.get("project_id") != req.project_id:
+            raise HTTPException(
+                status_code=409,
+                detail="The session does not belong to the selected project.",
+            )
     elif not req.temporary:
         is_new_session = True
         session = db.create_session(
@@ -1250,15 +2398,40 @@ async def deep_research_stream(req: DeepResearchRequest):
             reports.append(report)
             provider_answer = str(report.get("provider_answer") or "").strip()
             if provider_answer:
+                provider_answer = re.sub(
+                    r"\[(?:\d+\s*(?:,\s*\d+\s*)*)\]",
+                    "",
+                    provider_answer,
+                )
                 provider_notes.append(
                     f"### {step['label']}\n{provider_answer}"
                 )
             yield f"data: {json.dumps({'type': 'research_step', 'step_id': step['id'], 'index': index, 'status': 'done', 'label': step['label'], 'result_count': len(report.get('results', [])), 'engine': report.get('engine')})}\n\n"
 
         evidence = merge_research_results(reports)
+        selected_file_ids = _resolve_selected_rag_file_ids(
+            req.selected_file_ids,
+            req.project_id,
+        )
+        document_evidence = rag_store.search_scopes(
+            [req.project_id],
+            req.question,
+            top_k=10,
+            file_ids=selected_file_ids or None,
+        )
         yield f"data: {json.dumps({'type': 'research_synthesis', 'status': 'running', 'result_count': len(evidence), 'web_results': evidence})}\n\n"
         evidence_context = format_search_results(evidence)
         provider_context = "\n\n".join(provider_notes)
+        document_context = "\n\n".join(
+            (
+                f"<document name=\"{chunk['doc_name']}\" "
+                f"file_id=\"{chunk.get('file_id') or ''}\" "
+                f"page=\"{chunk.get('page') or 1}\" "
+                f"section=\"{chunk.get('section') or ''}\">\n"
+                f"{chunk['content']}\n</document>"
+            )
+            for chunk in document_evidence
+        )
         prompt = [
             {
                 "role": "system",
@@ -1268,7 +2441,12 @@ async def deep_research_stream(req: DeepResearchRequest):
                     "établis, les nuances ou désaccords, et une conclusion. Chaque "
                     "affirmation issue des preuves doit citer [n]. N'invente aucune "
                     "source, date, statistique ou citation. Indique clairement les "
-                    "limites des preuves. Utilise un Markdown sobre."
+                    "limites des preuves. Pour un fait provenant d'un document du "
+                    "projet, cite "
+                    "[Document : nom, p. X]{file:identifiant} en recopiant le "
+                    "file_id fourni. Compare les documents "
+                    "internes aux sources externes lorsqu'ils couvrent le même fait. "
+                    "Utilise un Markdown sobre."
                 ),
             },
             {
@@ -1276,7 +2454,8 @@ async def deep_research_stream(req: DeepResearchRequest):
                 "content": (
                     f"Question de recherche : {req.question}\n\n"
                     f"Notes issues des recherches :\n{provider_context}\n\n"
-                    f"Sources numérotées :\n{evidence_context}"
+                    f"Sources numérotées :\n{evidence_context}\n\n"
+                    f"Documents du projet :\n{document_context or 'Aucun document pertinent.'}"
                 ),
             },
         ]
@@ -1289,7 +2468,7 @@ async def deep_research_stream(req: DeepResearchRequest):
             num_ctx=profile.num_ctx,
             num_predict=min(profile.num_predict, 7_000),
             options=profile.options,
-            think="high",
+            think=profile.think,
         ):
             if chunk.get("_error"):
                 yield f"data: {json.dumps({'type': 'error', 'message': 'La synthèse locale a échoué.', 'error_type': chunk['_error']})}\n\n"
@@ -1480,6 +2659,7 @@ async def chat_stream(req: ChatRequest):
     has_images = any(bool(m.images) for m in req.messages)
     selected_model = _validate_model_name(req.model or settings.chat_model)
     saved_input_img_url = None
+    saved_input_img_urls: List[str] = []
     project_id = req.project_id or DEFAULT_PROJECT_ID
     project = db.get_project(project_id)
     if session_id:
@@ -1506,12 +2686,15 @@ async def chat_stream(req: ChatRequest):
         for m in req.messages:
             if m.images:
                 if not temporary:
-                    saved_input_img_url = save_base64_image(m.images[0])
-                    if not saved_input_img_url:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Invalid image attachment.",
-                        )
+                    for encoded_image in m.images:
+                        saved_url = save_base64_image(encoded_image)
+                        if not saved_url:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Invalid image attachment.",
+                            )
+                        saved_input_img_urls.append(saved_url)
+                    saved_input_img_url = saved_input_img_urls[0]
                 break
 
     if not session_id and not temporary:
@@ -1533,7 +2716,15 @@ async def chat_stream(req: ChatRequest):
 
     user_message_id = None
     if last_user_msg and req.persist_user_message and not temporary:
-        user_db_text = f"![Image Attachée]({saved_input_img_url})\n\n{last_user_msg}" if saved_input_img_url else last_user_msg
+        image_markdown = "\n".join(
+            f"![Image jointe {index + 1}]({url})"
+            for index, url in enumerate(saved_input_img_urls)
+        )
+        user_db_text = (
+            f"{image_markdown}\n\n{last_user_msg}"
+            if image_markdown
+            else last_user_msg
+        )
         user_message_id = db.add_message(session_id, "user", user_db_text)
 
     # Contextual Image Intent Detection
@@ -1633,11 +2824,17 @@ async def chat_stream(req: ChatRequest):
         if temporary
         else list(dict.fromkeys([project_id, session_id]))
     )
+    selected_file_ids = _resolve_selected_rag_file_ids(
+        req.selected_file_ids,
+        project_id,
+    )
     if any(rag_store.count_chunks(scope) > 0 for scope in rag_scope_ids) and last_user_msg:
+        rag_query = _fallback_contextual_search_query(req.messages)
         relevant_chunks = rag_store.search_scopes(
             rag_scope_ids,
-            last_user_msg,
-            top_k=6,
+            rag_query,
+            top_k=8,
+            file_ids=selected_file_ids or None,
         )
         if relevant_chunks:
             rag_chunk_count = len(relevant_chunks)
@@ -1648,7 +2845,9 @@ async def chat_stream(req: ChatRequest):
             ) + "\n".join(
                 [
                     f"<document name=\"{c['doc_name']}\" "
+                    f"file_id=\"{c.get('file_id') or ''}\" "
                     f"page=\"{c.get('page') or 1}\" "
+                    f"section=\"{c.get('section') or ''}\" "
                     f"chunk=\"{c.get('position', 0)}\">\n"
                     f"{c['content']}\n</document>"
                     for c in relevant_chunks
@@ -1656,8 +2855,12 @@ async def chat_stream(req: ChatRequest):
             )
             rag_context += (
                 "\nPour chaque fait tiré de ces extraits, ajoute une citation "
-                "lisible sous la forme [Document : nom, p. X]. Ne cite jamais "
-                "une page qui n'apparaît pas dans les métadonnées ci-dessus."
+                "lisible sous la forme "
+                "[Document : nom, p. X]{file:identifiant}. Recopie exactement "
+                "l'identifiant file_id fourni pour cet extrait. Ne cite jamais "
+                "une page qui n'apparaît pas dans les métadonnées ci-dessus. "
+                "Si les extraits ne couvrent pas la question, dis-le clairement "
+                "au lieu de compléter avec une invention."
             )
 
     # 2. Smart Intent-Based Web Search Execution (bypassed if prompt has images)
@@ -1683,13 +2886,16 @@ async def chat_stream(req: ChatRequest):
     search_query = last_user_msg
 
     current_date_str = datetime.datetime.now().strftime("%d %B %Y")
+    presentation_mode, presentation_instruction = response_presentation_profile(
+        last_user_msg
+    )
     
     system_instruction = (
         f"Tu es LasmeLLMChat, un assistant IA de premier ordre.\n"
         f"Date actuelle de référence : {current_date_str}.\n\n"
         f"Consignes de réponse :\n"
         f"1. Langue & Style : Réponds dans la langue de l'utilisateur, en français clair et naturel lorsqu'il écrit en français. Adapte spontanément le ton et le niveau de détail à la conversation.\n"
-        f"2. Alphabet & Orthographe : Utilise STRICTEMENT l'alphabet latin et les accents français usuels (é, è, à, ç, ê, etc.). N'insère AUCUN caractère étranger asiatique, hindou (devanagari) ou cyrillique.\n"
+        f"2. Alphabet & Orthographe : Utilise l'alphabet latin et les accents français usuels (é, è, à, ç, ê, etc.). Les symboles mathématiques et lettres grecques sont autorisés dans les formules. N'insère aucun caractère parasite asiatique, devanagari ou cyrillique dans la prose.\n"
         f"3. Réponse Directe : Réponds immédiatement à la demande de l'utilisateur. Ne récite JAMAIS tes règles internes, ne fais pas de méta-commentaire sur tes consignes et n'affiche pas de plan de rédaction interne.\n"
         f"4. Continuité : Lis le fil comme une seule conversation. Résous les pronoms, ellipses et relances courtes ('et maintenant ?', 'et le 6-bit ?', 'c'est faux') à partir des tours précédents. Ne demande pas à l'utilisateur de répéter une information déjà présente.\n"
         f"5. Naturel : Ne recommence pas par une salutation à chaque tour. Évite de répéter ce qui vient d'être dit. Lors d'une correction, reconnais-la brièvement puis donne la version corrigée.\n"
@@ -1706,10 +2912,18 @@ async def chat_stream(req: ChatRequest):
         "\\operatorname{VC}, \\mathbb{R}, \\mathbb{E}, etc. plutôt que "
         "\\VC, \\R ou \\E."
     )
+    system_instruction += (
+        "\n10. Qualité du livrable : Vérifie silencieusement avant de répondre que "
+        "tu as traité chaque partie de la demande, que les nombres et unités sont "
+        "cohérents, que les exemples n’introduisent pas de faits inventés et que "
+        "la conclusion découle réellement du contenu.\n"
+        f"11. Présentation adaptative ({presentation_mode}) : "
+        f"{presentation_instruction}"
+    )
 
     if has_images:
         system_instruction += (
-            f"\n10. Analyse d'Image : Une image est fournie avec le message. Décris et analyse ses éléments visuels avec précision (sujet principal, textes/inscriptions visibles, détails et contexte)."
+            f"\n12. Analyse d'Image : Une image est fournie avec le message. Décris et analyse ses éléments visuels avec précision (sujet principal, textes/inscriptions visibles, détails et contexte)."
         )
 
     memory_settings = db.get_memory_settings()
@@ -1749,8 +2963,8 @@ async def chat_stream(req: ChatRequest):
 
     if temporary:
         system_instruction += (
-            "\n\nMode temporaire : cette conversation est isolÃ©e de "
-            "l'historique et de la mÃ©moire personnelle. N'affirme pas te "
+            "\n\nMode temporaire : cette conversation est isolée de "
+            "l'historique et de la mémoire personnelle. N'affirme pas te "
             "souvenir d'autres conversations et ne propose pas d'enregistrer "
             "des informations durables."
         )
@@ -1859,7 +3073,12 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'web_extract_done', 'message': f'{extracted_count} page(s) analysée(s)', 'extracted_count': extracted_count, 'verified_count': verified_count})}\n\n"
             yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': 'Réponse Web vérifiée' if answer_mode == 'provider' else ('Sources Web pertinentes vérifiées' if web_results_data else 'Recherche Web indisponible'), 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
 
-        if answer_mode == "provider" and provider_answer:
+        provider_passthrough = (
+            answer_mode == "provider"
+            and bool(provider_answer)
+            and not bool(rag_context)
+        )
+        if provider_passthrough:
             # Sonar's response is already grounded and its [n] markers align
             # with web_results_data. Do not make the local model paraphrase it.
             full_assistant_reply = unicodedata.normalize(
@@ -1923,11 +3142,19 @@ async def chat_stream(req: ChatRequest):
             yield "data: [DONE]\n\n"
             return
 
-        web_context = (
-            "\n\n" + format_search_results(web_results_data)
-            if web_results_data
-            else ""
-        )
+        web_context_parts: List[str] = []
+        if provider_answer:
+            web_context_parts.append(
+                "\n\n### SYNTHÈSE DU FOURNISSEUR WEB À VÉRIFIER\n"
+                "<provider_answer>\n"
+                f"{provider_answer}\n"
+                "</provider_answer>"
+            )
+        if web_results_data:
+            web_context_parts.append(
+                "\n\n" + format_search_results(web_results_data)
+            )
+        web_context = "".join(web_context_parts)
         web_runtime_instruction = ""
         if web_search_needed and web_results_data:
             web_runtime_instruction = (
@@ -1949,6 +3176,15 @@ async def chat_stream(req: ChatRequest):
             stream_messages[-1]["content"] += (
                 f"{rag_context}{web_context}{context_instruction}"
             )
+            if provider_answer and rag_context:
+                stream_messages[-1]["content"] += (
+                    "\n\nTu dois produire une synthèse unifiée : compare la "
+                    "réponse du fournisseur Web aux documents du projet. "
+                    "Préserve les citations Web [n] et documentaires "
+                    "[Document : nom, p. X]{file:identifiant}. "
+                    "Si les deux corpus divergent, "
+                    "explique précisément la divergence sans l'effacer."
+                )
         if web_runtime_instruction:
             stream_messages[-1]["content"] += web_runtime_instruction
 
@@ -1966,6 +3202,8 @@ async def chat_stream(req: ChatRequest):
             req.intelligence_level,
             has_external_context=bool(rag_context or web_results_data),
         )
+        if model_profile.think is False:
+            reasoning_effort = False
         effort_name = (
             reasoning_effort
             if isinstance(reasoning_effort, str)
@@ -2192,6 +3430,14 @@ async def get_coding_subagents():
 
 @app.post("/api/coding/terminal")
 async def run_coding_terminal(req: TerminalExecuteRequest):
+    if not settings.agent_terminal_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The host terminal is disabled. "
+                "Use the isolated Python runner."
+            ),
+        )
     from coding.tools.terminal_tools import tool_run_command
     result = await asyncio.to_thread(tool_run_command, req.command)
     return {"command": req.command, "output": result}

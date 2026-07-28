@@ -14,7 +14,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 class Settings(BaseModel):
-    app_name: str = "LLM-lasme"
+    app_name: str = "Lasme LLM"
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     # Search Engine Configuration
@@ -34,10 +34,11 @@ class Settings(BaseModel):
     )
 
     # Preferred models optimized for RTX 4070 Ti SUPER (16 GB VRAM)
-    coding_model: str = os.getenv("CODING_MODEL", "gemma-4-fable")
+    coding_model: str = os.getenv("CODING_MODEL", "lasme-qwen-vision")
     chat_model: str = os.getenv("CHAT_MODEL", "gemma-4-chat")
-    reasoning_model: str = os.getenv("REASONING_MODEL", "gemma-4-fable")
-    vision_model: str = os.getenv("VISION_MODEL", "")
+    reasoning_model: str = os.getenv("REASONING_MODEL", "lasme-qwen-vision")
+    fast_model: str = os.getenv("FAST_MODEL", "lasme-smol-fast")
+    vision_model: str = os.getenv("VISION_MODEL", "lasme-qwen-vision")
 
     # Inference defaults
     temperature: float = 0.2
@@ -52,6 +53,10 @@ class Settings(BaseModel):
         "LASME_ALLOW_DESTRUCTIVE_AGENT_TOOLS",
         False,
     )
+    agent_terminal_enabled: bool = _env_bool(
+        "LASME_ENABLE_AGENT_TERMINAL",
+        False,
+    )
     workspace_root: Path = Path(
         os.getenv(
             "LASME_WORKSPACE_ROOT",
@@ -60,10 +65,11 @@ class Settings(BaseModel):
     ).resolve()
     allowed_commands: str = os.getenv(
         "LASME_ALLOWED_COMMANDS",
-        "python,python.exe,node,node.exe,npm,npm.cmd,npx,npx.cmd,"
-        "git,git.exe,rg,rg.exe,pytest,pytest.exe,uvicorn,uvicorn.exe",
+        "",
     )
-    max_upload_bytes: int = int(os.getenv("LASME_MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
+    max_upload_bytes: int = int(
+        os.getenv("LASME_MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
+    )
     external_image_generation_enabled: bool = _env_bool(
         "LASME_ENABLE_EXTERNAL_IMAGE_GENERATION",
         True,

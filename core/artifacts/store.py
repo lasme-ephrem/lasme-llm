@@ -10,7 +10,19 @@ from typing import Any, Dict, List, Optional
 from core.memory.database import DB_PATH, DEFAULT_PROJECT_ID
 
 
-ARTIFACT_KINDS = {"document", "code", "markdown", "table", "research"}
+ARTIFACT_KINDS = {
+    "document",
+    "code",
+    "markdown",
+    "table",
+    "research",
+    "html",
+    "interactive",
+    "diagram",
+    "mindmap",
+    "chart",
+    "presentation",
+}
 
 
 class ArtifactStore:
@@ -218,6 +230,15 @@ class ArtifactStore:
                 (artifact_id,),
             )
             return cursor.rowcount > 0
+
+    def clear_project(self, project_id: str) -> int:
+        scope = (project_id or DEFAULT_PROJECT_ID).strip()
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM artifacts WHERE project_id = ?",
+                (scope,),
+            )
+            return max(0, int(cursor.rowcount))
 
 
 artifact_store = ArtifactStore()

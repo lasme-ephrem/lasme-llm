@@ -28,6 +28,14 @@ class ModelProfileTests(unittest.TestCase):
             GEMMA_FABLE_PROFILE,
         )
 
+    def test_selects_fast_and_vision_profiles(self):
+        fast = get_model_profile("lasme-smol-fast")
+        vision = get_model_profile("lasme-qwen-vision")
+        self.assertLess(fast.num_ctx, GEMMA_CHAT_PROFILE.num_ctx)
+        self.assertFalse(fast.think)
+        self.assertFalse(vision.think)
+        self.assertIn("Vision", vision.system_addendum)
+
     def test_profiles_use_full_power_settings(self):
         for profile in (GEMMA_CHAT_PROFILE, GEMMA_FABLE_PROFILE):
             self.assertEqual(profile.num_ctx, 65_536)
