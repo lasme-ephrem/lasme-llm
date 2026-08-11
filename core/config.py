@@ -39,6 +39,12 @@ class Settings(BaseModel):
     reasoning_model: str = os.getenv("REASONING_MODEL", "lasme-qwen-vision")
     fast_model: str = os.getenv("FAST_MODEL", "lasme-smol-fast")
     vision_model: str = os.getenv("VISION_MODEL", "lasme-qwen-vision")
+    # Additional models selectable in the UI without being defaults.
+    extra_models: list[str] = [
+        m.strip()
+        for m in os.getenv("EXTRA_MODELS", "").split(",")
+        if m.strip()
+    ]
 
     # Inference defaults
     temperature: float = 0.2

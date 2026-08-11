@@ -14,9 +14,10 @@
     --scrollbar-thumb: rgba(16, 163, 127, 0.42);
     --scrollbar-thumb-hover: rgba(16, 163, 127, 0.72);
     --scrollbar-track: rgba(15, 23, 42, 0.035);
-    --project-primary: #5267D9;
-    --project-primary-strong: #4054C4;
-    --project-primary-soft: rgba(82, 103, 217, 0.11);
+    --project-primary: #B76B2D;
+    --project-primary-strong: #8E4D20;
+    --project-primary-soft: rgba(183, 107, 45, 0.12);
+    --project-primary-companion: #0E9C78;
     --temporary-accent: #514A46;
     --temporary-soft: rgba(81, 74, 70, 0.09);
     --sidebar-width: 288px;
@@ -48,9 +49,10 @@ img.emoji {
     --scrollbar-thumb: rgba(52, 211, 153, 0.38);
     --scrollbar-thumb-hover: rgba(52, 211, 153, 0.68);
     --scrollbar-track: rgba(255, 255, 255, 0.035);
-    --project-primary: #8090FF;
-    --project-primary-strong: #9AA6FF;
-    --project-primary-soft: rgba(128, 144, 255, 0.15);
+    --project-primary: #F0A35C;
+    --project-primary-strong: #FFC184;
+    --project-primary-soft: rgba(240, 163, 92, 0.15);
+    --project-primary-companion: #35C9A1;
     --temporary-accent: #F3EEE9;
     --temporary-soft: rgba(243, 238, 233, 0.11);
 }
@@ -795,6 +797,14 @@ body.sidebar-resizing {
     margin-inline: auto;
 }
 
+.conversation-turn-spacer {
+    width: 100%;
+    min-height: 88px;
+    flex: 0 0 auto;
+    pointer-events: none;
+    transition: height 180ms ease-out;
+}
+
 .chat-messages::-webkit-scrollbar {
     display: block;
     width: 11px;
@@ -1285,6 +1295,15 @@ body.sidebar-resizing {
     border-color: color-mix(in srgb, var(--project-primary) 28%, var(--border));
     background:
         radial-gradient(circle at 95% 0%, var(--project-primary-soft), transparent 44%),
+        radial-gradient(
+            circle at 0% 100%,
+            color-mix(
+                in srgb,
+                var(--project-primary-companion) 8%,
+                transparent
+            ),
+            transparent 48%
+        ),
         var(--bg-card);
 }
 
@@ -1352,7 +1371,20 @@ body.sidebar-resizing {
 
 .workspace-current.is-primary {
     border-color: color-mix(in srgb, var(--project-primary) 35%, var(--border));
-    background: color-mix(in srgb, var(--bg-main) 91%, var(--project-primary) 4%);
+    background:
+        linear-gradient(
+            118deg,
+            color-mix(
+                in srgb,
+                var(--project-primary-companion) 7%,
+                var(--bg-main)
+            ),
+            color-mix(
+                in srgb,
+                var(--project-primary) 9%,
+                var(--bg-main)
+            )
+        );
 }
 
 .workspace-current.is-primary:hover,
@@ -1379,8 +1411,20 @@ body.sidebar-resizing {
 }
 
 .workspace-current.is-primary .workspace-project-icon {
-    background: linear-gradient(145deg, #6682F4, #5848C9);
-    box-shadow: 0 6px 16px rgba(82, 103, 217, 0.28);
+    background:
+        linear-gradient(
+            145deg,
+            var(--project-primary-companion),
+            var(--project-primary)
+        );
+    color: #fff;
+    box-shadow:
+        0 7px 17px color-mix(
+            in srgb,
+            var(--project-primary) 28%,
+            transparent
+        ),
+        inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .workspace-current-copy,
@@ -1507,8 +1551,13 @@ body.sidebar-resizing {
 }
 
 .workspace-menu-project.is-primary .workspace-menu-project-icon {
-    background: color-mix(in srgb, var(--project-primary) 13%, var(--bg-main));
-    color: var(--project-primary);
+    background:
+        linear-gradient(
+            145deg,
+            var(--project-primary-companion),
+            var(--project-primary)
+        );
+    color: #fff;
 }
 
 .workspace-menu-check {
@@ -2159,9 +2208,9 @@ body.sidebar-resizing {
 }
 
 .file-library-panel {
-    width: min(1120px, calc(100vw - 6vw));
-    height: min(760px, 92vh);
-    max-height: 92vh;
+    width: min(760px, calc(100vw - 6vw));
+    height: min(690px, 88vh);
+    max-height: 88vh;
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
     border-radius: 24px;
@@ -2278,8 +2327,7 @@ body.sidebar-resizing {
 .file-library-body {
     min-height: 0;
     flex: 1;
-    display: grid;
-    grid-template-columns: 360px minmax(0, 1fr);
+    display: flex;
     overflow: hidden;
 }
 
@@ -2289,9 +2337,15 @@ body.sidebar-resizing {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
-    padding: 0.85rem;
-    border-right: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg-input) 52%, transparent);
+    width: 100%;
+    padding: 1rem;
+    background:
+        radial-gradient(
+            circle at 100% 0,
+            color-mix(in srgb, var(--accent) 7%, transparent),
+            transparent 42%
+        ),
+        color-mix(in srgb, var(--bg-input) 42%, transparent);
 }
 
 .file-library-dropzone {
@@ -2349,13 +2403,19 @@ body.sidebar-resizing {
     grid-template-columns: 38px minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.62rem;
-    padding: 0.58rem;
-    border: 1px solid transparent;
-    border-radius: 13px;
-    background: transparent;
+    padding: 0.72rem 0.78rem;
+    border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+    border-radius: 15px;
+    background: color-mix(in srgb, var(--bg-main) 92%, transparent);
     color: var(--text-primary);
     text-align: left;
     cursor: pointer;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, 0.025);
+    transition:
+        transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        border-color 180ms ease,
+        background 180ms ease,
+        box-shadow 180ms ease;
 }
 
 .project-file-controls {
@@ -2394,7 +2454,10 @@ body.sidebar-resizing {
 }
 
 .project-file-card:hover {
-    background: var(--bg-hover);
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+    background: color-mix(in srgb, var(--accent) 4%, var(--bg-main));
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
 }
 
 .project-file-card.active {
@@ -2458,6 +2521,59 @@ body.sidebar-resizing {
 
 .project-file-status.error {
     background: #ef4444;
+}
+
+.project-file-inline-action {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition:
+        color 150ms ease,
+        background 150ms ease,
+        transform 150ms ease;
+}
+
+.project-file-inline-action svg,
+.project-file-download-cue svg {
+    width: 15px;
+    height: 15px;
+}
+
+.project-file-inline-action:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    transform: translateY(-1px);
+}
+
+.project-file-inline-action.danger:hover {
+    color: #dc2626;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+.project-file-download-cue {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 9px;
+    color: var(--text-secondary);
+    transition:
+        color 160ms ease,
+        background 160ms ease,
+        transform 160ms ease;
+}
+
+.project-file-card:hover .project-file-download-cue {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    transform: translateY(1px);
 }
 
 .file-preview-pane {
@@ -3418,6 +3534,26 @@ body.sidebar-resizing {
     margin-bottom: 0.5rem;
     align-self: flex-start;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+    animation: attachmentBadgeIn 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition:
+        border-color 180ms ease,
+        background 180ms ease,
+        transform 180ms ease;
+}
+
+.attached-doc-badge.is-loading {
+    border-color: color-mix(in srgb, #f59e0b 38%, var(--border));
+    background: color-mix(in srgb, #f59e0b 7%, var(--bg-input));
+}
+
+.attached-doc-badge.is-loading > svg {
+    animation: attachmentFilePulse 900ms ease-in-out infinite alternate;
+}
+
+.attached-doc-badge.has-error {
+    border-color: color-mix(in srgb, #ef4444 42%, var(--border));
+    background: color-mix(in srgb, #ef4444 7%, var(--bg-input));
+    color: #c2410c;
 }
 
 .attached-image-badge {
@@ -6141,4 +6277,163 @@ body.temporary-chat-active .chat-header {
     letter-spacing: 0.04em;
     line-height: 1;
     vertical-align: 0.12em;
+}
+
+/* Unified motion language: quick, tactile and calm across the application. */
+@keyframes surfaceEnter {
+    from {
+        opacity: 0;
+        transform: translateY(10px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes messageEnter {
+    from {
+        opacity: 0;
+        transform: translateY(12px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes listItemEnter {
+    from {
+        opacity: 0;
+        transform: translateX(-7px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes overlayEnter {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes attachmentBadgeIn {
+    from {
+        opacity: 0;
+        transform: translateY(6px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes attachmentFilePulse {
+    from {
+        opacity: 0.45;
+        transform: scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1.06);
+    }
+}
+
+button,
+[role="button"],
+select,
+input,
+textarea {
+    -webkit-tap-highlight-color: transparent;
+}
+
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+    transition:
+        color 160ms ease,
+        background-color 160ms ease,
+        border-color 160ms ease,
+        box-shadow 180ms ease,
+        transform 150ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 160ms ease;
+}
+
+button:not(:disabled):active,
+[role="button"]:not([aria-disabled="true"]):active {
+    transform: translateY(1px) scale(0.975);
+}
+
+.tab-pane.active {
+    animation: surfaceEnter 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.message {
+    animation: messageEnter 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.session-item {
+    animation: listItemEnter 210ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition:
+        background-color 160ms ease,
+        transform 160ms ease,
+        padding 160ms ease;
+}
+
+.session-item:hover {
+    transform: translateX(3px);
+}
+
+.workspace-menu.open,
+.intelligence-dropdown.open,
+.input-action-wrapper.open .input-action-menu {
+    animation: surfaceEnter 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.workspace-menu.open .workspace-menu-project,
+.workspace-menu.open .workspace-new-project {
+    animation: listItemEnter 190ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.memory-modal:not([aria-hidden="true"]) .memory-modal-overlay {
+    animation: overlayEnter 180ms ease both;
+}
+
+.memory-modal:not([aria-hidden="true"]) .memory-modal-panel,
+.ag-modal[style*="display: flex"] .ag-modal-box,
+.ag-modal[style*="display: block"] .ag-modal-box {
+    animation: surfaceEnter 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.project-file-card,
+.suggested-question,
+.source-card,
+.artifact-card {
+    animation: surfaceEnter 210ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.chat-input-container {
+    transition:
+        border-color 200ms ease,
+        box-shadow 220ms ease,
+        transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-input-container:focus-within {
+    transform: translateY(-2px);
+}
+
+.canvas-panel {
+    transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
 }

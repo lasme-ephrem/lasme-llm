@@ -49,7 +49,6 @@ class LasmeLLMClient:
             "temperature": (
                 profile.temperature if temperature is None else temperature
             ),
-            "num_gpu": 99,
             "num_predict": num_predict or profile.num_predict,
             "num_ctx": num_ctx or profile.num_ctx,
             **profile.options,
@@ -89,7 +88,6 @@ class LasmeLLMClient:
             "temperature": (
                 profile.temperature if temperature is None else temperature
             ),
-            "num_gpu": 99,
             "num_predict": num_predict or profile.num_predict,
             "num_ctx": num_ctx or profile.num_ctx,
             **profile.options,

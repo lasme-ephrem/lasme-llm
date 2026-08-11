@@ -19,7 +19,7 @@
     <link rel="stylesheet" href="vendor/highlight/tokyo-night-dark.min.css?v=11.9.0">
     
     <!-- App Custom CSS -->
-    <link rel="stylesheet" href="style.css?v=20260728-product-v6">
+    <link rel="stylesheet" href="style.css?v=20260730-documents-motion">
     
     <!-- Local pinned renderers keep chat and Canvas functional offline. -->
     <script src="vendor/dompurify/purify.min.js?v=3.2.6"></script>
@@ -244,7 +244,7 @@
 
                 <div class="chat-center-wrapper">
                     <!-- Hidden File Inputs -->
-                    <input type="file" id="docFileInput" accept=".pdf,.txt,.md" style="display:none;">
+                    <input type="file" id="docFileInput" accept=".pdf,.txt,.md,.docx,.xlsx,.pptx" style="display:none;">
                     <input type="file" id="imageFileInput" multiple accept="image/png, image/jpeg, image/webp" style="display:none;">
 
                     <!-- Chat Messages Stream -->
@@ -340,7 +340,8 @@
                                 <input type="checkbox" id="webSearchToggle" checked style="display:none;">
 
                                 <select id="inputModelSelect" class="input-model-dropdown" style="display:none;">
-                                    <option value="gemma-4-chat" selected>Gemma 4 Chat</option>
+                                    <option value="muse-glimmer:30b-q4_K_M-dflash" selected>Muse Glimmer</option>
+                                    <option value="gemma-4-chat">Gemma 4 Chat</option>
                                     <option value="lasme-smol-fast">Lasme Rapide</option>
                                     <option value="lasme-qwen-vision">Lasme Vision</option>
                                 </select>
@@ -355,13 +356,29 @@
                                                 <path d="M8.5 8.95h7M8.5 11.35h4.5" class="model-mark-detail"></path>
                                             </svg>
                                         </span>
-                                        <span class="intel-label" id="selectedModelName">Gemma 4 Chat</span>
+                                        <span class="intel-label" id="selectedModelName">Muse Glimmer</span>
                                         <svg class="intel-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                                     </button>
                                     <div class="intelligence-dropdown" id="modelPickerDropdown">
                                         <div class="intel-header">Modèle Actif</div>
 
-                                        <button type="button" class="intel-option intel-active" data-model="gemma-4-chat" data-label="Gemma 4 Chat">
+                                        <button type="button" class="intel-option intel-active" data-model="muse-glimmer:30b-q4_K_M-dflash" data-label="Muse Glimmer">
+                                            <div class="intel-option-left">
+                                                <div class="intel-option-icon-wrap model-mark model-mark-chat" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" fill="none">
+                                                        <path d="M5.25 6.25A2.75 2.75 0 0 1 8 3.5h8A2.75 2.75 0 0 1 18.75 6.25v5.5A2.75 2.75 0 0 1 16 14.5h-4.2l-3.65 2.8v-2.8H8a2.75 2.75 0 0 1-2.75-2.75z" class="model-mark-line"></path>
+                                                        <path d="m16.65 15.55.56 1.4 1.4.56-1.4.56-.56 1.4-.56-1.4-1.4-.56 1.4-.56z" class="model-mark-fill"></path>
+                                                        <path d="M8.5 8.95h7M8.5 11.35h4.5" class="model-mark-detail"></path>
+                                                    </svg>
+                                                </div>
+                                                <div class="intel-option-text">
+                                                    <div class="intel-option-name">Muse Glimmer</div>
+                                                    <div class="intel-option-desc">Glimmer 30B · Q4 · Flash Attn · agentique</div>
+                                                </div>
+                                            </div>
+                                            <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                        </button>
+                                        <button type="button" class="intel-option" data-model="gemma-4-chat" data-label="Gemma 4 Chat">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap model-mark model-mark-chat" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
@@ -375,7 +392,7 @@
                                                     <div class="intel-option-desc">Chat généraliste · Q4</div>
                                                 </div>
                                             </div>
-                                            <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                            <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
                                         <button type="button" class="intel-option" data-model="lasme-smol-fast" data-label="Lasme Rapide">
                                             <div class="intel-option-left">
@@ -721,7 +738,7 @@
                 </span>
                 <div>
                     <h2 id="fileLibraryTitle">Fichiers du projet</h2>
-                    <p id="fileLibrarySubtitle">Documents originaux, index RAG et aperçus.</p>
+                    <p id="fileLibrarySubtitle">Documents du projet disponibles pour le chat.</p>
                 </div>
                 <button type="button" id="fileLibraryCloseBtn" class="memory-close-btn" aria-label="Fermer">×</button>
             </header>
@@ -753,26 +770,13 @@
                 <input id="projectFileUploadInput" type="file" multiple hidden accept=".pdf,.txt,.md,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp">
             </div>
             <div class="file-library-body">
-                <aside class="file-library-list-pane">
+                <section class="file-library-list-pane">
                     <div id="fileLibraryDropzone" class="file-library-dropzone">
                         <span>Déposez des fichiers ici</span>
-                        <small>PDF, Word, Excel, PowerPoint, images et textes · 25 Mo max.</small>
+                        <small>Le fichier est ajouté immédiatement, puis préparé en arrière-plan.</small>
                     </div>
                     <div id="fileLibraryStatus" class="file-library-status" aria-live="polite"></div>
                     <div id="fileLibraryList" class="file-library-list"></div>
-                </aside>
-                <section id="filePreviewPane" class="file-preview-pane">
-                    <div class="file-preview-empty">
-                        <span class="file-preview-empty-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"></path>
-                                <path d="M14 2v6h6"></path>
-                                <path d="m9 15 2 2 4-5"></path>
-                            </svg>
-                        </span>
-                        <strong>Sélectionnez un fichier</strong>
-                        <span>Son aperçu et ses informations apparaîtront ici.</span>
-                    </div>
                 </section>
             </div>
         </section>
@@ -860,9 +864,9 @@
         </div>
     </div>
 
-    <script src="math-renderer.js?v=20260725-latex"></script>
-    <script src="progressive-renderer.js?v=20260725-cleanroom"></script>
-    <script src="app.js?v=20260728-product-v6"></script>
-    <script src="workspace.js?v=20260728-product-v6"></script>
+    <script src="math-renderer.js?v=20260729-currency"></script>
+    <script src="progressive-renderer.js?v=20260730-citation-cleanup"></script>
+    <script src="app.js?v=20260730-live-navigation"></script>
+    <script src="workspace.js?v=20260730-live-project-counts"></script>
 </body>
 </html>

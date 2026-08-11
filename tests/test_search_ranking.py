@@ -4,11 +4,20 @@ from core.tools.search_ranking import (
     adaptive_select_results,
     build_search_plan,
     canonical_url,
+    is_product_comparison,
     rank_candidates,
 )
 
 
 class AdaptiveSearchRankingTests(unittest.TestCase):
+    def test_mutable_llm_comparison_uses_structured_grounding(self):
+        self.assertTrue(
+            is_product_comparison(
+                "Compare DeepSeek, Kimi, les modèles d'OpenAI, Google "
+                "et Anthropic"
+            )
+        )
+
     def test_direct_official_answer_can_stop_after_one_source(self):
         candidates = [
             {

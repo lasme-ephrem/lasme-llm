@@ -5,6 +5,8 @@ let canvasArtifacts = [];
 let projectFiles = [];
 let activeProjectFileId = null;
 let selectedProjectFileIds = new Set();
+let projectFileRefreshTimer = null;
+let projectSummaryRefreshSequence = 0;
 const WORKSPACE_PRIMARY_PROJECT_ID = "default";
 const PROJECT_TYPE_LABELS = {
     general: "Général",
@@ -188,6 +190,56 @@ async function loadProjectDocuments() {
     }
 }
 
+async function refreshProjectSessionCounts() {
+    const refreshSequence = ++projectSummaryRefreshSequence;
+    try {
+        const response = await fetch(`${API_BASE}/projects`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (refreshSequence !== projectSummaryRefreshSequence) return;
+        const projects = Array.isArray(payload.projects)
+            ? payload.projects
+            : [];
+        if (!projects.length) return;
+        chatProjects = projects;
+        if (!chatProjects.some(project => project.id === currentProjectId)) {
+            currentProjectId = WORKSPACE_PRIMARY_PROJECT_ID;
+            currentDocumentScopeId = currentProjectId;
+            localStorage.setItem("active_project_id", currentProjectId);
+        }
+        syncProjectSelector();
+    } catch (error) {
+        console.error(
+            "Impossible d’actualiser les compteurs des projets :",
+            error
+        );
+    }
+}
+
+function stopProjectFilePolling() {
+    if (projectFileRefreshTimer) {
+        clearTimeout(projectFileRefreshTimer);
+        projectFileRefreshTimer = null;
+    }
+}
+
+function startProjectFilePolling(attempt = 0) {
+    stopProjectFilePolling();
+    if (attempt >= 75) return;
+    projectFileRefreshTimer = setTimeout(async () => {
+        projectFileRefreshTimer = null;
+        await loadProjectDocuments();
+        if (projectFiles.some(item => item.status === "indexing")) {
+            startProjectFilePolling(attempt + 1);
+        } else if (fileLibraryStatus && !fileLibraryStatus.classList.contains("error")) {
+            const failed = projectFiles.filter(item => item.status === "error").length;
+            fileLibraryStatus.textContent = failed
+                ? `${failed} fichier${failed > 1 ? "s nécessitent" : " nécessite"} une nouvelle analyse.`
+                : "Tous les fichiers sont prêts pour le chat.";
+        }
+    }, 1_200);
+}
+
 function syncProjectSelector() {
     if (!chatProjectSelect) return;
     chatProjectSelect.innerHTML = "";
@@ -246,6 +298,10 @@ async function activateChatProject(projectId) {
         closeProjectSwitcher();
         return;
     }
+    stopProjectFilePolling();
+    selectedProjectFileIds.clear();
+    closeFilePreview();
+    window.LasmeComposer?.resetDocumentAttachment?.();
     currentProjectId = resolvedProjectId;
     currentDocumentScopeId = currentProjectId;
     localStorage.setItem("active_project_id", currentProjectId);
@@ -422,7 +478,7 @@ projectSaveBtn?.addEventListener("click", async () => {
             description: projectDescriptionInput.value.trim(),
             instructions: projectInstructionsInput.value.trim(),
             memory_mode: projectMemoryModeSelect.value,
-            default_model: inputModelSelect?.value || "gemma-4-chat",
+            default_model: inputModelSelect?.value || "muse-glimmer:30b-q4_K_M-dflash",
             project_type: projectTypeSelect?.value || "general",
             color: projectColorInput?.value || "#0BAE83",
             tags: (projectTagsInput?.value || "")
@@ -501,6 +557,16 @@ function formatProjectFileSize(bytes) {
     return `${(value / (1024 * 1024)).toFixed(1)} Mo`;
 }
 
+function projectFileStatusLabel(file) {
+    const labels = {
+        ready: "Prêt pour le chat",
+        indexing: "Préparation en arrière-plan",
+        stored: "Ajouté",
+        error: "Analyse à relancer"
+    };
+    return labels[file?.status] || "En attente";
+}
+
 function closeFilePreview() {
     activeProjectFileId = null;
     filePreviewPane?.classList.remove("open");
@@ -516,11 +582,15 @@ function closeFileLibrary() {
 function openFileLibrary() {
     const project = chatProjects.find(item => item.id === currentProjectId);
     if (fileLibrarySubtitle) {
-        fileLibrarySubtitle.textContent = `${project?.name || "Projet"} · fichiers originaux et contexte utilisé par le chat`;
+        fileLibrarySubtitle.textContent = `${project?.name || "Projet"} · cliquez sur un fichier pour le télécharger`;
     }
     fileLibraryModal.style.display = "flex";
     fileLibraryModal.setAttribute("aria-hidden", "false");
-    void loadProjectDocuments();
+    void loadProjectDocuments().then(() => {
+        if (projectFiles.some(item => item.status === "indexing")) {
+            startProjectFilePolling();
+        }
+    });
     setTimeout(() => fileLibrarySearchInput?.focus(), 0);
 }
 
@@ -584,7 +654,7 @@ function renderFileLibrary() {
                 ? "Index historique"
                 : formatProjectFileSize(file.size_bytes),
             file.page_count ? `${file.page_count} page${file.page_count > 1 ? "s" : ""}` : "",
-            file.status === "ready" ? `${file.chunk_count || 0} passages` : file.status
+            projectFileStatusLabel(file)
         ].filter(Boolean);
         meta.textContent = details.join(" · ");
         copy.append(title, meta);
@@ -611,8 +681,56 @@ function renderFileLibrary() {
         });
         const status = document.createElement("span");
         status.className = `project-file-status ${file.status || ""}`;
-        status.title = file.error || file.status || "";
-        controls.append(contextToggle, status);
+        status.title = file.error || projectFileStatusLabel(file);
+
+        if (file.status === "error") {
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "project-file-inline-action";
+            retry.title = "Relancer l’analyse";
+            retry.setAttribute("aria-label", "Relancer l’analyse");
+            retry.innerHTML = fileActionIcon("refresh");
+            retry.addEventListener("click", async event => {
+                event.stopPropagation();
+                retry.disabled = true;
+                await fetch(
+                    `${API_BASE}/files/${encodeURIComponent(file.id)}/reindex`,
+                    { method: "POST" }
+                );
+                await loadProjectDocuments();
+            });
+            controls.appendChild(retry);
+        }
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "project-file-inline-action danger";
+        remove.title = "Supprimer du projet";
+        remove.setAttribute("aria-label", "Supprimer le fichier");
+        remove.innerHTML = fileActionIcon("delete");
+        remove.addEventListener("click", async event => {
+            event.stopPropagation();
+            if (!window.confirm(`Supprimer « ${file.display_name || file.filename} » du projet ?`)) return;
+            const response = await fetch(
+                `${API_BASE}/files/${encodeURIComponent(file.id)}`,
+                { method: "DELETE" }
+            );
+            if (!response.ok) {
+                if (fileLibraryStatus) {
+                    fileLibraryStatus.classList.add("error");
+                    fileLibraryStatus.textContent = "Suppression impossible.";
+                }
+                return;
+            }
+            selectedProjectFileIds.delete(file.id);
+            await loadProjectDocuments();
+        });
+
+        const downloadCue = document.createElement("span");
+        downloadCue.className = "project-file-download-cue";
+        downloadCue.title = "Télécharger";
+        downloadCue.innerHTML = fileActionIcon("download");
+        controls.append(contextToggle, status, downloadCue, remove);
         card.append(icon, copy, controls);
 
         const open = () => void openProjectFile(file.id);
@@ -639,7 +757,20 @@ function fileActionIcon(kind) {
 
 async function openProjectFile(fileId, page = null) {
     const file = projectFiles.find(item => item.id === fileId);
-    if (!file || !filePreviewPane) return;
+    if (!file?.download_url) return false;
+
+    const link = document.createElement("a");
+    link.href = file.download_url;
+    link.download = file.display_name || file.filename || "document";
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    return true;
+
+    /* Legacy preview implementation retained below for migration safety.
+       The file library now deliberately downloads originals on click. */
+    if (!filePreviewPane) return false;
     activeProjectFileId = fileId;
     renderFileLibrary();
     filePreviewPane.classList.add("open");
@@ -792,43 +923,48 @@ async function uploadProjectFiles(files) {
     if (!queue.length) return;
     if (fileLibraryStatus) {
         fileLibraryStatus.classList.remove("error");
-        fileLibraryStatus.textContent = `Import de ${queue.length} fichier${queue.length > 1 ? "s" : ""}…`;
+        fileLibraryStatus.textContent = `Ajout de ${queue.length} fichier${queue.length > 1 ? "s" : ""}…`;
     }
-    for (let index = 0; index < queue.length; index += 1) {
-        const file = queue[index];
-        if (fileLibraryStatus) {
-            fileLibraryStatus.textContent = `${index + 1}/${queue.length} · Indexation de ${file.name}`;
-        }
+
+    let completed = 0;
+    const uploadOne = async file => {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("scope_id", currentProjectId);
-        try {
-            const response = await fetch(`${API_BASE}/documents/upload`, {
-                method: "POST",
-                body: formData
-            });
-            const payload = await response.json();
-            if (!response.ok) {
-                const detail = typeof payload.detail === "object"
-                    ? payload.detail.message
-                    : payload.detail;
-                throw new Error(detail || `Échec de ${file.name}`);
-            }
-            if (payload.file?.id) selectedProjectFileIds.add(payload.file.id);
-        } catch (error) {
-            if (fileLibraryStatus) {
-                fileLibraryStatus.classList.add("error");
-                fileLibraryStatus.textContent = error.message || "Import impossible.";
-            }
-            await loadProjectDocuments();
-            return;
+        const response = await fetch(`${API_BASE}/documents/upload`, {
+            method: "POST",
+            body: formData
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            const detail = typeof payload.detail === "object"
+                ? payload.detail.message
+                : payload.detail;
+            throw new Error(detail || `Échec de ${file.name}`);
         }
-    }
+        completed += 1;
+        if (fileLibraryStatus) {
+            fileLibraryStatus.textContent = `${completed}/${queue.length} ajouté${completed > 1 ? "s" : ""} · préparation en arrière-plan`;
+        }
+        return payload.file;
+    };
+
+    const outcomes = await Promise.allSettled(queue.map(uploadOne));
+    const failures = outcomes
+        .map((result, index) => ({ result, file: queue[index] }))
+        .filter(item => item.result.status === "rejected");
+
     if (fileLibraryStatus) {
-        fileLibraryStatus.textContent = `${queue.length} fichier${queue.length > 1 ? "s" : ""} prêt${queue.length > 1 ? "s" : ""}.`;
+        fileLibraryStatus.classList.toggle("error", failures.length > 0);
+        fileLibraryStatus.textContent = failures.length
+            ? `${queue.length - failures.length} ajouté${queue.length - failures.length > 1 ? "s" : ""} · ${failures.length} échec${failures.length > 1 ? "s" : ""} (${failures.map(item => item.file.name).join(", ")})`
+            : `${queue.length} fichier${queue.length > 1 ? "s ajoutés" : " ajouté"} · préparation en arrière-plan`;
     }
     if (projectFileUploadInput) projectFileUploadInput.value = "";
     await loadProjectDocuments();
+    if (projectFiles.some(item => item.status === "indexing")) {
+        startProjectFilePolling();
+    }
 }
 
 projectFilesBtn?.addEventListener("click", openFileLibrary);
@@ -860,9 +996,15 @@ fileLibraryDropzone?.addEventListener("drop", event => {
 window.LasmeWorkspace = {
     ...(window.LasmeWorkspace || {}),
     getSelectedFileIds: () => Array.from(selectedProjectFileIds),
+    refreshProjectSessionCounts,
+    resetDocumentSelection: async () => {
+        stopProjectFilePolling();
+        selectedProjectFileIds.clear();
+        activeProjectFileId = null;
+        await loadProjectDocuments();
+    },
     openFile: (fileId, page = null) => {
         if (!projectFiles.some(item => item.id === fileId)) return false;
-        openFileLibrary();
         void openProjectFile(fileId, page);
         return true;
     },
@@ -878,7 +1020,6 @@ window.LasmeWorkspace = {
             return displayName === normalized || originalName === normalized;
         });
         if (!file) return false;
-        openFileLibrary();
         void openProjectFile(file.id, page);
         return true;
     }
@@ -1547,7 +1688,7 @@ async function createConversationBranch(messageId, content = null) {
     if (!currentSessionId || !messageId) return null;
     const payload = {
         message_id: messageId,
-        model: inputModelSelect?.value || "gemma-4-chat"
+        model: inputModelSelect?.value || "muse-glimmer:30b-q4_K_M-dflash"
     };
     if (content !== null) payload.content = content;
     const response = await fetch(

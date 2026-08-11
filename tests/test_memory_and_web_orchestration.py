@@ -114,6 +114,47 @@ class CompactionTests(unittest.TestCase):
 
 
 class WebOrchestrationTests(unittest.TestCase):
+    def test_commercial_comparison_requires_two_verified_sources(self):
+        def fake_search(
+            query,
+            max_results,
+            conversation_messages=None,
+            force_full_chain=False,
+            skip_primary_provider=False,
+        ):
+            return {
+                "status": "ok",
+                "engine": "test",
+                "errors": [],
+                "results": [
+                    {
+                        "title": "Tarifs officiels du modèle",
+                        "url": "https://vendor.example/pricing",
+                        "snippet": "Le prix API est de $0.20 par million.",
+                    }
+                ],
+                "strategy": {
+                    "scope": "complex",
+                    "official_domains": ["vendor.example"],
+                },
+            }
+
+        report = search_extract_verify(
+            "Tableau comparatif des modèles LLM avec leurs coûts",
+            search_fn=fake_search,
+            fetch_fn=lambda url, timeout: (
+                "Tarifs officiels du modèle : $0.20 par million de tokens."
+            ),
+        )
+
+        self.assertEqual(report["results"], [])
+        self.assertEqual(report["status"], "insufficient_evidence")
+        self.assertTrue(report["strategy"]["strict_grounding"])
+        self.assertEqual(
+            report["strategy"]["verification_status"],
+            "insufficient_strict_evidence",
+        )
+
     def test_search_result_is_enriched_with_extracted_page_evidence(self):
         def fake_search(query, max_results):
             return {
@@ -212,6 +253,49 @@ class WebOrchestrationTests(unittest.TestCase):
         self.assertEqual(
             report["strategy"]["verification_status"],
             "no_verified_evidence",
+        )
+
+    def test_current_news_never_uses_unverified_search_snippets(self):
+        def fake_search(
+            query,
+            max_results,
+            conversation_messages=None,
+            force_full_chain=False,
+            skip_primary_provider=False,
+        ):
+            return {
+                "status": "ok",
+                "engine": "test",
+                "errors": [],
+                "results": [
+                    {
+                        "title": "Actualités intelligence artificielle",
+                        "url": "https://example.org/ai-news",
+                        "snippet": "Toutes les dernières actualités IA.",
+                    },
+                    {
+                        "title": "News IA",
+                        "url": "https://example.net/news",
+                        "snippet": "Suivez les nouveautés de l'IA.",
+                    },
+                ],
+                "strategy": {
+                    "scope": "standard",
+                    "official_domains": [],
+                },
+            }
+
+        report = search_extract_verify(
+            "Quelles sont les dernières nouvelles dans l'IA ?",
+            search_fn=fake_search,
+            fetch_fn=lambda url, timeout: "",
+        )
+
+        self.assertEqual(report["results"], [])
+        self.assertEqual(report["status"], "insufficient_evidence")
+        self.assertEqual(
+            report["strategy"]["verification_status"],
+            "no_verified_news_evidence",
         )
 
     def test_provider_chain_expands_after_failed_page_verification(self):

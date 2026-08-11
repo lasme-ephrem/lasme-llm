@@ -222,7 +222,7 @@ if (modelPickerTrigger && modelPickerDropdown) {
     });
 }
 
-updateModelIdentity(inputModelSelect?.value || "gemma-4-chat");
+updateModelIdentity(inputModelSelect?.value || "muse-glimmer:30b-q4_K_M-dflash");
 
 if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     reasoningPickerTrigger.addEventListener("click", (e) => {
@@ -297,6 +297,35 @@ const docFileInput = document.getElementById("docFileInput");
 const attachedDocBadge = document.getElementById("attachedDocBadge");
 const docBadgeName = document.getElementById("docBadgeName");
 const clearDocBtn = document.getElementById("clearDocBtn");
+let attachedDocumentFileIds = [];
+let attachedDocumentProjectId = null;
+
+function resetDocumentAttachment() {
+    attachedDocumentFileIds = [];
+    attachedDocumentProjectId = null;
+    if (attachedDocBadge) {
+        attachedDocBadge.style.display = "none";
+        attachedDocBadge.classList.remove("is-loading", "has-error");
+    }
+    if (docBadgeName) docBadgeName.textContent = "";
+    if (docFileInput) docFileInput.value = "";
+}
+
+function selectedDocumentFileIdsForRequest() {
+    const projectSelection =
+        window.LasmeWorkspace?.getSelectedFileIds?.() || [];
+    const composerSelection = attachedDocumentProjectId === currentProjectId
+        ? attachedDocumentFileIds
+        : [];
+    return Array.from(
+        new Set([...projectSelection, ...composerSelection])
+    );
+}
+
+window.LasmeComposer = {
+    ...(window.LasmeComposer || {}),
+    resetDocumentAttachment,
+};
 
 // Vision Multimodal Image Elements
 const menuAttachImageBtn = document.getElementById("menuAttachImageBtn");
@@ -669,15 +698,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 const activeStreamingSessions = new Set();
+let sessionRefreshSequence = 0;
 
 async function loadSessions() {
+    const refreshSequence = ++sessionRefreshSequence;
     try {
         const query = currentProjectId
             ? `?project_id=${encodeURIComponent(currentProjectId)}`
             : "";
         const resp = await fetch(`${API_BASE}/sessions${query}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        if (refreshSequence !== sessionRefreshSequence) return;
         renderSessions(data.sessions || []);
+        await window.LasmeWorkspace?.refreshProjectSessionCounts?.();
     } catch (err) {
         console.error("Erreur chargement des sessions:", err);
     }
@@ -741,6 +775,7 @@ function renderSessions(sessions) {
 async function selectSession(sessionId) {
     temporaryChatEnabled = false;
     updateTemporaryChatUI();
+    resetDocumentAttachment();
     currentSessionId = sessionId;
     refreshSendButtonState();
     localStorage.setItem("active_session_id", sessionId);
@@ -759,6 +794,7 @@ async function selectSession(sessionId) {
             currentDocumentScopeId = currentProjectId;
             localStorage.setItem("active_project_id", currentProjectId);
             if (typeof syncProjectSelector === "function") syncProjectSelector();
+            await window.LasmeWorkspace?.resetDocumentSelection?.();
         }
         const msgs = data.messages || [];
 
@@ -788,7 +824,7 @@ async function selectSession(sessionId) {
             conversationHistory.push({ role: msg.role, content: msg.content });
         });
 
-        loadSessions();
+        void loadSessions();
     } catch (err) {
         console.error("Erreur lecture messages session:", err);
         startNewChat();
@@ -844,6 +880,8 @@ async function startNewChat(options = {}) {
         streamControllers.delete(null);
     }
     temporaryChatEnabled = nextTemporaryState;
+    resetDocumentAttachment();
+    void window.LasmeWorkspace?.resetDocumentSelection?.();
     currentSessionId = null;
     currentDocumentScopeId = temporaryChatEnabled ? null : currentProjectId;
     updateTemporaryChatUI();
@@ -894,7 +932,7 @@ async function startNewChat(options = {}) {
     `;
     chatMessages.appendChild(heroDiv);
 
-    loadSessions();
+    await loadSessions();
 }
 
 async function deleteSession(sessionId) {
@@ -902,13 +940,21 @@ async function deleteSession(sessionId) {
         const controller = streamControllers.get(sessionId);
         if (controller) controller.abort();
         streamControllers.delete(sessionId);
-        await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
-        if (currentSessionId === sessionId) {
-            startNewChat();
-        } else {
-            loadSessions();
+        const response = await fetch(
+            `${API_BASE}/sessions/${sessionId}`,
+            { method: "DELETE" }
+        );
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
         }
-    } catch (err) {}
+        if (currentSessionId === sessionId) {
+            await startNewChat();
+        } else {
+            await loadSessions();
+        }
+    } catch (err) {
+        console.error("Erreur suppression de la conversation :", err);
+    }
 }
 
 function updateContextUsage(meta = {}) {
@@ -1134,6 +1180,8 @@ memoryRefreshBtn?.addEventListener("click", async () => {
 
 // Floating Scroll to Bottom Handler
 const scrollToBottomBtn = document.getElementById("scrollToBottomBtn");
+let streamingAutoScrollPaused = false;
+let activeTurnSpacer = null;
 
 if (chatMessages && scrollToBottomBtn) {
     chatMessages.addEventListener("pointerenter", () => {
@@ -1151,9 +1199,20 @@ if (chatMessages && scrollToBottomBtn) {
             scrollToBottomBtn.classList.remove("visible");
         }
     });
+    chatMessages.addEventListener("wheel", () => {
+        if (activeControllerForCurrentConversation()) {
+            streamingAutoScrollPaused = true;
+        }
+    }, { passive: true });
+    chatMessages.addEventListener("touchstart", () => {
+        if (activeControllerForCurrentConversation()) {
+            streamingAutoScrollPaused = true;
+        }
+    }, { passive: true });
 
     scrollToBottomBtn.addEventListener("click", (e) => {
         if (e) e.preventDefault();
+        streamingAutoScrollPaused = false;
         chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior: "smooth" });
     });
 }
@@ -1184,6 +1243,72 @@ function currentStreamKey() {
 
 function activeControllerForCurrentConversation() {
     return streamControllers.get(currentStreamKey()) || null;
+}
+
+function replaceTurnSpacer(userMessage, assistantMessage) {
+    activeTurnSpacer?.remove();
+    activeTurnSpacer = document.createElement("div");
+    activeTurnSpacer.className = "conversation-turn-spacer";
+    activeTurnSpacer.setAttribute("aria-hidden", "true");
+    chatMessages.appendChild(activeTurnSpacer);
+    resizeTurnSpacer(userMessage, assistantMessage);
+}
+
+function resizeTurnSpacer(userMessage, assistantMessage) {
+    if (!activeTurnSpacer?.isConnected || !chatMessages) return;
+    const turnHeight = (
+        Number(userMessage?.offsetHeight || 0)
+        + Number(assistantMessage?.offsetHeight || 0)
+    );
+    const available = chatMessages.clientHeight - turnHeight - 96;
+    const spacerHeight = Math.max(
+        88,
+        Math.min(chatMessages.clientHeight * 0.68, available)
+    );
+    activeTurnSpacer.style.height = `${Math.round(spacerHeight)}px`;
+}
+
+function positionTurnAtViewportTop(userMessage) {
+    if (!chatMessages || !userMessage) return;
+    requestAnimationFrame(() => {
+        const containerRect = chatMessages.getBoundingClientRect();
+        const messageRect = userMessage.getBoundingClientRect();
+        const targetTop = (
+            chatMessages.scrollTop
+            + messageRect.top
+            - containerRect.top
+            - 20
+        );
+        const reduceMotion = window.matchMedia?.(
+            "(prefers-reduced-motion: reduce)"
+        )?.matches;
+        chatMessages.scrollTo({
+            top: Math.max(0, targetTop),
+            behavior: reduceMotion ? "auto" : "smooth",
+        });
+    });
+}
+
+function followStreamingResponse(userMessage, assistantMessage) {
+    resizeTurnSpacer(userMessage, assistantMessage);
+    if (
+        streamingAutoScrollPaused
+        || !chatMessages
+        || !assistantMessage
+    ) {
+        return;
+    }
+    requestAnimationFrame(() => {
+        const containerRect = chatMessages.getBoundingClientRect();
+        const assistantRect = assistantMessage.getBoundingClientRect();
+        const overflow = assistantRect.bottom - containerRect.bottom + 28;
+        if (overflow > 0) {
+            chatMessages.scrollTo({
+                top: chatMessages.scrollTop + overflow,
+                behavior: "auto",
+            });
+        }
+    });
 }
 
 function refreshSendButtonState() {
@@ -1309,8 +1434,9 @@ function renderAssistantProgressively(
     text,
     webResults,
     reasoningDuration,
-    final = false
+    options = {}
 ) {
+    const final = Boolean(options.final);
     const render = (container, latestText) => {
         renderFullAssistantMessage(
             container,
@@ -1324,10 +1450,16 @@ function renderAssistantProgressively(
             bubble,
             text,
             render,
-            { final }
+            {
+                final,
+                onPaint: options.onPaint,
+                onComplete: options.onComplete,
+            }
         );
     } else {
         render(bubble, text);
+        options.onPaint?.(bubble, text);
+        if (final) options.onComplete?.(bubble);
     }
 }
 
@@ -1339,7 +1471,12 @@ async function sendChatMessage(options = {}) {
     const text = replayExistingLastUser
         ? String(replayMessage?.content || "").trim()
         : chatInput.value.trim();
-    if (!text && !attachedImageBase64Items.length) return;
+    const requestSelectedFileIds = selectedDocumentFileIdsForRequest();
+    if (
+        !text
+        && !attachedImageBase64Items.length
+        && !requestSelectedFileIds.length
+    ) return;
     const requestIsTemporary = temporaryChatEnabled;
 
     const currentImageB64Items = replayExistingLastUser
@@ -1351,6 +1488,7 @@ async function sendChatMessage(options = {}) {
 
     // Reset attached image UI
     if (!replayExistingLastUser && clearImageBtn) clearImageBtn.click();
+    if (!replayExistingLastUser) resetDocumentAttachment();
 
     if (!replayExistingLastUser) {
         chatInput.value = "";
@@ -1365,9 +1503,14 @@ async function sendChatMessage(options = {}) {
     const streamSessionId = currentSessionId;
     const initialStreamKey = streamSessionId || currentDocumentScopeId;
     if (streamControllers.has(initialStreamKey)) return;
+    streamingAutoScrollPaused = false;
 
     // Append User Message with Image Preview
-    const userPromptText = text || "Analyse cette image.";
+    const userPromptText = text || (
+        currentImageB64Items.length
+            ? "Analyse cette image."
+            : "Analyse le document joint."
+    );
     const existingUserMessages = chatMessages.querySelectorAll(".message.user");
     const userBubble = replayExistingLastUser
         ? existingUserMessages[existingUserMessages.length - 1]?.querySelector(".bubble")
@@ -1394,6 +1537,10 @@ async function sendChatMessage(options = {}) {
 
     // Append Assistant Container with Animated Pulsing Dots
     const assistantBubble = appendMessage("assistant", "...");
+    const userMessage = userBubble?.closest(".message") || null;
+    const assistantMessage = assistantBubble.closest(".message");
+    replaceTurnSpacer(userMessage, assistantMessage);
+    positionTurnAtViewportTop(userMessage);
     let fullResponse = "";
     let webResultsMeta = [];
     let generationStatsMeta = null;
@@ -1431,7 +1578,7 @@ async function sendChatMessage(options = {}) {
             return rest;
         });
 
-        const selectedModel = inputModelSelect ? inputModelSelect.value : "gemma-4-chat";
+        const selectedModel = inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash";
         const activeWebMode = webSearchBtn
             ? (webSearchBtn.dataset.mode || "auto")
             : "auto";
@@ -1445,18 +1592,14 @@ async function sendChatMessage(options = {}) {
                 project_id: currentProjectId,
                 question: userPromptText,
                 model: selectedModel,
-                selected_file_ids: (
-                    window.LasmeWorkspace?.getSelectedFileIds?.() || []
-                ),
+                selected_file_ids: requestSelectedFileIds,
                 temporary: requestIsTemporary
             }
             : {
                 session_id: streamSessionId,
                 project_id: currentProjectId,
                 document_scope_id: currentDocumentScopeId,
-                selected_file_ids: (
-                    window.LasmeWorkspace?.getSelectedFileIds?.() || []
-                ),
+                selected_file_ids: requestSelectedFileIds,
                 model: selectedModel,
                 messages: cleanHistory,
                 intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "balanced",
@@ -1622,20 +1765,40 @@ async function sendChatMessage(options = {}) {
                         if (parsed.web_results) {
                             webResultsMeta = parsed.web_results;
                         }
+                        const webContextAvailable = (
+                            parsed.status === "ok"
+                            || parsed.status === "cached"
+                        );
+                        const evidenceInsufficient = (
+                            parsed.status === "insufficient_evidence"
+                        );
                         renderAssistantActivity(
                             assistantBubble,
                             "web",
-                            parsed.status === "ok" ? "done" : "warning",
-                            parsed.status === "ok"
+                            webContextAvailable ? "done" : "warning",
+                            parsed.status === "cached"
+                                ? (
+                                    parsed.message
+                                    || "Contexte Web vérifié réutilisé"
+                                )
+                                : parsed.status === "ok"
                                 ? (
                                     parsed.answer_mode === "provider"
                                         ? "Sources Web vérifiées"
                                         : `${parsed.result_count} source${parsed.result_count > 1 ? "s" : ""} pertinente${parsed.result_count > 1 ? "s" : ""}`
                                 )
+                                : evidenceInsufficient
+                                ? (
+                                    parsed.message
+                                    || "Aucun fait suffisamment vérifié"
+                                )
                                 : "Recherche Web indisponible",
                             parsed.answer_mode === "provider"
                                 ? `${parsed.result_count || 0} source${parsed.result_count > 1 ? "s" : ""} citée${parsed.result_count > 1 ? "s" : ""}`
-                                : parsed.status === "ok" && parsed.candidate_count
+                                : (
+                                    webContextAvailable
+                                    || evidenceInsufficient
+                                ) && parsed.candidate_count
                                 ? `${parsed.candidate_count} résultats évalués · ${parsed.search_query || ""}`
                                 : parsed.search_query || ""
                         );
@@ -1660,12 +1823,6 @@ async function sendChatMessage(options = {}) {
                     }
                     if (parsed.type === "generation_stats") {
                         generationStatsMeta = parsed;
-                        if (isStreamVisible()) {
-                            renderGenerationPerformance(
-                                assistantBubble,
-                                generationStatsMeta
-                            );
-                        }
                     }
                     if (parsed.type === "error") {
                         const message = parsed.message || "La génération a été interrompue.";
@@ -1678,18 +1835,28 @@ async function sendChatMessage(options = {}) {
                             webResultsMeta,
                             reasoningDuration
                         );
+                        followStreamingResponse(
+                            userMessage,
+                            assistantMessage
+                        );
                     }
                     if (parsed.type === "image_start") {
                         if (isStreamVisible()) {
                             renderDalleLoaderCard(assistantBubble);
-                            chatMessages.scrollTop = chatMessages.scrollHeight;
+                            followStreamingResponse(
+                                userMessage,
+                                assistantMessage
+                            );
                         }
                     }
                     if (parsed.type === "image_done" && parsed.image_url) {
                         fullResponse = `![${parsed.prompt}](${parsed.image_url})`;
                         if (isStreamVisible()) {
                             renderGeneratedImageCard(assistantBubble, parsed.image_url, parsed.prompt);
-                            chatMessages.scrollTop = chatMessages.scrollHeight;
+                            followStreamingResponse(
+                                userMessage,
+                                assistantMessage
+                            );
                         }
                     }
                     if (parsed.content) {
@@ -1701,9 +1868,14 @@ async function sendChatMessage(options = {}) {
                                 assistantBubble,
                                 fullResponse,
                                 webResultsMeta,
-                                reasoningDuration
+                                reasoningDuration,
+                                {
+                                    onPaint: () => followStreamingResponse(
+                                        userMessage,
+                                        assistantMessage
+                                    ),
+                                }
                             );
-                            chatMessages.scrollTop = chatMessages.scrollHeight;
                         }
                     }
                 } catch (err) {
@@ -1723,14 +1895,30 @@ async function sendChatMessage(options = {}) {
                 fullResponse,
                 webResultsMeta,
                 reasoningDuration,
-                true
+                {
+                    final: true,
+                    onPaint: () => followStreamingResponse(
+                        userMessage,
+                        assistantMessage
+                    ),
+                    onComplete: () => {
+                        if (generationStatsMeta) {
+                            renderGenerationPerformance(
+                                assistantBubble,
+                                generationStatsMeta
+                            );
+                        }
+                        followStreamingResponse(
+                            userMessage,
+                            assistantMessage
+                        );
+                    },
+                }
             );
-            if (generationStatsMeta) {
-                renderGenerationPerformance(
-                    assistantBubble,
-                    generationStatsMeta
-                );
-            }
+        }
+        if (window.LasmeProgressiveRenderer?.stripNumericCitations) {
+            fullResponse = window.LasmeProgressiveRenderer
+                .stripNumericCitations(fullResponse);
         }
         streamConversationHistory.push({ role: "assistant", content: fullResponse });
         if (
@@ -1748,12 +1936,13 @@ async function sendChatMessage(options = {}) {
         if (activeSessionIdForStream && fullResponse) {
             void loadSuggestedQuestions(
                 activeSessionIdForStream,
-                inputModelSelect ? inputModelSelect.value : "gemma-4-chat",
+                inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash",
                 assistantBubble
             );
         }
 
     } catch (err) {
+        window.LasmeProgressiveRenderer?.cancel?.(assistantBubble);
         if (err.name === "AbortError") {
             if (fullResponse) {
                 fullResponse += "\n\n*(Génération arrêtée par l'utilisateur)*";
@@ -2029,6 +2218,9 @@ function renderGenerationPerformance(container, rawStats) {
 // the UI receives structured activity events and a short process summary.
 function renderFullAssistantMessage(container, rawText, webResults, thinkingDuration = null) {
     rawText = cleanModelText(rawText);
+    rawText = window.LasmeProgressiveRenderer?.stripNumericCitations
+        ? window.LasmeProgressiveRenderer.stripNumericCitations(rawText)
+        : rawText;
     container._lasmeRawContent = rawText;
     let thinkingContent = "";
     let mainAnswer = (rawText || "")
@@ -2537,10 +2729,13 @@ if (docFileInput) {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("scope_id", currentDocumentScopeId);
+        formData.append("wait_for_index", "true");
 
         if (attachedDocBadge && docBadgeName) {
             attachedDocBadge.style.display = "inline-flex";
-            docBadgeName.textContent = `⏳ Upload de ${file.name}...`;
+            attachedDocBadge.classList.remove("has-error");
+            attachedDocBadge.classList.add("is-loading");
+            docBadgeName.textContent = `Préparation de ${file.name}…`;
         }
 
         try {
@@ -2550,34 +2745,32 @@ if (docFileInput) {
             });
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.detail || "Document upload failed");
-            if (data.status === "success") {
-                if (docBadgeName) {
-                    docBadgeName.textContent = `${file.name} (${data.chunks} chunks)`;
-                }
-                if (typeof loadProjectDocuments === "function") {
-                    void loadProjectDocuments();
-                }
+            if (data.file?.id) {
+                attachedDocumentFileIds = [data.file.id];
+                attachedDocumentProjectId = currentProjectId;
+                attachedDocBadge?.classList.remove("is-loading");
+                if (docBadgeName) docBadgeName.textContent = file.name;
+            }
+            if (typeof loadProjectDocuments === "function") {
+                void loadProjectDocuments();
             }
         } catch (err) {
-            if (docBadgeName) docBadgeName.textContent = "Erreur d'upload";
+            attachedDocumentFileIds = [];
+            attachedDocumentProjectId = null;
+            attachedDocBadge?.classList.remove("is-loading");
+            attachedDocBadge?.classList.add("has-error");
+            if (docBadgeName) {
+                docBadgeName.textContent = err.message || "Import impossible";
+            }
         }
     });
 }
 
 if (clearDocBtn) {
-    clearDocBtn.addEventListener("click", async (e) => {
+    clearDocBtn.addEventListener("click", (e) => {
         if (e) e.preventDefault();
-        try {
-            await fetch(
-                `${API_BASE}/documents/clear?scope_id=${encodeURIComponent(currentDocumentScopeId)}`,
-                { method: "DELETE" }
-            );
-            if (attachedDocBadge) attachedDocBadge.style.display = "none";
-            if (docFileInput) docFileInput.value = "";
-            if (typeof loadProjectDocuments === "function") {
-                void loadProjectDocuments();
-            }
-        } catch (err) {}
+        attachedDocBadge?.classList.remove("is-loading", "has-error");
+        resetDocumentAttachment();
     });
 }
 

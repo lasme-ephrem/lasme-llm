@@ -14,7 +14,7 @@ class ModelProfile:
     history_tokens: int
     system_addendum: str
     think: Union[bool, str] = True
-    keep_alive: str = "15m"
+    keep_alive: Union[str, int] = "15m"
     options: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -32,7 +32,10 @@ GEMMA_CHAT_PROFILE = ModelProfile(
         "adaptées au niveau de l'utilisateur. Pour une question complexe, "
         "raisonne silencieusement avant de donner une réponse nette."
     ),
-    keep_alive="-1",
+    # Ollama accepts -1 as a numeric sentinel for an indefinitely resident
+    # model. The string "-1" is parsed as a duration and rejected because it
+    # has no unit.
+    keep_alive=-1,
     options={
         "top_p": 0.95,
         "top_k": 64,
@@ -102,9 +105,37 @@ GEMMA_FABLE_PROFILE = ModelProfile(
     },
 )
 
+# Muse Glimmer 30B (q4_K_M-dflash) is the resident agentic model. Measured
+# on the RTX 4070 Ti SUPER with 16 GiB of VRAM: ~19 tok/s with flash
+# attention, ~15.9/16.4 GiB VRAM. The DFlash draft needs Ollama's automatic
+# GPU offload: forcing num_gpu breaks llama.cpp memory fitting, so the client
+# must NOT send num_gpu for this model. A 16K context keeps the KV cache
+# small enough for the 18 GB of weights + the 1.6 GB DFlash draft.
+GLIMMER_PROFILE = ModelProfile(
+    temperature=0.35,
+    num_ctx=16_384,
+    num_predict=8_192,
+    history_tokens=12_000,
+    system_addendum=(
+        "Tu utilises le profil agentique Muse Glimmer. Pour toute question "
+        "factuelle ou récente, utilise les outils de recherche Web quand ils "
+        "sont disponibles et vérifie tes affirmations. Distingue ce que tu "
+        "sais de ce que tu déduis. Produis des réponses sourcées et nettes."
+    ),
+    keep_alive="15m",
+    options={
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.08,
+        "repeat_last_n": 256,
+    },
+)
+
 
 def get_model_profile(model: str) -> ModelProfile:
     normalized = (model or "").lower()
+    if "glimmer" in normalized:
+        return GLIMMER_PROFILE
     if "smol" in normalized:
         return SMOL_FAST_PROFILE
     if "qwen" in normalized or "vision" in normalized:

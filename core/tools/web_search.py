@@ -1,6 +1,8 @@
 import logging
+import json
 import re
 import datetime
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Any, Optional
 import httpx
@@ -20,13 +22,18 @@ from core.tools.search_ranking import (
     VERSION_MARKERS,
     adaptive_select_results,
     build_search_plan,
+    canonical_url,
+    is_commercial_comparison,
+    is_product_comparison,
     normalize_search_text,
+    source_family,
     search_terms,
 )
 
 logger = logging.getLogger("WebSearch")
 MAX_PAGE_BYTES = 1_000_000
 SONAR_API_URL = "https://api.perplexity.ai/v1/sonar"
+PERPLEXITY_SEARCH_API_URL = "https://api.perplexity.ai/search"
 ALLOWED_CONTENT_TYPES = (
     "text/",
     "application/json",
@@ -53,8 +60,36 @@ OFFICIAL_DOMAIN_RULES = (
     (("hugging face", "huggingface"), ("huggingface.co",)),
     (("ollama",), ("ollama.com",)),
     (("openai", "chatgpt"), ("openai.com",)),
+    (("anthropic", "claude"), ("anthropic.com",)),
+    (("kimi", "moonshot ai", "moonshotai"), (
+        "moonshot.ai",
+        "platform.moonshot.ai",
+    )),
+    (("xai", "grok"), ("x.ai",)),
+    (("mistral", "mixtral"), ("mistral.ai",)),
+    (("meta ai", "llama"), ("ai.meta.com", "meta.com")),
+    (("qwen", "alibaba"), ("qwenlm.ai", "alibabacloud.com")),
+    (("deepseek",), ("deepseek.com", "api-docs.deepseek.com")),
+    (("glm", "zhipu"), ("bigmodel.cn", "zhipuai.cn")),
+    (("minimax",), ("minimax.io", "minimaxi.com")),
+    (("ernie", "baidu"), ("baidu.com", "cloud.baidu.com")),
+    (
+        ("llm chinois", "modeles chinois", "modeles llm chinois"),
+        (
+            "api-docs.deepseek.com",
+            "alibabacloud.com",
+            "qwenlm.ai",
+            "platform.moonshot.ai",
+            "bigmodel.cn",
+            "minimax.io",
+            "cloud.baidu.com",
+        ),
+    ),
     (("microsoft", "windows", "azure"), ("microsoft.com", "learn.microsoft.com")),
-    (("google", "gemini"), ("google.com", "ai.google.dev")),
+    (
+        ("google", "gemini"),
+        ("ai.google.dev", "cloud.google.com", "blog.google"),
+    ),
     (("apple", "iphone", "macos"), ("apple.com",)),
 )
 
@@ -88,6 +123,706 @@ class SearXNGSearchError(RuntimeError):
     """Safe error raised when the optional local metasearch is unavailable."""
 
 
+COMPARISON_LEDGER_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "title": {"type": "string", "maxLength": 100},
+        "scope": {"type": "string", "maxLength": 160},
+        "as_of": {"type": "string"},
+        "summary": {"type": "string", "maxLength": 280},
+        "rows": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "provider": {"type": "string", "maxLength": 40},
+                    "model": {"type": "string", "maxLength": 80},
+                    "positioning": {"type": "string", "maxLength": 120},
+                    "access": {"type": "string", "maxLength": 80},
+                    "context_window": {"type": "string", "maxLength": 50},
+                    "input_price": {"type": "string", "maxLength": 80},
+                    "output_price": {"type": "string", "maxLength": 80},
+                    "model_source_url": {"type": "string"},
+                    "context_source_url": {"type": "string"},
+                    "pricing_source_url": {"type": "string"},
+                    "strengths": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
+                    "limitations": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
+                    "benchmarks": {
+                        "type": "array",
+                        "maxItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 60},
+                                "score": {"type": "string", "maxLength": 50},
+                                "conditions": {
+                                    "type": "string",
+                                    "maxLength": 100,
+                                },
+                                "source_url": {"type": "string"},
+                            },
+                            "required": [
+                                "name",
+                                "score",
+                                "conditions",
+                                "source_url",
+                            ],
+                        },
+                    },
+                    "evidence_urls": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "provider",
+                    "model",
+                    "positioning",
+                    "access",
+                    "context_window",
+                    "input_price",
+                    "output_price",
+                    "model_source_url",
+                    "context_source_url",
+                    "pricing_source_url",
+                    "strengths",
+                    "limitations",
+                    "benchmarks",
+                    "evidence_urls",
+                ],
+            },
+        },
+        "takeaways": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {"type": "string", "maxLength": 150},
+        },
+        "caveats": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {"type": "string", "maxLength": 150},
+        },
+    },
+    "required": [
+        "title",
+        "scope",
+        "as_of",
+        "summary",
+        "rows",
+        "takeaways",
+        "caveats",
+    ],
+}
+
+
+def _clean_ledger_text(value: Any, max_chars: int = 500) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.split(
+        r"(?:\\?[\"']?model\\?[\"']?\s*:|\\?\"\s*}\s*])",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    text = re.sub(
+        r"\s*(?:\[(?:source\s*)?\d+\]|\((?:source\s*)?\d+\))",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text[:max_chars].strip()
+
+
+def _canonical_numeric_tokens(value: Any) -> set[str]:
+    tokens: set[str] = set()
+    for raw_token in re.findall(
+        r"(?<![\w])\d+(?:[.,]\d+)?(?:[kKmMbB])?",
+        str(value or ""),
+    ):
+        suffix = raw_token[-1:].lower()
+        number = raw_token[:-1] if suffix in {"k", "m", "b"} else raw_token
+        try:
+            normalized = format(Decimal(number.replace(",", ".")), "f")
+            if "." in normalized:
+                normalized = normalized.rstrip("0").rstrip(".")
+        except InvalidOperation:
+            normalized = number.lower()
+        tokens.add(f"{normalized}{suffix}")
+    return tokens
+
+
+def _numeric_claim_is_supported(value: Any, evidence_text: str) -> bool:
+    claimed = _canonical_numeric_tokens(value)
+    if not claimed:
+        return True
+    available = _canonical_numeric_tokens(evidence_text)
+    return claimed.issubset(available)
+
+
+def _supported_ledger_text(
+    value: Any,
+    evidence_text: str,
+    max_chars: int,
+) -> str:
+    cleaned = _clean_ledger_text(value, max_chars)
+    if not cleaned or not _numeric_claim_is_supported(cleaned, evidence_text):
+        return ""
+    return cleaned
+
+
+def _qualitative_claim_is_supported(
+    value: Any,
+    evidence_text: str,
+    max_chars: int,
+) -> str:
+    cleaned = _supported_ledger_text(value, evidence_text, max_chars)
+    if not cleaned:
+        return ""
+    trailing_word = normalize_search_text(cleaned).split()[-1:]
+    if (
+        cleaned.endswith(("-", "–", "—", "“", '"', "/", ";", ":"))
+        or trailing_word
+        and trailing_word[0] in {
+            "a",
+            "au",
+            "aux",
+            "avec",
+            "dans",
+            "de",
+            "des",
+            "du",
+            "en",
+            "et",
+            "la",
+            "le",
+            "les",
+            "par",
+            "pour",
+            "sur",
+            "un",
+            "une",
+        }
+    ):
+        return ""
+    claim_terms = search_terms(cleaned)
+    if not claim_terms:
+        return cleaned
+    evidence_terms = search_terms(evidence_text)
+    coverage = len(claim_terms.intersection(evidence_terms)) / len(
+        claim_terms
+    )
+    return cleaned if coverage >= 0.34 else ""
+
+
+def _search_perplexity_official_evidence(
+    query: str,
+    official_domains: List[str],
+) -> List[Dict[str, Any]]:
+    """Collect one compact official evidence pool with a multi-query request."""
+    vendor_queries = _official_evidence_queries(query, official_domains)[1:6]
+    if not vendor_queries:
+        return []
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(12, connect=5),
+            follow_redirects=False,
+            trust_env=False,
+        ) as http:
+            response = http.post(
+                PERPLEXITY_SEARCH_API_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.perplexity_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": vendor_queries,
+                    "max_results": 10,
+                    "max_tokens_per_page": 800,
+                    "search_domain_filter": official_domains[:20],
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Perplexity multi-query evidence retrieval failed: %s",
+            type(exc).__name__,
+        )
+        return []
+    if response.status_code >= 400:
+        logger.warning(
+            "Perplexity multi-query evidence retrieval rejected (HTTP %s)",
+            response.status_code,
+        )
+        return []
+    try:
+        data = response.json()
+    except ValueError:
+        return []
+
+    evidence: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for index, item in enumerate(data.get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        try:
+            safe_url = validate_public_http_url(url)
+        except ValueError:
+            continue
+        hostname = (urlparse(safe_url).hostname or "").casefold()
+        if not any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in official_domains
+        ):
+            continue
+        normalized_url = canonical_url(safe_url)
+        if normalized_url in seen_urls or not title or not snippet:
+            continue
+        seen_urls.add(normalized_url)
+        evidence.append(
+            {
+                "title": title,
+                "snippet": snippet[:3_000],
+                "url": safe_url,
+                "engine": "Perplexity Search",
+                "engine_score": max(0.7, 1.0 - index * 0.025),
+                "verified": True,
+                "evidence_kind": "provider_citation",
+            }
+        )
+    return evidence
+
+
+def _requested_product_providers(query: str) -> List[tuple[str, set[str]]]:
+    normalized = normalize_search_text(query)
+    provider_rules = (
+        ("DeepSeek", {"deepseek"}),
+        ("Kimi", {"kimi", "moonshot"}),
+        ("OpenAI", {"openai", "gpt"}),
+        ("Google", {"google", "gemini"}),
+        ("Anthropic", {"anthropic", "claude"}),
+        ("Qwen", {"qwen", "alibaba"}),
+        ("Mistral", {"mistral"}),
+        ("xAI", {"xai", "grok"}),
+    )
+    return [
+        (label, aliases)
+        for label, aliases in provider_rules
+        if any(alias in normalized for alias in aliases)
+    ]
+
+
+def _validated_comparison_ledger(
+    raw_answer: str,
+    results: List[Dict[str, Any]],
+    query: str = "",
+) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    try:
+        payload = json.loads(raw_answer)
+    except (TypeError, ValueError):
+        return None, results
+    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+        return None, results
+
+    result_by_url = {
+        canonical_url(str(item.get("url") or "")): item
+        for item in results
+        if item.get("url")
+    }
+    sanitized_rows: List[Dict[str, Any]] = []
+    used_urls: List[str] = []
+    for raw_row in payload.get("rows", [])[:8]:
+        if not isinstance(raw_row, dict):
+            continue
+        evidence_urls = []
+        for value in raw_row.get("evidence_urls", [])[:4]:
+            normalized_url = canonical_url(str(value or ""))
+            if normalized_url in result_by_url:
+                evidence_urls.append(normalized_url)
+                used_urls.append(normalized_url)
+        if not evidence_urls:
+            continue
+        field_source_urls: Dict[str, str] = {}
+        for field_name in (
+            "model_source_url",
+            "context_source_url",
+            "pricing_source_url",
+        ):
+            source_url = canonical_url(
+                str(raw_row.get(field_name) or "")
+            )
+            if source_url in result_by_url:
+                field_source_urls[field_name] = source_url
+                if source_url not in evidence_urls:
+                    evidence_urls.append(source_url)
+                used_urls.append(source_url)
+        model_source_url = field_source_urls.get("model_source_url", "")
+        if not model_source_url:
+            continue
+        provider = _clean_ledger_text(raw_row.get("provider"), 80)
+        model = _clean_ledger_text(raw_row.get("model"), 100)
+        provider_and_model = normalize_search_text(f"{provider} {model}")
+        for canonical_label, aliases in _requested_product_providers(query):
+            if any(alias in provider_and_model for alias in aliases):
+                provider = canonical_label
+                break
+        model_evidence_text = " ".join(
+            [
+                str(result_by_url[model_source_url].get("title") or ""),
+                str(result_by_url[model_source_url].get("snippet") or ""),
+            ]
+        )
+        normalized_evidence = normalize_search_text(model_evidence_text)
+        normalized_model = normalize_search_text(model)
+        if not model or normalized_model not in normalized_evidence:
+            continue
+        generic_model = normalized_model in {
+            "claude",
+            "deepseek",
+            "gemini",
+            "gpt",
+            "kimi",
+        }
+        context_source_url = field_source_urls.get(
+            "context_source_url",
+            "",
+        )
+        pricing_source_url = field_source_urls.get(
+            "pricing_source_url",
+            "",
+        )
+        context_evidence_text = ""
+        if context_source_url:
+            context_evidence_text = " ".join(
+                [
+                    str(result_by_url[context_source_url].get("title") or ""),
+                    str(
+                        result_by_url[context_source_url].get("snippet")
+                        or ""
+                    ),
+                ]
+            )
+            if normalized_model not in normalize_search_text(
+                context_evidence_text
+            ):
+                context_evidence_text = ""
+        pricing_evidence_text = ""
+        if pricing_source_url:
+            pricing_evidence_text = " ".join(
+                [
+                    str(result_by_url[pricing_source_url].get("title") or ""),
+                    str(
+                        result_by_url[pricing_source_url].get("snippet")
+                        or ""
+                    ),
+                ]
+            )
+            if normalized_model not in normalize_search_text(
+                pricing_evidence_text
+            ):
+                pricing_evidence_text = ""
+
+        benchmarks = []
+        for raw_benchmark in raw_row.get("benchmarks", [])[:3]:
+            if not isinstance(raw_benchmark, dict):
+                continue
+            source_url = canonical_url(
+                str(raw_benchmark.get("source_url") or "")
+            )
+            if source_url not in result_by_url:
+                continue
+            benchmark_evidence = " ".join(
+                [
+                    str(result_by_url[source_url].get("title") or ""),
+                    str(result_by_url[source_url].get("snippet") or ""),
+                ]
+            )
+            if normalized_model not in normalize_search_text(
+                benchmark_evidence
+            ):
+                continue
+            score = _supported_ledger_text(
+                raw_benchmark.get("score"),
+                benchmark_evidence,
+                80,
+            )
+            if not score or not re.search(r"\d", score):
+                continue
+            benchmarks.append(
+                {
+                    "name": _clean_ledger_text(raw_benchmark.get("name"), 100),
+                    "score": score,
+                    "conditions": _clean_ledger_text(
+                        raw_benchmark.get("conditions"),
+                        180,
+                    ),
+                    "source_url": source_url,
+                }
+            )
+            used_urls.append(source_url)
+
+        sanitized_rows.append(
+            {
+                "provider": provider,
+                "model": model,
+                "positioning": _qualitative_claim_is_supported(
+                    raw_row.get("positioning"),
+                    model_evidence_text,
+                    180,
+                ),
+                "access": _qualitative_claim_is_supported(
+                    raw_row.get("access"),
+                    model_evidence_text,
+                    100,
+                ),
+                "context_window": _supported_ledger_text(
+                    raw_row.get("context_window"),
+                    context_evidence_text,
+                    80,
+                ) if context_evidence_text and not generic_model else "",
+                "input_price": _supported_ledger_text(
+                    raw_row.get("input_price"),
+                    pricing_evidence_text,
+                    80,
+                ) if pricing_evidence_text and not generic_model else "",
+                "output_price": _supported_ledger_text(
+                    raw_row.get("output_price"),
+                    pricing_evidence_text,
+                    80,
+                ) if pricing_evidence_text and not generic_model else "",
+                "strengths": [
+                    _qualitative_claim_is_supported(
+                        value,
+                        model_evidence_text,
+                        120,
+                    )
+                    for value in raw_row.get("strengths", [])[:4]
+                    if _qualitative_claim_is_supported(
+                        value,
+                        model_evidence_text,
+                        120,
+                    )
+                ],
+                "limitations": [
+                    _qualitative_claim_is_supported(
+                        value,
+                        model_evidence_text,
+                        120,
+                    )
+                    for value in raw_row.get("limitations", [])[:3]
+                    if _qualitative_claim_is_supported(
+                        value,
+                        model_evidence_text,
+                        120,
+                    )
+                ],
+                "benchmarks": benchmarks,
+                "evidence_urls": evidence_urls,
+                "model_source_url": model_source_url,
+                "context_source_url": context_source_url,
+                "pricing_source_url": pricing_source_url,
+            }
+        )
+
+    if len(sanitized_rows) < 2:
+        return None, results
+
+    requested_providers = _requested_product_providers(query)
+    present_providers = {
+        normalize_search_text(str(row.get("provider") or ""))
+        for row in sanitized_rows
+    }
+    for label, _aliases in requested_providers:
+        if normalize_search_text(label) in present_providers:
+            continue
+        sanitized_rows.append(
+            {
+                "provider": label,
+                "model": "",
+                "positioning": "",
+                "access": "",
+                "context_window": "",
+                "input_price": "",
+                "output_price": "",
+                "strengths": [],
+                "limitations": [],
+                "benchmarks": [],
+                "evidence_urls": [],
+                "model_source_url": "",
+                "context_source_url": "",
+                "pricing_source_url": "",
+            }
+        )
+
+    verified_date = _clean_ledger_text(payload.get("as_of"), 40)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", verified_date):
+        verified_date = datetime.date.today().isoformat()
+    ledger = {
+        "title": "Comparatif vérifié des modèles LLM",
+        "scope": (
+            "Un modèle généraliste actuel par fournisseur, selon les "
+            "informations disponibles sur ses pages officielles."
+        ),
+        "as_of": verified_date,
+        "summary": (
+            "Les cellules « Non vérifié » signalent qu’aucune valeur "
+            "suffisamment étayée n’a été trouvée dans le registre officiel."
+        ),
+        "rows": sanitized_rows,
+        "takeaways": [],
+        "caveats": [],
+    }
+    selected_results = [
+        result_by_url[url]
+        for url in dict.fromkeys(used_urls)
+        if url in result_by_url
+    ]
+    return ledger, selected_results
+
+
+def _markdown_cell(value: Any, fallback: str = "Non vérifié") -> str:
+    text = _clean_ledger_text(value, 400) or fallback
+    return text.replace("|", r"\|")
+
+
+def _render_comparison_ledger(ledger: Dict[str, Any]) -> str:
+    rows = list(ledger.get("rows") or [])
+    has_prices = any(
+        row.get("input_price") or row.get("output_price")
+        for row in rows
+    )
+    output = [
+        f"## {_markdown_cell(ledger.get('title'), 'Comparatif vérifié')}",
+        "",
+        _clean_ledger_text(ledger.get("summary"), 700),
+        "",
+    ]
+    if ledger.get("scope"):
+        output.extend(
+            [
+                f"**Périmètre :** {_clean_ledger_text(ledger['scope'], 220)}",
+                "",
+            ]
+        )
+    if ledger.get("as_of"):
+        output.extend(
+            [
+                f"**Données vérifiées le :** {_clean_ledger_text(ledger['as_of'], 40)}",
+                "",
+            ]
+        )
+
+    headers = [
+        "Fournisseur",
+        "Modèle",
+        "Positionnement",
+        "Accès",
+        "Contexte",
+    ]
+    if has_prices:
+        headers.extend(["Prix entrée", "Prix sortie"])
+    headers.extend(["Points forts", "Limites"])
+    output.append("| " + " | ".join(headers) + " |")
+    output.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    for row in rows:
+        cells = [
+            _markdown_cell(row.get("provider")),
+            _markdown_cell(row.get("model")),
+            _markdown_cell(row.get("positioning")),
+            _markdown_cell(row.get("access")),
+            _markdown_cell(row.get("context_window")),
+        ]
+        if has_prices:
+            cells.extend(
+                [
+                    _markdown_cell(row.get("input_price")),
+                    _markdown_cell(row.get("output_price")),
+                ]
+            )
+        cells.extend(
+            [
+                "<br>".join(
+                    _markdown_cell(value)
+                    for value in row.get("strengths", [])
+                )
+                or "Non vérifié",
+                "<br>".join(
+                    _markdown_cell(value)
+                    for value in row.get("limitations", [])
+                )
+                or "Non vérifié",
+            ]
+        )
+        output.append("| " + " | ".join(cells) + " |")
+
+    benchmarks = [
+        (row, benchmark)
+        for row in rows
+        for benchmark in row.get("benchmarks", [])
+    ]
+    if benchmarks:
+        output.extend(
+            [
+                "",
+                "### Benchmarks comparables explicitement documentés",
+                "",
+                "| Modèle | Benchmark | Résultat | Conditions |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for row, benchmark in benchmarks:
+            output.append(
+                "| "
+                + " | ".join(
+                    [
+                        _markdown_cell(row.get("model")),
+                        _markdown_cell(benchmark.get("name")),
+                        _markdown_cell(benchmark.get("score")),
+                        _markdown_cell(benchmark.get("conditions")),
+                    ]
+                )
+                + " |"
+            )
+
+    if ledger.get("takeaways"):
+        output.extend(["", "### À retenir", ""])
+        output.extend(
+            f"- {_clean_ledger_text(value, 220)}"
+            for value in ledger["takeaways"]
+        )
+    if ledger.get("caveats"):
+        output.extend(["", "### Limites des données", ""])
+        output.extend(
+            f"- {_clean_ledger_text(value, 220)}"
+            for value in ledger["caveats"]
+        )
+    output.extend(
+        [
+            "",
+            "### Lecture du tableau",
+            "",
+            "- Une cellule « Non vérifié » n’est jamais complétée par la mémoire du modèle.",
+            "- Les tarifs conservent la devise, l’unité et les conditions trouvées dans la source officielle.",
+            "- Les benchmarks sont affichés uniquement quand leur protocole et leur score sont explicitement documentés.",
+        ]
+    )
+    return "\n".join(output).strip()
+
+
 def _sonar_error_reason(status_code: int) -> str:
     if status_code in {402, 429}:
         return "quota_or_rate_limit"
@@ -105,6 +840,26 @@ def _search_with_sonar(
     conversation_messages: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Retrieve Sonar's grounded answer while preserving citation order."""
+    commercial_comparison = is_commercial_comparison(query)
+    product_comparison = is_product_comparison(query)
+    prefetched_evidence = (
+        _search_perplexity_official_evidence(query, official_domains)
+        if product_comparison
+        else []
+    )
+    evidence_registry = ""
+    if prefetched_evidence:
+        evidence_registry = json.dumps(
+            [
+                {
+                    "title": item["title"],
+                    "url": item["url"],
+                    "snippet": item["snippet"][:1_200],
+                }
+                for item in prefetched_evidence
+            ],
+            ensure_ascii=False,
+        )
     history: List[Dict[str, str]] = []
     for item in (conversation_messages or [])[-10:]:
         if not isinstance(item, dict):
@@ -115,17 +870,61 @@ def _search_with_sonar(
             continue
         history.append({"role": role, "content": content[:1_600]})
 
+    grounding_contract = (
+        " Pour un comparatif de prix ou d'offres, applique en plus ce contrat "
+        "strict : utilise uniquement les pages tarifaires ou documentations "
+        "primaires des fournisseurs, jamais un blog, un benchmark, un "
+        "agrégateur ni un prix d'hébergement tiers. Ne mélange pas le coût "
+        "d'une API commerciale avec le fait que des poids soient ouverts. "
+        "Chaque ligne doit indiquer le modèle exact, la devise, l'unité "
+        "(par exemple par million de tokens), le prix d'entrée, le prix de "
+        "sortie et les conditions de cache si elles changent le tarif. Omet "
+        "toute ligne dont une valeur essentielle n'est pas explicitement "
+        "vérifiable. Ne convertis aucune devise sans taux vérifié. Limite le "
+        "tableau à 4 à 6 offres représentatives et ajoute la date de "
+        "vérification. Si les unités diffèrent, sépare les tableaux."
+        if commercial_comparison
+        else ""
+    )
+    comparison_contract = (
+        " Keep every field concise: one short clause, never a paragraph. "
+        " Use the official evidence registry below as the primary evidence. "
+        "Copy its URLs exactly into evidence_urls and only report a numeric "
+        "value when it appears in the matching snippet. "
+        "Set model_source_url to the exact page naming the model, "
+        "context_source_url to the exact page naming that same model and its "
+        "context, and pricing_source_url to the exact page naming that same "
+        "model and its prices. Use an empty URL and empty value when this "
+        "field-level link is unavailable. Report only base input and base "
+        "output prices; omit cache prices from the price fields. "
+        f"OFFICIAL_EVIDENCE_REGISTRY={evidence_registry}. "
+        " Pour toute comparaison de produits ou de modèles, retourne uniquement "
+        "le JSON conforme au schéma demandé. Crée une ligne par fournisseur "
+        "explicitement demandé, en choisissant son modèle généraliste actuel le "
+        "plus pertinent et en indiquant clairement le périmètre. Une donnée vide "
+        "doit rester une chaîne vide : ne la complète jamais par estimation. "
+        "N'ajoute un benchmark que si le nom, le score, les conditions et l'URL "
+        "primaire sont tous disponibles et réellement comparables. Chaque ligne "
+        "doit référencer au moins une URL présente dans les résultats de recherche."
+        if product_comparison
+        else ""
+    )
     sonar_messages: List[Dict[str, str]] = [
         {
             "role": "system",
             "content": (
                 "Réponds en français à la dernière question de la conversation "
+                f"en prenant le {datetime.date.today().isoformat()} comme date "
+                "de référence, "
                 "à partir de preuves Web à jour. L'historique sert uniquement "
                 "à résoudre les références et à comprendre le fil : ses "
                 "anciennes réponses peuvent être fausses. Vérifie chaque fait "
                 "actuel, privilégie les sources officielles ou primaires, "
-                "conserve les marqueurs de citation [1], [2], etc., et "
+                "n'insère aucun marqueur numérique de citation dans le texte "
+                "(les sources sont renvoyées séparément par l'API), et "
                 "n'invente jamais un détail absent des sources."
+                f"{grounding_contract}"
+                f"{comparison_contract}"
             ),
         }
     ]
@@ -134,13 +933,31 @@ def _search_with_sonar(
     # follow-ups less precise. The standalone query is only a no-history fallback.
     if history:
         sonar_messages.extend(history)
+        resolved_history_query = normalize_search_text(
+            str(history[-1].get("content") or "")
+        )
+        if (
+            product_comparison
+            and normalize_search_text(query) != resolved_history_query
+        ):
+            sonar_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Question contextualisée à traiter maintenant : "
+                        f"{query}"
+                    ),
+                }
+            )
     else:
         sonar_messages.append({"role": "user", "content": query})
 
     payload: Dict[str, Any] = {
         "model": settings.perplexity_sonar_model,
         "messages": sonar_messages,
-        "max_tokens": 1_200,
+        "max_tokens": 2_200 if product_comparison else (
+            1_600 if commercial_comparison else 1_200
+        ),
         "temperature": 0.1,
         "search_mode": "web",
         "return_related_questions": False,
@@ -148,10 +965,17 @@ def _search_with_sonar(
     }
     if official_domains:
         payload["search_domain_filter"] = official_domains
+    if product_comparison:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "schema": COMPARISON_LEDGER_SCHEMA,
+            },
+        }
 
     try:
         with httpx.Client(
-            timeout=httpx.Timeout(12, connect=5),
+            timeout=httpx.Timeout(20, connect=5),
             follow_redirects=False,
             trust_env=False,
         ) as http:
@@ -254,10 +1078,39 @@ def _search_with_sonar(
                 }
             )
 
+    comparison_ledger = None
+    if product_comparison:
+        merged_results: List[Dict[str, Any]] = []
+        seen_result_urls: set[str] = set()
+        for item in [*prefetched_evidence, *results]:
+            normalized_url = canonical_url(str(item.get("url") or ""))
+            if not normalized_url or normalized_url in seen_result_urls:
+                continue
+            seen_result_urls.add(normalized_url)
+            merged_results.append(item)
+        results = merged_results
+        comparison_ledger, selected_results = _validated_comparison_ledger(
+            answer,
+            results,
+            query,
+        )
+        if comparison_ledger:
+            results = selected_results
+            citations = [
+                str(item.get("url") or "")
+                for item in results
+                if item.get("url")
+            ]
+            answer = _render_comparison_ledger(comparison_ledger)
+        else:
+            # Raw or schema-invalid JSON must never reach the chat surface.
+            answer = ""
+
     return {
         "results": results,
         "provider_answer": answer,
         "provider_citations": citations,
+        "comparison_ledger": comparison_ledger,
         "answer_mode": (
             "provider"
             if answer and citations and len(results) == len(citations)
@@ -476,10 +1329,10 @@ def _select_quality_results(
 
 
 def _official_domains_for_query(query: str) -> List[str]:
-    lowered = query.casefold()
+    lowered = normalize_search_text(query)
     domains: List[str] = []
     for markers, candidates in OFFICIAL_DOMAIN_RULES:
-        if any(marker in lowered for marker in markers):
+        if any(normalize_search_text(marker) in lowered for marker in markers):
             domains.extend(candidates)
     return list(dict.fromkeys(domains))
 
@@ -500,6 +1353,30 @@ def _focused_official_query(query: str, official_domains: List[str]) -> str:
         return f"{query} latest champion final result {year}"
     if terms.intersection(VERSION_MARKERS):
         return f"{query} official stable release documentation"
+    if is_commercial_comparison(query):
+        return (
+            f"{query} official API pricing input output tokens "
+            f"{datetime.date.today().year}"
+        )
+    if is_product_comparison(query):
+        requested = []
+        normalized = normalize_search_text(query)
+        for markers, domain in (
+            (("deepseek",), "api-docs.deepseek.com"),
+            (("kimi", "moonshot"), "platform.moonshot.ai"),
+            (("openai", "gpt"), "openai.com"),
+            (("google", "gemini"), "ai.google.dev"),
+            (("anthropic", "claude"), "anthropic.com"),
+        ):
+            if any(marker in normalized for marker in markers):
+                requested.append(domain)
+        required_sources = ", ".join(requested)
+        return (
+            f"{query}. Compare one current general-purpose model per named "
+            "vendor, including technical positioning, context and official "
+            f"API pricing. Use one primary source from EACH of: {required_sources}. "
+            f"Official information verified in {year}."
+        )
     if any(
         marker in normalize_search_text(query).split()
         for marker in ("actuel", "actuelle", "dernier", "derniere", "recent")
@@ -507,12 +1384,215 @@ def _focused_official_query(query: str, official_domains: List[str]) -> str:
         return f"{query} official announcement {year}"
     return query
 
+
+def _official_evidence_queries(
+    query: str,
+    official_domains: List[str],
+) -> List[str]:
+    """Decompose broad product comparisons into vendor-level lookups."""
+    focused = _focused_official_query(query, official_domains)
+    if not is_product_comparison(query) or len(official_domains) < 2:
+        return [focused]
+
+    year = datetime.date.today().year
+    queries = [focused]
+    normalized_query = normalize_search_text(query)
+    requested_vendors = (
+        (("deepseek",), "api-docs.deepseek.com", "DeepSeek"),
+        (("kimi", "moonshot"), "platform.moonshot.ai", "Kimi Moonshot"),
+        (("openai", "gpt"), "openai.com", "OpenAI GPT"),
+        (("google", "gemini"), "ai.google.dev", "Google Gemini"),
+        (("anthropic", "claude"), "anthropic.com", "Anthropic Claude"),
+        (("qwen", "alibaba"), "qwenlm.ai", "Alibaba Qwen"),
+        (("mistral",), "mistral.ai", "Mistral"),
+        (("grok", "xai"), "x.ai", "xAI Grok"),
+    )
+    for markers, domain, vendor in requested_vendors:
+        if not any(marker in normalized_query for marker in markers):
+            continue
+        queries.append(
+            f"site:{domain} {vendor} official current models API pricing "
+            f"context window benchmarks {year}"
+        )
+    if len(queries) > 1:
+        return queries[:8]
+
+    # Unknown vendors still benefit from one official-domain lookup per family.
+    seen_families: set[str] = set()
+    for domain in official_domains:
+        family = source_family(domain)
+        if family in seen_families:
+            continue
+        seen_families.add(family)
+        queries.append(f"site:{domain} official current models API {year}")
+        if len(queries) >= 6:
+            break
+    return queries
+
+
+def _provider_answer_is_high_confidence(
+    query: str,
+    results: List[Dict[str, Any]],
+    official_domains: List[str],
+) -> bool:
+    """Only bypass local verification when Sonar cites strong evidence."""
+    if not results:
+        return False
+    if detect_search_vertical(query) == "news" and not official_domains:
+        return False
+    if is_product_comparison(query):
+        official_families = {
+            source_family(
+                (urlparse(str(item.get("url") or "")).hostname or "")
+                .casefold()
+                .removeprefix("www.")
+            )
+            for item in results
+            if any(
+                (
+                    (urlparse(str(item.get("url") or "")).hostname or "")
+                    .casefold()
+                    .removeprefix("www.")
+                    == domain
+                )
+                or (
+                    (urlparse(str(item.get("url") or "")).hostname or "")
+                    .casefold()
+                    .removeprefix("www.")
+                    .endswith(f".{domain}")
+                )
+                for domain in official_domains
+            )
+        }
+        requested_families = {
+            source_family(domain)
+            for domain in official_domains
+        }
+        minimum_families = min(3, max(2, len(requested_families)))
+        # A comparison cannot be grounded by a single vendor page.
+        return len(official_families) >= minimum_families
+    if official_domains:
+        for item in results:
+            hostname = (
+                urlparse(str(item.get("url") or "")).hostname or ""
+            ).casefold()
+            if any(
+                hostname == domain or hostname.endswith(f".{domain}")
+                for domain in official_domains
+            ):
+                return True
+        return False
+    return len(results) >= 2
+
+
+def _is_generic_news_listing(result: Dict[str, Any]) -> bool:
+    """Reject topic hubs which prove no individual news claim."""
+    title = normalize_search_text(str(result.get("title") or ""))
+    url = str(result.get("url") or "")
+    try:
+        path_parts = [
+            part
+            for part in urlparse(url).path.casefold().split("/")
+            if part
+        ]
+    except ValueError:
+        path_parts = []
+
+    generic_title = bool(
+        re.fullmatch(
+            r"(?:actualites?|news|infos?)(?: en direct)?"
+            r"|(?:actualites?|news|infos?) (?:sur |de |du |des )?.+"
+            r"|intelligence artificielle",
+            title,
+        )
+        or re.match(
+            r"^(?:google actualites )?intelligence artificielle "
+            r"(?:actualites|dernieres infos|videos et infos en direct)\b",
+            title,
+        )
+    )
+    non_event_roundup = bool(
+        re.search(
+            r"\b(?:newsletters?|ressources?|sites?)\b.*\b(?:suivre|"
+            r"actualites?)\b"
+            r"|\b(?:top|meilleures?)\s+\d+\b"
+            r"|\bguide\b.*\bactualites?\b",
+            title,
+        )
+    )
+    category_path = (
+        len(path_parts) <= 2
+        and any(
+            marker in path_parts
+            for marker in {
+                "actualite",
+                "actualites",
+                "ai",
+                "ia",
+                "intelligence-artificielle",
+                "news",
+                "tech",
+            }
+        )
+    )
+    return non_event_roundup or (generic_title and category_path)
+
+
+def _news_specialist_query(query: str) -> str:
+    """Produce a concise GDELT query from a conversational news request."""
+    normalized = normalize_search_text(query)
+    if (
+        "intelligence artificielle" in normalized
+        or re.search(r"(?:^|\s)ia(?:\s|$)", normalized)
+        or re.search(r"(?:^|\s)ai(?:\s|$)", normalized)
+    ):
+        return '("artificial intelligence" OR "AI model")'
+    remaining = [
+        term
+        for term in search_terms(query)
+        if term
+        not in {
+            "actualite",
+            "actualites",
+            "derniere",
+            "dernieres",
+            "monde",
+            "nouvelle",
+            "nouvelles",
+            "recent",
+            "recente",
+        }
+    ]
+    return " ".join(remaining[:8]) or query
+
+
+def _news_web_query(query: str) -> str:
+    """Turn a broad news request into a dated article-oriented Web query."""
+    normalized = normalize_search_text(query)
+    today = datetime.date.today()
+    if (
+        "intelligence artificielle" in normalized
+        or re.search(r"(?:^|\s)ia(?:\s|$)", normalized)
+        or re.search(r"(?:^|\s)ai(?:\s|$)", normalized)
+    ):
+        return (
+            "actualités intelligence artificielle annonces "
+            f"{today.year}-{today.month:02d}"
+        )
+    return f"{query} actualités {today.year}-{today.month:02d}"
+
+
 def _adaptive_report(
     candidates: List[Dict[str, Any]],
     query: str,
     official_domains: List[str],
     max_results: int | None,
 ) -> Dict[str, Any]:
+    if detect_search_vertical(query) == "news":
+        candidates = [
+            item for item in candidates
+            if not _is_generic_news_listing(item)
+        ]
     return adaptive_select_results(
         candidates,
         query,
@@ -626,7 +1706,14 @@ def search_web_detailed(
                     "status": "ok" if sonar_results else "empty",
                 }
             )
-            if sonar_report.get("answer_mode") == "provider":
+            if (
+                sonar_report.get("answer_mode") == "provider"
+                and _provider_answer_is_high_confidence(
+                    cleaned_query,
+                    sonar_results,
+                    official_domains,
+                )
+            ):
                 return {
                     "status": "ok",
                     "engine": "Perplexity Sonar",
@@ -634,6 +1721,9 @@ def search_web_detailed(
                     "errors": errors,
                     "provider_answer": sonar_report["provider_answer"],
                     "provider_citations": sonar_report["provider_citations"],
+                    "comparison_ledger": sonar_report.get(
+                        "comparison_ledger"
+                    ),
                     "answer_mode": "provider",
                     "usage": sonar_report.get("usage", {}),
                     "strategy": {
@@ -717,7 +1807,16 @@ def search_web_detailed(
         if settings.search_specialists_enabled
         else None
     )
-    if (force_full_chain or not selected["strategy"]["sufficient"]) and vertical:
+    general_web_query = (
+        _news_web_query(cleaned_query)
+        if vertical == "news"
+        else cleaned_query
+    )
+    if (
+        force_full_chain
+        or not selected["strategy"]["sufficient"]
+        or vertical == "news"
+    ) and vertical:
         specialist_name = {
             "academic": "OpenAlex",
             "news": "GDELT",
@@ -741,8 +1840,9 @@ def search_web_detailed(
                         plan["candidate_limit"],
                     )
             elif vertical == "news":
+                specialist_query = _news_specialist_query(cleaned_query)
                 specialist_results = search_gdelt(
-                    cleaned_query,
+                    specialist_query,
                     plan["candidate_limit"],
                 )
             else:
@@ -758,7 +1858,11 @@ def search_web_detailed(
                     {
                         "engine": specialist_name,
                         "kind": f"specialist_{vertical}",
-                        "query": cleaned_query,
+                        "query": (
+                            specialist_query
+                            if vertical == "news"
+                            else cleaned_query
+                        ),
                         "returned": len(specialist_results),
                     }
                 )
@@ -827,22 +1931,44 @@ def search_web_detailed(
         force_full_chain or not selected["strategy"]["sufficient"]
     ) and settings.searxng_enabled:
         try:
-            logger.info("Executing local SearXNG search for %r", cleaned_query)
-            searxng_results = _search_with_searxng(
-                cleaned_query,
-                plan["candidate_limit"],
+            searx_queries = (
+                _official_evidence_queries(cleaned_query, official_domains)
+                if official_domains
+                else [general_web_query]
             )
+            searxng_results: List[Dict[str, Any]] = []
+            per_query_limit = max(
+                3,
+                min(
+                    plan["candidate_limit"],
+                    5 if len(searx_queries) > 1 else plan["candidate_limit"],
+                ),
+            )
+            for round_query in searx_queries:
+                logger.info(
+                    "Executing local SearXNG search for %r",
+                    round_query,
+                )
+                round_results = _search_with_searxng(
+                    round_query,
+                    per_query_limit,
+                )
+                searxng_results.extend(round_results)
+                search_rounds.append(
+                    {
+                        "engine": "SearXNG",
+                        "kind": (
+                            "official_vendor"
+                            if round_query != general_web_query
+                            else "metasearch"
+                        ),
+                        "query": round_query,
+                        "returned": len(round_results),
+                    }
+                )
             candidates.extend(searxng_results)
             if searxng_results:
                 engines_used.append("SearXNG")
-            search_rounds.append(
-                {
-                    "engine": "SearXNG",
-                    "kind": "metasearch",
-                    "query": cleaned_query,
-                    "returned": len(searxng_results),
-                }
-            )
             provider_attempts.append(
                 {
                     "provider": "SearXNG",
@@ -886,7 +2012,7 @@ def search_web_detailed(
         brave_query = (
             _focused_official_query(cleaned_query, official_domains)
             if official_domains
-            else cleaned_query
+            else general_web_query
         )
         try:
             logger.info("Executing Brave Search for %r", brave_query)
@@ -968,7 +2094,7 @@ def search_web_detailed(
         search_attempts.append(
             (
                 "broad",
-                cleaned_query,
+                general_web_query,
                 {"exclude_domains": excluded_domains},
             )
         )
@@ -1070,7 +2196,7 @@ def search_web_detailed(
             ddgs_client = DDGS()
             raw_results = list(
                 ddgs_client.text(
-                    cleaned_query,
+                    general_web_query,
                     max_results=plan["candidate_limit"],
                 )
             )
@@ -1090,7 +2216,7 @@ def search_web_detailed(
                 {
                     "engine": "DuckDuckGo",
                     "kind": "corroboration",
-                    "query": cleaned_query,
+                    "query": general_web_query,
                     "returned": len(raw_results),
                 }
             )

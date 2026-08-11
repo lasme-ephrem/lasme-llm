@@ -5,10 +5,21 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from core.tools.search_ranking import (
     adaptive_select_results,
+    domain_matches,
+    hostname_for_url,
+    is_commercial_comparison,
+    is_product_comparison,
+    requires_strict_grounding,
     score_search_result,
     search_terms,
+    source_family,
 )
-from core.tools.web_search import fetch_url_content, search_web_detailed
+from core.tools.web_search import (
+    _is_generic_news_listing,
+    fetch_url_content,
+    search_web_detailed,
+)
+from core.tools.search_providers import detect_search_vertical
 
 
 SearchFunction = Callable[..., Dict[str, Any]]
@@ -45,8 +56,14 @@ def _relevant_passage(text: str, query: str, max_chars: int = 2_400) -> str:
 def _verification_targets(
     results: Iterable[Dict[str, Any]],
     scope: str,
+    *,
+    commercial_comparison: bool = False,
 ) -> List[Dict[str, Any]]:
-    limit = 1 if scope == "direct" else 2 if scope == "standard" else 3
+    limit = (
+        6
+        if commercial_comparison
+        else 1 if scope == "direct" else 2 if scope == "standard" else 3
+    )
     return list(results)[:limit]
 
 
@@ -91,6 +108,15 @@ def search_extract_verify(
 
     report = invoke_search() or {}
     results = list(report.get("results", []))
+    news_request = detect_search_vertical(query) == "news"
+    strict_grounding = requires_strict_grounding(query)
+    commercial_comparison = is_commercial_comparison(query)
+    product_comparison = is_product_comparison(query)
+    if news_request:
+        results = [
+            item for item in results
+            if not _is_generic_news_listing(item)
+        ]
     strategy = dict(report.get("strategy", {}))
     scope = str(strategy.get("scope", "standard"))
     official_domains = list(strategy.get("official_domains", []))
@@ -100,7 +126,29 @@ def search_extract_verify(
     # Sonar already performed retrieval and synthesis. Reordering its sources
     # would break the [n] citation mapping, and a second extraction pass would
     # only add latency without improving the provider-grounded response.
-    if report.get("answer_mode") == "provider" and report.get("provider_answer"):
+    provider_families = {
+        source_family(hostname_for_url(str(item.get("url") or "")))
+        for item in results
+        if hostname_for_url(str(item.get("url") or ""))
+    }
+    requested_families = {
+        source_family(domain)
+        for domain in official_domains
+    }
+    minimum_provider_families = min(
+        3,
+        max(2, len(requested_families)),
+    )
+    provider_has_enough_evidence = (
+        len(provider_families) >= minimum_provider_families
+        if product_comparison
+        else bool(results)
+    )
+    if (
+        report.get("answer_mode") == "provider"
+        and report.get("provider_answer")
+        and provider_has_enough_evidence
+    ):
         return {
             **report,
             "strategy": {
@@ -110,6 +158,7 @@ def search_extract_verify(
                 "verification_status": "provider_grounded",
                 "elapsed_ms": round((time.monotonic() - started) * 1_000),
                 "stop_reason": "provider_answer",
+                "strict_grounding": strict_grounding,
             },
         }
 
@@ -134,7 +183,13 @@ def search_extract_verify(
         previous = previous or {}
         target_urls = {
             str(item.get("url", ""))
-            for item in _verification_targets(candidates, current_scope)
+            for item in _verification_targets(
+                candidates,
+                current_scope,
+                commercial_comparison=(
+                    commercial_comparison or product_comparison
+                ),
+            )
         }
         enriched_items: List[Dict[str, Any]] = []
         for item in candidates:
@@ -175,13 +230,39 @@ def search_extract_verify(
                             len(query_terms.intersection(search_terms(passage)))
                             / max(1, len(query_terms))
                         )
+                        hostname = hostname_for_url(url)
+                        pricing_signal_count = len(
+                            {
+                                marker
+                                for marker in (
+                                    "price",
+                                    "pricing",
+                                    "token",
+                                    "input",
+                                    "output",
+                                    "$",
+                                    "usd",
+                                    "tarif",
+                                    "prix",
+                                )
+                                if marker in passage.casefold()
+                            }
+                        )
+                        official_pricing_page = bool(
+                            commercial_comparison
+                            and domain_matches(hostname, official_domains)
+                            and pricing_signal_count >= 2
+                        )
                         enriched_item["verification_coverage"] = round(
                             passage_coverage,
                             4,
                         )
-                        enriched_item["verified"] = passage_coverage >= 0.12
+                        enriched_item["verified"] = bool(
+                            passage_coverage >= 0.12
+                            or official_pricing_page
+                        )
                         enriched_item["verification_rejected"] = (
-                            passage_coverage < 0.12
+                            not enriched_item["verified"]
                         )
                         if enriched_item["verified"]:
                             extracted_count += 1
@@ -239,6 +320,11 @@ def search_extract_verify(
         if expanded_report:
             expanded_after_verification = True
             expanded_results = list(expanded_report.get("results", []))
+            if news_request:
+                expanded_results = [
+                    item for item in expanded_results
+                    if not _is_generic_news_listing(item)
+                ]
             merged_by_url = {
                 str(item.get("url", "")): item
                 for item in [*expanded_results, *results]
@@ -284,10 +370,81 @@ def search_extract_verify(
             else "no_verified_evidence"
         )
     )
+    if news_request:
+        final_results = [
+            item for item in final_results
+            if item.get("verified")
+            and not _is_generic_news_listing(item)
+        ]
+        verified_count = len(final_results)
+    if news_request and verified_count == 0:
+        # Search snippets and topic hubs are not proof of a current event.
+        # Prefer an honest unavailable result to a fluent invented news recap.
+        final_results = []
+        verification_status = "no_verified_news_evidence"
+
+    if strict_grounding:
+        # Search snippets are discovery aids, not evidence for mutable facts.
+        # Only page extracts and structured/provider evidence may reach the LLM.
+        final_results = [
+            item for item in final_results
+            if item.get("verified")
+            and item.get("evidence_kind") in {
+                "page_extract",
+                "structured_api",
+                "provider_citation",
+            }
+        ]
+        verified_count = len(final_results)
+        if product_comparison:
+            final_results = [
+                item for item in final_results
+                if domain_matches(
+                    hostname_for_url(str(item.get("url") or "")),
+                    official_domains,
+                )
+            ]
+            families = {
+                source_family(hostname_for_url(str(item.get("url") or "")))
+                for item in final_results
+                if hostname_for_url(str(item.get("url") or ""))
+            }
+            requested_families = {
+                source_family(domain)
+                for domain in official_domains
+            }
+            minimum_families = min(
+                3,
+                max(2, len(requested_families)),
+            )
+            if len(families) < minimum_families:
+                final_results = []
+            verified_count = len(final_results)
+        if commercial_comparison:
+            families = {
+                source_family(hostname_for_url(str(item.get("url") or "")))
+                for item in final_results
+                if hostname_for_url(str(item.get("url") or ""))
+            }
+            if len(families) < 2:
+                final_results = []
+                verified_count = 0
+        if not final_results and (
+            commercial_comparison or product_comparison
+        ):
+            verification_status = "insufficient_strict_evidence"
 
     return {
         **report,
-        "status": "ok" if final_results else "unavailable",
+        "status": (
+            "ok"
+            if final_results
+            else (
+                "insufficient_evidence"
+                if (news_request or commercial_comparison) and results
+                else "unavailable"
+            )
+        ),
         "results": final_results,
         "errors": [*report.get("errors", []), *extraction_failures],
         "strategy": {
@@ -297,6 +454,7 @@ def search_extract_verify(
             "extracted_count": extracted_count,
             "verified_count": verified_count,
             "verification_status": verification_status,
+            "strict_grounding": strict_grounding,
             "expanded_after_verification": expanded_after_verification,
             "elapsed_ms": round((time.monotonic() - started) * 1_000),
         },

@@ -128,7 +128,7 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     instructions TEXT NOT NULL DEFAULT '',
-                    default_model TEXT NOT NULL DEFAULT 'gemma-4-chat',
+                    default_model TEXT NOT NULL DEFAULT 'muse-glimmer:30b-q4_K_M-dflash',
                     memory_mode TEXT NOT NULL DEFAULT 'project',
                     project_type TEXT NOT NULL DEFAULT 'general',
                     tags TEXT NOT NULL DEFAULT '[]',
@@ -144,7 +144,7 @@ class DatabaseManager:
                 INSERT OR IGNORE INTO projects
                     (id, name, description, instructions, default_model,
                      memory_mode, created_at, updated_at)
-                VALUES (?, ?, ?, '', 'gemma-4-chat', 'global', ?, ?)
+                VALUES (?, ?, ?, '', 'muse-glimmer:30b-q4_K_M-dflash', 'global', ?, ?)
                 """,
                 (
                     DEFAULT_PROJECT_ID,
@@ -193,8 +193,12 @@ class DatabaseManager:
                 ),
             )
             cursor.execute(
-                "UPDATE projects SET default_model = 'gemma-4-chat' "
-                "WHERE default_model = 'gemma-4-fable'"
+                "UPDATE projects SET default_model = 'muse-glimmer:30b-q4_K_M-dflash' "
+                "WHERE default_model IN ('gemma-4-fable', 'gemma-4-chat')"
+            )
+            cursor.execute(
+                "UPDATE sessions SET model = 'muse-glimmer:30b-q4_K_M-dflash' "
+                "WHERE model IN ('gemma-4-fable', 'gemma-4-chat')"
             )
             session_columns = {
                 row["name"]
@@ -526,7 +530,7 @@ class DatabaseManager:
         *,
         description: str = "",
         instructions: str = "",
-        default_model: str = "gemma-4-chat",
+        default_model: str = "muse-glimmer:30b-q4_K_M-dflash",
         memory_mode: str = "project",
         project_type: str = "general",
         tags: Optional[List[str]] = None,

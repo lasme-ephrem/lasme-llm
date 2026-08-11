@@ -26,6 +26,7 @@
     });
 
     const CODE_TOKEN_PREFIX = "LASMECODETOKEN";
+    const CURRENCY_TOKEN_PREFIX = "LASMECURRENCYTOKEN";
     const EXISTING_MATH_PREFIX = "LASMEEXISTINGMATH";
     const BARE_MATH_PREFIX = "LASMEBAREMATH";
     const MARKDOWN_MATH_PREFIX = "LASMEMATHBLOCK";
@@ -36,7 +37,14 @@
     }
 
     function restoreTokens(text, prefix, values) {
-        const expression = new RegExp(`${prefix}(\\d+)${TOKEN_SUFFIX}`, "g");
+        // Models frequently escape currency as "\$5". Consume that optional
+        // slash as well, otherwise it can make an internal placeholder look
+        // like a LaTeX command and leak it into the rendered response.
+        const optionalEscape = prefix === CURRENCY_TOKEN_PREFIX ? "\\\\?" : "";
+        const expression = new RegExp(
+            `${optionalEscape}${prefix}(\\d+)${TOKEN_SUFFIX}`,
+            "g"
+        );
         return text.replace(expression, (_, rawIndex) => values[Number(rawIndex)] ?? "");
     }
 
@@ -51,6 +59,37 @@
             }
         );
         return { text: protectedText, code };
+    }
+
+    function protectCurrency(text) {
+        const currency = [];
+        const protectedText = text.replace(
+            /\\?\$(?=\d)/g,
+            () => {
+                const placeholder = token(
+                    CURRENCY_TOKEN_PREFIX,
+                    currency.length
+                );
+                currency.push("$");
+                return placeholder;
+            }
+        );
+        return { text: protectedText, currency };
+    }
+
+    function unwrapPlainNumericMath(text) {
+        const unwrap = (match, source) => {
+            const plain = String(source || "")
+                .replace(/\\([%$])/g, "$1")
+                .replace(/\\,/g, " ")
+                .trim();
+            const isPlainNumeric = /\d/.test(plain)
+                && /^[\d\s.,:+\-/%$A-Za-z]+$/.test(plain);
+            return isPlainNumeric ? plain : match;
+        };
+        return String(text || "")
+            .replace(/\\\(([\s\S]*?)\\\)/g, unwrap)
+            .replace(/\$(?!\$)([^$\n]+?)\$/g, unwrap);
     }
 
     function canonicalizeLatex(source) {
@@ -135,8 +174,13 @@
     }
 
     function prepareForMarkdown(value) {
-        const protectedCode = protectCode(String(value || "").replace(/\r\n?/g, "\n"));
-        let output = normalizeBareLatex(protectedCode.text);
+        const protectedCode = protectCode(
+            unwrapPlainNumericMath(
+                String(value || "").replace(/\r\n?/g, "\n")
+            )
+        );
+        const protectedCurrency = protectCurrency(protectedCode.text);
+        let output = normalizeBareLatex(protectedCurrency.text);
         const math = [];
         const capture = (display, source) => {
             const placeholder = token(MARKDOWN_MATH_PREFIX, math.length);
@@ -148,6 +192,11 @@
         output = output.replace(/\\\[([\s\S]*?)\\\]/g, (_, source) => capture(true, source));
         output = output.replace(/\\\(([\s\S]*?)\\\)/g, (_, source) => capture(false, source));
         output = output.replace(/\$(?!\$)([^$\n]+?)\$/g, (_, source) => capture(false, source));
+        output = restoreTokens(
+            output,
+            CURRENCY_TOKEN_PREFIX,
+            protectedCurrency.currency
+        );
         output = restoreTokens(output, CODE_TOKEN_PREFIX, protectedCode.code);
         return { text: output, math };
     }
@@ -164,6 +213,7 @@
         KATEX_MACROS,
         canonicalizeLatex,
         normalizeBareLatex,
+        unwrapPlainNumericMath,
         prepareForMarkdown,
         restoreAfterMarkdown,
     };

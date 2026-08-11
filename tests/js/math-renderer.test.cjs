@@ -56,3 +56,43 @@ test("escapes restored formulas before inserting them into HTML", () => {
 
     assert.equal(html, "<p>\\(x &lt; y\\)</p>");
 });
+
+test("never treats Markdown currency prices as an inline formula", () => {
+    const source = [
+        "| Variante | Coût |",
+        "| --- | --- |",
+        "| Sol | **$5** / million de tokens en entrée, **$30** en sortie |",
+    ].join("\n");
+    const prepared = math.prepareForMarkdown(source);
+
+    assert.equal(prepared.math.length, 0);
+    assert.equal(prepared.text, source);
+});
+
+test("restores model-escaped currency without leaking internal tokens", () => {
+    const source = [
+        "| Modèle | Entrée | Sortie |",
+        "| --- | --- | --- |",
+        "| DeepSeek | **\\$0.27** | **\\$1.10** |",
+    ].join("\n");
+    const prepared = math.prepareForMarkdown(source);
+
+    assert.equal(prepared.math.length, 0);
+    assert.doesNotMatch(prepared.text, /LASMECURRENCYTOKEN/);
+    assert.match(prepared.text, /\*\*\$0\.27\*\*/);
+    assert.match(prepared.text, /\*\*\$1\.10\*\*/);
+});
+
+test("renders plain percentages and prices as text instead of equations", () => {
+    const source = [
+        "Score \\(93,12\\%\\) sur MATH.",
+        "Prix \\(0,50\\$/1M\\) de tokens.",
+        "Une vraie formule \\(R(h)\\) reste mathématique.",
+    ].join("\n");
+    const prepared = math.prepareForMarkdown(source);
+
+    assert.equal(prepared.math.length, 1);
+    assert.equal(prepared.math[0].source, "R(h)");
+    assert.match(prepared.text, /93,12%/);
+    assert.match(prepared.text, /0,50\$\/1M/);
+});

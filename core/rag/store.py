@@ -80,8 +80,15 @@ CHUNK_OVERLAP = 220
 EMBEDDING_DIMENSIONS = 192
 SUMMARY_INTENT_PATTERN = re.compile(
     r"\b(résum|resume|synthèse|synthese|vue d['’]ensemble|"
-    r"tout le document|présente ce document|présente le document|"
-    r"analyse globale|points clés|points cles)\b",
+    r"tout le document|présente ce document|presente ce document|"
+    r"présente le document|presente le document|"
+    r"explique (?:ce|le|les) document|de [aà] z|"
+    r"analyse globale|points clés|points cles|"
+    r"rapport (?:des?|sur les?) (?:fichiers|documents)|"
+    r"(?:analyse|inventaire|présentation|presentation) "
+    r"(?:des?|de tous les?) (?:fichiers|documents)|"
+    r"(?:fichiers|documents) (?:dans|de|du) (?:ce |le )?"
+    r"(?:projet|dossier))\b",
     flags=re.IGNORECASE,
 )
 

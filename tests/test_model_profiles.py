@@ -47,6 +47,10 @@ class ModelProfileTests(unittest.TestCase):
             self.assertEqual(profile.options["top_k"], 64)
             self.assertEqual(profile.options["repeat_penalty"], 1.1)
 
+    def test_resident_chat_model_uses_ollama_numeric_sentinel(self):
+        self.assertEqual(GEMMA_CHAT_PROFILE.keep_alive, -1)
+        self.assertIsInstance(GEMMA_CHAT_PROFILE.keep_alive, int)
+
 
 if __name__ == "__main__":
     unittest.main()

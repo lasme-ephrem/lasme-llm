@@ -25,14 +25,26 @@ QUESTION_FILLERS = {
 STOPWORDS = FRENCH_STOPWORDS | ENGLISH_STOPWORDS | QUESTION_FILLERS
 
 COMPLEX_MARKERS = {
-    "analyse", "compare", "comparaison", "controverse", "difference",
+    "analyse", "compare", "comparaison", "comparatif", "comparatifs",
+    "controverse", "difference",
     "differents", "enjeux", "evalue", "evolution", "impact", "impacts",
     "limites", "perspectives", "pourquoi", "rapport", "synthese",
 }
 TEMPORAL_MARKERS = {
-    "actuel", "actuelle", "actualite", "aujourd", "dernier", "derniere",
-    "maintenant", "nouveau", "nouvelle", "recent", "recente", "score",
-    "version",
+    "actuel", "actuelle", "actualite", "actualites", "aujourd", "dernier",
+    "derniers", "derniere", "dernieres", "maintenant", "nouveau", "nouveaux",
+    "nouvelle", "nouvelles", "recent", "recents", "recente", "recentes",
+    "score", "version", "versions",
+}
+COMMERCIAL_MARKERS = {
+    "abonnement", "abonnements", "cout", "couts", "price", "prices", "prix",
+    "pricing", "tarif", "tarifs",
+}
+VOLATILE_PRODUCT_MARKERS = {
+    "api", "benchmark", "benchmarks", "classement", "disponibilite",
+    "disponible", "llm", "modele", "modeles", "offre", "offres", "performance",
+    "performances", "produit", "produits", "service", "services", "specification",
+    "specifications",
 }
 WINNER_MARKERS = {
     "champion", "champions", "gagne", "gagnant", "vainqueur", "winner",
@@ -79,6 +91,45 @@ def search_terms(value: str) -> set[str]:
         for term in normalize_search_text(value).split()
         if (len(term) >= 2 or term.isdigit()) and term not in STOPWORDS
     }
+
+
+def requires_strict_grounding(query: str) -> bool:
+    """Identify factual requests that must not fall back to model memory.
+
+    Prices, product availability, model specifications, benchmarks and current
+    facts change too often to be answered safely from a local model's training
+    data.  The helper intentionally works on accent-normalized text so French
+    variants such as ``coût`` and ``coûts`` are classified consistently.
+    """
+    terms = set(normalize_search_text(query).split())
+    if not terms:
+        return False
+    if terms.intersection(COMMERCIAL_MARKERS | TEMPORAL_MARKERS):
+        return True
+    if terms.intersection({"benchmark", "benchmarks", "classement"}):
+        return True
+    comparison = bool(terms.intersection(COMPLEX_MARKERS))
+    return comparison and bool(terms.intersection(VOLATILE_PRODUCT_MARKERS))
+
+
+def is_commercial_comparison(query: str) -> bool:
+    terms = set(normalize_search_text(query).split())
+    return bool(
+        terms.intersection(COMMERCIAL_MARKERS)
+        and (
+            terms.intersection(COMPLEX_MARKERS)
+            or terms.intersection(VOLATILE_PRODUCT_MARKERS)
+        )
+    )
+
+
+def is_product_comparison(query: str) -> bool:
+    """Recognize comparisons whose rows depend on mutable product facts."""
+    terms = set(normalize_search_text(query).split())
+    return bool(
+        terms.intersection(COMPLEX_MARKERS)
+        and terms.intersection(VOLATILE_PRODUCT_MARKERS)
+    )
 
 
 def hostname_for_url(url: str) -> str:

@@ -3,11 +3,13 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
 
+from chat.server import main as server_main
 from core.files.store import ProjectFileStore
 from core.rag.store import RAGDocumentStore
 
@@ -214,6 +216,66 @@ class RichDocumentRAGTests(unittest.TestCase):
                 [],
             )
 
+    def test_project_report_intent_returns_representative_file_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = RAGDocumentStore(Path(temp_dir) / "rag.db")
+            store.add_document(
+                "project-a",
+                "budget.md",
+                b"# Budget\nLe budget du projet est de 120 000 euros.",
+                file_id="budget-file",
+            )
+            store.add_document(
+                "project-a",
+                "planning.md",
+                b"# Planning\nLa livraison finale est prevue en novembre.",
+                file_id="planning-file",
+            )
+
+            results = store.search_scopes(
+                ["project-a"],
+                "Fais un rapport des fichiers dans ce projet",
+                top_k=8,
+            )
+
+            self.assertEqual(
+                {result["doc_name"] for result in results},
+                {"budget.md", "planning.md"},
+            )
+            self.assertTrue(all(result.get("coverage") for result in results))
+
+    def test_explain_this_document_uses_the_selected_file_overview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = RAGDocumentStore(Path(temp_dir) / "rag.db")
+            store.add_document(
+                "project-a",
+                "rapport.md",
+                (
+                    "# Introduction\nObjectif principal.\n\n"
+                    "# Conclusion\nResultat final."
+                ).encode("utf-8"),
+                file_id="report-file",
+            )
+            store.add_document(
+                "project-a",
+                "hors-sujet.md",
+                b"Ce contenu ne doit pas etre retenu.",
+                file_id="other-file",
+            )
+
+            results = store.search_scopes(
+                ["project-a"],
+                "Explique ce document de A à Z",
+                top_k=8,
+                file_ids=["report-file"],
+            )
+
+            self.assertTrue(results)
+            self.assertEqual(
+                {result["file_id"] for result in results},
+                {"report-file"},
+            )
+
     def test_legacy_index_remains_visible_previewable_and_targetable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = RAGDocumentStore(Path(temp_dir) / "rag.db")
@@ -244,6 +306,33 @@ class RichDocumentRAGTests(unittest.TestCase):
                 store.get_document(document["id"])["filename"],
                 "archive-renommee.md",
             )
+
+
+class FastDocumentIndexingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_pdf_skips_slow_visual_pass(self):
+        with (
+            patch.object(
+                server_main.rag_store,
+                "add_document",
+                return_value=4,
+            ),
+            patch.object(
+                server_main.rag_store,
+                "render_pdf_pages_for_vision",
+            ) as render_for_vision,
+        ):
+            chunks, metadata = await server_main._index_project_pdf(
+                scope_id="project-a",
+                filename="rapport.pdf",
+                content=b"%PDF-1.7\n",
+                file_id="file-a",
+                mime_type="application/pdf",
+            )
+
+        self.assertEqual(chunks, 4)
+        self.assertEqual(metadata["indexer"], "document_parser")
+        self.assertEqual(metadata["vision_status"], "not_required")
+        render_for_vision.assert_not_called()
 
 
 if __name__ == "__main__":
