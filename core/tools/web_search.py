@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 import re
@@ -29,6 +30,7 @@ from core.tools.search_ranking import (
     source_family,
     search_terms,
 )
+from core.tools import monid_provider
 
 logger = logging.getLogger("WebSearch")
 MAX_PAGE_BYTES = 1_000_000
@@ -1738,6 +1740,7 @@ def search_web_detailed(
                         "round_details": search_rounds,
                         "provider_order": [
                             "Perplexity Sonar",
+                            "monid",
                             "Domain specialist",
                             "SearXNG",
                             "Brave Search",
@@ -1794,6 +1797,85 @@ def search_web_detailed(
                 "status": (
                     "skipped_verification_retry"
                     if skip_primary_provider
+                    else "not_configured"
+                ),
+            }
+        )
+
+    # 2b. Monid (tinyfish gateway) is the first link provider of the chain
+    # once the primary grounded provider had its chance. An empty or failing
+    # Monid must never break the search: any error or empty payload falls
+    # through to the local chain below.
+    if (
+        force_full_chain or not selected["strategy"]["sufficient"]
+    ) and monid_provider.is_available():
+        monid_query = (
+            _focused_official_query(cleaned_query, official_domains)
+            if official_domains
+            else cleaned_query
+        )
+        try:
+            logger.info("Executing Monid search for %r", monid_query)
+            monid_links = asyncio.run(
+                monid_provider.search_links(
+                    monid_query,
+                    plan["candidate_limit"],
+                )
+            )
+            monid_results = [
+                {
+                    "title": str(link.get("title") or link["url"])[:200],
+                    "snippet": str(link.get("snippet") or "")[:600],
+                    "url": str(link["url"]).strip(),
+                    "engine": "monid",
+                }
+                for link in monid_links
+                if isinstance(link, dict) and str(link.get("url") or "").strip()
+            ]
+            candidates.extend(monid_results)
+            if monid_results:
+                engines_used.append("monid")
+            search_rounds.append(
+                {
+                    "engine": "monid",
+                    "kind": "gateway",
+                    "query": monid_query,
+                    "returned": len(monid_results),
+                }
+            )
+            provider_attempts.append(
+                {
+                    "provider": "monid",
+                    "status": "ok" if monid_results else "empty",
+                }
+            )
+            selected = _adaptive_report(
+                candidates,
+                cleaned_query,
+                official_domains,
+                max_results=max_results,
+            )
+        except Exception as exc:
+            errors.append(f"monid: {type(exc).__name__}")
+            provider_attempts.append(
+                {
+                    "provider": "monid",
+                    "status": "fallback",
+                    "reason": "unexpected_error",
+                }
+            )
+            logger.warning(
+                "[monid] search failed for %r: %s",
+                cleaned_query,
+                exc,
+            )
+    else:
+        provider_attempts.append(
+            {
+                "provider": "monid",
+                "status": (
+                    "skipped_sufficient"
+                    if selected["strategy"]["sufficient"]
                     else "not_configured"
                 ),
             }
@@ -2259,6 +2341,7 @@ def search_web_detailed(
             "round_details": search_rounds,
             "provider_order": [
                 "Perplexity Sonar",
+                "monid",
                 "Domain specialist",
                 "SearXNG",
                 "Brave Search",
