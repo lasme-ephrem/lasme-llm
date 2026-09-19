@@ -50,12 +50,21 @@ class EventLog:
         return [event.to_dict() for event in self.events]
 
     def usage_totals(self) -> Dict[str, int]:
-        prompt = completion = 0
+        prompt = completion = eval_ns = prompt_eval_ns = 0
         for event in self.events:
             if event.type == TURN_END:
                 prompt += int(event.payload.get("prompt_tokens") or 0)
                 completion += int(event.payload.get("output_tokens") or 0)
-        return {"prompt_tokens": prompt, "output_tokens": completion}
+                eval_ns += int(event.payload.get("eval_duration_ns") or 0)
+                prompt_eval_ns += int(
+                    event.payload.get("prompt_eval_duration_ns") or 0
+                )
+        return {
+            "prompt_tokens": prompt,
+            "output_tokens": completion,
+            "eval_duration_ns": eval_ns,
+            "prompt_eval_duration_ns": prompt_eval_ns,
+        }
 
     def tool_calls(self) -> list[Dict[str, Any]]:
         return [

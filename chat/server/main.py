@@ -3961,14 +3961,17 @@ async def chat_stream(req: ChatRequest):
                     full_assistant_reply, known_urls
                 )
             elapsed = time.monotonic() - generation_started_at
-            gen_seconds = (
-                (time.monotonic() - first_content_at) if first_content_at else 0.0
-            )
+            # Σ des temps de décodage réels de chaque appel modèle, mesurés
+            # par le client (hors exécution d'outils) : le tok/s affiché est
+            # la vitesse de décodage effective, cohérente avec les tours.
+            decode_ns = int(agent_result.usage.get("eval_duration_ns") or 0)
             synthetic_final_chunk = {
                 "eval_count": agent_result.usage.get("output_tokens", 0),
                 "prompt_eval_count": agent_result.usage.get("prompt_tokens", 0),
-                "eval_duration": int(gen_seconds * 1e9),
-                "prompt_eval_duration": int(max(elapsed - gen_seconds, 0.0) * 1e9),
+                "eval_duration": decode_ns,
+                "prompt_eval_duration": int(
+                    agent_result.usage.get("prompt_eval_duration_ns") or 0
+                ),
                 "total_duration": int(elapsed * 1e9) + 1,
                 "done_reason": agent_result.done_reason,
             }

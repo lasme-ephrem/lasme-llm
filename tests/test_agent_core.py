@@ -391,7 +391,15 @@ class EventLogTests(unittest.TestCase):
         self.assertIn('"type": "final"', sse)
         self.assertTrue(sse.endswith("\n\n"))
 
-        self.assertEqual(log.usage_totals(), {"prompt_tokens": 90, "output_tokens": 20})
+        self.assertEqual(
+            log.usage_totals(),
+            {
+                "prompt_tokens": 90,
+                "output_tokens": 20,
+                "eval_duration_ns": 0,
+                "prompt_eval_duration_ns": 0,
+            },
+        )
         self.assertEqual(len(log.tool_calls()), 1)
         self.assertEqual(log.find_final(), "ok")
 
