@@ -1238,6 +1238,17 @@ body.sidebar-resizing {
     color: color-mix(in srgb, var(--text-primary, #0d0d0d) 72%, transparent);
 }
 
+/* Le texte de raisonnement est un <pre> : sans cette surcharge, la règle
+   ".bubble pre { background: var(--code-bg) !important }" le peint en sombre. */
+.bubble .thinking-panel .thinking-text {
+    background: transparent !important;
+    color: color-mix(in srgb, var(--text-primary, #0d0d0d) 72%, transparent) !important;
+    padding: 0.7rem 0.95rem 0.8rem !important;
+    overflow-x: hidden !important;
+    font-family: var(--font-main) !important;
+    font-size: 12px !important;
+}
+
 /* Fade-out gradient at the bottom while streaming and scrollable */
 .thinking-panel.streaming .thinking-text.is-scrollable {
     -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 78%, transparent 100%);
