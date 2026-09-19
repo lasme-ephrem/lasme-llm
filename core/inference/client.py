@@ -36,6 +36,7 @@ _THINK_TO_EFFORT = {
     "low": "low",
     "medium": "medium",
     "high": "high",
+    "max": "high",
 }
 
 

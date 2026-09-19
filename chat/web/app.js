@@ -1,6 +1,6 @@
 let API_BASE = "/api";
 const LASME_FAST_MODEL = "lasme-smol-fast";
-const LASME_REASONING_MODEL = "lasme-qwen-vision";
+const LASME_REASONING_MODEL = "gemma-4-e4b"; // génération de prompts image (profil rapide)
 
 // A Cloudflared/reverse-proxy URL can be opened once with ?token=... .
 // The token is moved to sessionStorage immediately and never persisted across
