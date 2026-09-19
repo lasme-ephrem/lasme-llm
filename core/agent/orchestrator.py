@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from core.agent import events as ev
 from core.agent.tools import ToolRegistry, ToolResult
+from core.agent.tools_web import pick_urls_for_reading
 
 MAX_TOOL_BUDGET = 12_288
 LOOP_SIGNATURE_REPEATS = 3
@@ -35,6 +37,13 @@ class AgentConfig:
     think: Any = "low"
     system_prompt: str = ""
     max_parallel_tools: int = 3
+    # Harness rule: after a web_search, the model MUST read at least one
+    # page (fetch_pages) before answering. Snippets alone are how stale
+    # index results and training priors sneak into answers.
+    require_fetch_after_search: bool = False
+    # Harness rule: when the request (or the user explicitly) demands a
+    # web search, answering without any search is bounced once.
+    force_search_directive: bool = False
 
 
 @dataclass
@@ -154,6 +163,11 @@ class AgentOrchestrator:
         signatures: Dict[str, int] = {}
         budget = self.config.initial_tool_budget
         length_retry_used = False
+        search_fired = False
+        fetch_fired = False
+        fetch_nudge_used = False
+        search_nudge_used = False
+        last_search_output = ""
         final_text = ""
         done_reason = "max_turns"
         turns_used = 0
@@ -195,6 +209,119 @@ class AgentOrchestrator:
                             },
                         )
                         continue
+                    if (
+                        self.config.require_fetch_after_search
+                        and search_fired
+                        and not fetch_fired
+                        and not fetch_nudge_used
+                        and final_text.strip()
+                    ):
+                        # Harness rule: the model answered from snippets
+                        # without reading a single page. The orchestrator
+                        # does the reading itself: top URLs of the last
+                        # search are fetched here and their content is
+                        # injected into the context. No model discretion.
+                        fetch_nudge_used = True
+                        final_text = ""
+                        top_urls = pick_urls_for_reading(
+                            last_search_output or "", max_urls=4
+                        )
+                        if top_urls and self.registry.get("fetch_pages"):
+                            fetch_result = await self.registry.execute(
+                                "fetch_pages",
+                                json.dumps({"urls": top_urls}),
+                            )
+                            await emit(
+                                ev.TOOL_CALL,
+                                {
+                                    "id": "auto_fetch",
+                                    "name": "fetch_pages",
+                                    "arguments": json.dumps({"urls": top_urls}),
+                                    "repeat": 1,
+                                    "auto": True,
+                                },
+                            )
+                            await emit(
+                                ev.TOOL_RESULT,
+                                {
+                                    "id": "auto_fetch",
+                                    "name": "fetch_pages",
+                                    "ok": fetch_result.ok,
+                                    "output": fetch_result.output,
+                                    "error": fetch_result.error,
+                                    "error_code": fetch_result.error_code,
+                                    "duration_ms": fetch_result.duration_ms,
+                                },
+                            )
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Système : tu avais répondu sans lire "
+                                        "les pages — interdit. Voici le contenu "
+                                        "des pages les plus pertinentes de ta "
+                                        "recherche, récupéré automatiquement. "
+                                        "Réponds maintenant UNIQUEMENT à partir "
+                                        "de ce contenu. Si une page contredit "
+                                        "ta mémoire, LA PAGE GAGNE (elle est "
+                                        "plus récente que toi). Si aucune page "
+                                        "ne répond à la question, relance "
+                                        "web_search avec une requête plus "
+                                        "précise (ex : « résultat final … »).\n\n"
+                                        + fetch_result.output
+                                    ),
+                                }
+                            )
+                            continue
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Système : tu as lancé une recherche Web "
+                                    "mais tu n'as lu AUCUNE page. Les extraits "
+                                    "seuls ne suffisent pas (index périmés, "
+                                    "articles ambigus). Utilise fetch_pages sur "
+                                    "au moins une URL des résultats, puis "
+                                    "réponds en te basant sur ce que tu as lu. "
+                                    "Si aucun résultat ne répond à la question, "
+                                    "relance web_search avec une requête plus "
+                                    "précise."
+                                ),
+                            }
+                        )
+                        await emit(
+                            ev.TOOL_RESULT,
+                            {"note": "fetch_required_before_answer"},
+                        )
+                        continue
+                    if (
+                        self.config.force_search_directive
+                        and not search_fired
+                        and not search_nudge_used
+                        and final_text.strip()
+                    ):
+                        # Harness rule: the request demanded a web search
+                        # but the model answered from training memory.
+                        search_nudge_used = True
+                        final_text = ""
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Système : cette demande exige une "
+                                    "recherche Web et tu n'as appelé aucun "
+                                    "outil. Ta mémoire d'entraînement peut "
+                                    "être périmée ou fausse ici. Utilise "
+                                    "web_search maintenant, puis fetch_pages "
+                                    "sur les résultats, avant de répondre."
+                                ),
+                            }
+                        )
+                        await emit(
+                            ev.TOOL_RESULT,
+                            {"note": "search_required_by_request"},
+                        )
+                        continue
                     done_reason = outcome["done_reason"]
                     break
 
@@ -212,6 +339,10 @@ class AgentOrchestrator:
                 for call in executable:
                     name = (call.get("function") or {}).get("name", "")
                     arguments = (call.get("function") or {}).get("arguments", "")
+                    if name == "web_search":
+                        search_fired = True
+                    if name == "fetch_pages":
+                        fetch_fired = True
                     signature = self._tool_call_signature(call)
                     repeats = signatures.get(signature, 0) + 1
                     signatures[signature] = repeats
@@ -236,6 +367,8 @@ class AgentOrchestrator:
                         )
                     else:
                         result = await self.registry.execute(name, arguments)
+                    if name == "web_search" and result.ok:
+                        last_search_output = result.output
                     await emit(
                         ev.TOOL_RESULT,
                         {
