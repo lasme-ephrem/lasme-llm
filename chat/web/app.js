@@ -1546,6 +1546,7 @@ async function sendChatMessage(options = {}) {
     let generationStatsMeta = null;
     
     let reasoningDuration = null;
+    const agentToolEvents = [];
 
     const streamController = new AbortController();
     let streamKey = initialStreamKey;
@@ -1821,6 +1822,30 @@ async function sendChatMessage(options = {}) {
                             parsed.summary || ""
                         );
                     }
+                    if (parsed.type === "agent_tool_call") {
+                        agentToolEvents.push(parsed);
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "tools",
+                            "active",
+                            `Outil · ${parsed.name || "?"}`,
+                            shortToolArgs(parsed.arguments)
+                        );
+                    }
+                    if (parsed.type === "agent_tool_result") {
+                        agentToolEvents.push(parsed);
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "tools",
+                            parsed.ok ? "done" : "warning",
+                            `Outil · ${parsed.name || "?"}`,
+                            parsed.ok
+                                ? (parsed.duration_ms
+                                    ? `${parsed.duration_ms} ms`
+                                    : "terminé")
+                                : (parsed.error_code || "échec")
+                        );
+                    }
                     if (parsed.type === "generation_stats") {
                         generationStatsMeta = parsed;
                     }
@@ -1908,6 +1933,12 @@ async function sendChatMessage(options = {}) {
                                 generationStatsMeta
                             );
                         }
+                        if (agentToolEvents.length) {
+                            renderAgentToolsSummary(
+                                assistantBubble,
+                                agentToolEvents
+                            );
+                        }
                         followStreamingResponse(
                             userMessage,
                             assistantMessage
@@ -1951,6 +1982,9 @@ async function sendChatMessage(options = {}) {
             }
             if (isStreamVisible()) {
                 renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
+                if (agentToolEvents.length) {
+                    renderAgentToolsSummary(assistantBubble, agentToolEvents);
+                }
             }
             streamConversationHistory.push({ role: "assistant", content: fullResponse });
         } else {
@@ -2119,6 +2153,65 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
         </div>
         ${safeDetail ? `<div class="assistant-activity-detail">${safeDetail}</div>` : ""}
     `;
+}
+
+function shortToolArgs(raw) {
+    try {
+        const text = JSON.stringify(JSON.parse(raw || "{}"));
+        return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+    } catch {
+        return (raw || "").slice(0, 160);
+    }
+}
+
+function renderAgentToolsSummary(container, events) {
+    container.querySelector(".agent-tools-group")?.remove();
+    const calls = new Map();
+    for (const event of events) {
+        if (event.type === "agent_tool_call") {
+            calls.set(event.id ?? calls.size, { call: event, result: null });
+        } else if (event.type === "agent_tool_result") {
+            const entry = calls.get(event.id)
+                || [...calls.values()].find((candidate) => !candidate.result);
+            if (entry) entry.result = event;
+        }
+    }
+    if (!calls.size) return;
+    const group = document.createElement("div");
+    group.className = "agent-tools-group";
+    for (const { call, result } of calls.values()) {
+        const card = document.createElement("details");
+        card.className = `agent-tool-card ${result && !result.ok ? "ko" : "ok"}`;
+        const summary = document.createElement("summary");
+        const meta = result
+            ? (result.ok
+                ? (result.duration_ms ? `${result.duration_ms} ms` : "< 5 ms")
+                : (result.error_code || "échec"))
+            : "…";
+        summary.textContent = `${call.name || "?"} — ${meta}`;
+        const args = document.createElement("pre");
+        args.className = "agent-tool-args";
+        try {
+            args.textContent = JSON.stringify(
+                JSON.parse(call.arguments || "{}"), null, 2
+            );
+        } catch {
+            args.textContent = call.arguments || "";
+        }
+        card.append(summary, args);
+        if (result) {
+            const output = document.createElement("pre");
+            output.className = "agent-tool-output";
+            output.textContent = result.ok
+                ? (result.output || "(vide)")
+                : `${result.error_code || "erreur"} : ${result.error || ""}`;
+            card.appendChild(output);
+            if (!result.ok) card.open = true;
+        }
+        group.appendChild(card);
+    }
+    container.querySelector(".assistant-activity[data-kind=\"tools\"]")?.remove();
+    container.prepend(group);
 }
 
 function formatPerformanceNumber(value, maximumFractionDigits = 1) {
