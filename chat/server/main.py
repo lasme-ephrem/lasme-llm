@@ -27,7 +27,11 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional, Literal, Iterator
 
 from core.inference.client import LasmeLLMClient
-from core.inference.profiles import get_model_profile
+from core.inference.profiles import (
+    LEGACY_MODEL_ALIASES,
+    RUNTIME_PROFILES,
+    get_model_profile,
+)
 from core.config import settings
 from core.tools.web_search import format_search_results
 from core.tools.search_providers import detect_search_vertical
@@ -218,6 +222,10 @@ def _allowed_model_names() -> set[str]:
             settings.fast_model,
             settings.vision_model,
             *settings.extra_models,
+            # v2 runtime profiles plus every legacy name still stored in
+            # old sessions/projects; the inference client resolves them.
+            *RUNTIME_PROFILES,
+            *LEGACY_MODEL_ALIASES,
         }
         if name
     }

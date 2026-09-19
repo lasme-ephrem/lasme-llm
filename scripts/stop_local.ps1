@@ -60,4 +60,10 @@ if ($searxEnabled -and $docker) {
     Write-Host "OK - SearXNG arrete."
 }
 
-Write-Host "Ollama reste actif pour vos autres applications locales."
+$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+if (Test-Path -LiteralPath $python) {
+    & $python -m scripts.serve stop
+}
+else {
+    Write-Warning "Environnement Python absent : llama-server n'a pas ete arrete."
+}

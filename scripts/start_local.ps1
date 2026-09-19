@@ -25,32 +25,21 @@ else {
     }
 }
 
-$ollamaReady = $false
+$llamaReady = $false
 try {
     Invoke-RestMethod `
-        -Uri "http://127.0.0.1:11434/api/tags" `
+        -Uri "http://127.0.0.1:8080/health" `
         -TimeoutSec 2 | Out-Null
-    $ollamaReady = $true
+    $llamaReady = $true
 }
 catch {
 }
-if (-not $ollamaReady) {
-    $ollamaCommand = Get-Command ollama -ErrorAction SilentlyContinue
-    $ollama = if ($ollamaCommand) {
-        $ollamaCommand.Source
+if (-not $llamaReady) {
+    Write-Host "Demarrage du runtime llama.cpp (router multi-modeles)..."
+    & $python -m scripts.serve start
+    if ($LASTEXITCODE -ne 0) {
+        throw "Le runtime llama.cpp n'a pas demarre (voir .runtime\llama\llama-server.log)."
     }
-    else {
-        Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-    }
-    if (-not (Test-Path -LiteralPath $ollama)) {
-        throw "Ollama est introuvable. Installez Ollama avant de demarrer Lasme LLM."
-    }
-    Start-Process `
-        -FilePath $ollama `
-        -ArgumentList "serve" `
-        -WorkingDirectory $projectRoot `
-        -WindowStyle Hidden | Out-Null
-    Start-Sleep -Seconds 2
 }
 
 $searxEnabled = $false
@@ -153,7 +142,7 @@ if ($health.status -ne "ok") {
 }
 
 Write-Host "OK - Lasme LLM est pret : http://127.0.0.1:8000/"
-Write-Host "  API : $($health.status) - Ollama : $($health.checks.ollama.status)"
+Write-Host "  API : $($health.status) - llama.cpp : $($health.checks.ollama.status)"
 Write-Host "  Runner Python : $($health.checks.runner.status)"
 if ($health.checks.ocr.status -ne "ok") {
     Write-Warning (

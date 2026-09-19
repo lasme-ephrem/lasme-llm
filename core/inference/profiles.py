@@ -1,12 +1,148 @@
+"""Runtime profiles for the llama.cpp v2 inference layer.
+
+Two concerns live here:
+
+- ``RuntimeProfile`` describes how a model is *served* by llama-server
+  (HF repo, context, KV quantization, speculative decoding, VRAM budget).
+  The supervisor derives the router INI preset from these.
+- ``ModelProfile`` keeps the legacy *chat tuning* shape (sampling,
+  history budget, system addendum) consumed by ``chat.server.main``.
+  ``get_model_profile`` maps any model string — including legacy Ollama
+  aliases — onto the v2 profiles so the existing server keeps working.
+
+All numbers come from Phase 0 measurements on the RTX 4070 Ti SUPER
+(16 GiB): see docs/BENCHMARKS_PHASE0.md.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Union
 
+QUALITY_MODEL = "gemma-4-12b"
+FAST_MODEL = "gemma-4-e4b"
+MINIMAL_MODEL = "gemma-4-e2b"
+MAX_CONTEXT_MODEL = "gemma-4-12b-256k"
+
+# Model names that may still be stored in old sessions/projects. They are
+# accepted by the API and resolved onto the v2 profiles, never rejected.
+LEGACY_MODEL_ALIASES = frozenset(
+    {
+        "gemma-4-chat",
+        "gemma-4-fable",
+        "lasme-smol-fast",
+        "lasme-qwen-vision",
+        "muse-glimmer:30b-q4_K_M-dflash",
+    }
+)
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    """Serving description of one model behind the llama.cpp router."""
+
+    id: str
+    hf_repo: str
+    context: int
+    vram_budget_mib: int
+    resident: bool = False
+    kv_quant: str = "f16"  # q4_0 forbidden: degrades tool calling
+    mtp: bool = True
+    mtp_n: int = 4
+    description: str = ""
+
+    @property
+    def hf_ref(self) -> str:
+        return self.hf_repo
+
+    def preset_section(self) -> Dict[str, Any]:
+        """INI keys for the router preset (see core/inference/preset.py)."""
+        section: Dict[str, Any] = {
+            "hf-repo": self.hf_repo,
+            "c": self.context,
+        }
+        if self.kv_quant != "f16":
+            section["cache-type-k"] = self.kv_quant
+            section["cache-type-v"] = self.kv_quant
+        if self.mtp:
+            section["spec-type"] = "draft-mtp"
+            section["spec-draft-n-max"] = self.mtp_n
+        if self.resident:
+            section["load-on-startup"] = True
+        return section
+
+
+# Phase 0 measured: 12B + MTP4 + 128K f16 KV = 12.9 GiB total GPU.
+RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
+    profile.id: profile
+    for profile in [
+        RuntimeProfile(
+            id=QUALITY_MODEL,
+            hf_repo="unsloth/gemma-4-12B-it-qat-GGUF:UD-Q4_K_XL",
+            context=131_072,
+            vram_budget_mib=13_100,
+            resident=False,  # loaded on demand (~27 s), E-models stay resident
+            description="12B QAT — qualité/agent, 211 tok/s mesurés",
+        ),
+        RuntimeProfile(
+            id=FAST_MODEL,
+            hf_repo="unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL",
+            context=65_536,
+            vram_budget_mib=8_200,
+            resident=True,
+            description="E4B QAT — vitesse, 129 tok/s mesurés",
+        ),
+        RuntimeProfile(
+            id=MINIMAL_MODEL,
+            hf_repo="unsloth/gemma-4-E2B-it-qat-GGUF:UD-Q4_K_XL",
+            context=32_768,
+            vram_budget_mib=4_800,
+            resident=True,
+            description="E2B QAT — minimal viable, 214 tok/s mesurés",
+        ),
+        RuntimeProfile(
+            id=MAX_CONTEXT_MODEL,
+            hf_repo="unsloth/gemma-4-12B-it-qat-GGUF:UD-Q4_K_XL",
+            context=262_144,
+            vram_budget_mib=13_700,
+            resident=False,
+            kv_quant="q8_0",
+            description="12B QAT — 256K tokens, 162 tok/s mesurés",
+        ),
+    ]
+}
+
+
+def resolve_runtime_profile(model: str | None) -> RuntimeProfile:
+    """Map any model string (v2 id or legacy Ollama alias) to a profile.
+
+    Legacy names collapse onto the v2 trio: the platform exposes three
+    speeds of the same Gemma 4 family instead of heterogeneous models.
+    """
+    normalized = (model or "").lower()
+    if "256k" in normalized or "max-context" in normalized:
+        return RUNTIME_PROFILES[MAX_CONTEXT_MODEL]
+    if "e2b" in normalized or "minimal" in normalized:
+        return RUNTIME_PROFILES[MINIMAL_MODEL]
+    if "e4b" in normalized or "smol" in normalized or "fast" in normalized:
+        return RUNTIME_PROFILES[FAST_MODEL]
+    # gemma-4-chat, muse-glimmer, qwen-vision, fable, unknown → quality.
+    return RUNTIME_PROFILES[QUALITY_MODEL]
+
+
+def resident_profiles(vram_total_mib: int | None = None) -> list[RuntimeProfile]:
+    """Profiles to preload, adapted to the detected GPU budget."""
+    if vram_total_mib is None or vram_total_mib >= 14_000:
+        return [RUNTIME_PROFILES[FAST_MODEL], RUNTIME_PROFILES[MINIMAL_MODEL]]
+    if vram_total_mib >= 7_000:
+        return [RUNTIME_PROFILES[MINIMAL_MODEL]]
+    # Very small GPUs: serve only the minimal profile, reduced context.
+    return [RUNTIME_PROFILES[MINIMAL_MODEL]]
+
 
 @dataclass(frozen=True)
 class ModelProfile:
-    """Runtime settings tuned for one local model and the available GPU."""
+    """Legacy chat-tuning shape consumed by chat.server.main."""
 
     temperature: float
     num_ctx: int
@@ -16,130 +152,57 @@ class ModelProfile:
     think: Union[bool, str] = True
     keep_alive: Union[str, int] = "15m"
     options: Dict[str, Any] = field(default_factory=dict)
+    runtime_id: str = QUALITY_MODEL
 
 
-# Gemma 4 Chat remains the resident general model. Its authors recommend
-# temperature=1, top_p=.95 and top_k=64. The 65,536-token profile was measured
-# successfully on the RTX 4070 Ti SUPER with 16 GiB of VRAM.
-GEMMA_CHAT_PROFILE = ModelProfile(
-    temperature=1.0,
-    num_ctx=65_536,
+GEMMA4_CHAT_PROFILE = ModelProfile(
+    temperature=0.7,
+    num_ctx=131_072,
     num_predict=8_192,
-    history_tokens=48_000,
+    history_tokens=60_000,
     system_addendum=(
-        "Tu utilises le profil généraliste Gemma 4 Chat. Privilégie une "
-        "conversation naturelle, une synthèse solide et des explications "
-        "adaptées au niveau de l'utilisateur. Pour une question complexe, "
-        "raisonne silencieusement avant de donner une réponse nette."
+        "Tu utilises le profil Gemma 4 12B de Lasme. Produis des réponses "
+        "naturelles, structurées et exactes. Pour une question complexe, "
+        "raisonne avant de répondre et vérifie tes affirmations."
     ),
-    # Ollama accepts -1 as a numeric sentinel for an indefinitely resident
-    # model. The string "-1" is parsed as a duration and rejected because it
-    # has no unit.
-    keep_alive=-1,
-    options={
-        "top_p": 0.95,
-        "top_k": 64,
-        "repeat_penalty": 1.1,
-        "repeat_last_n": 256,
-    },
+    options={"top_p": 0.95, "top_k": 64},
+    runtime_id=QUALITY_MODEL,
 )
 
-SMOL_FAST_PROFILE = ModelProfile(
-    temperature=0.45,
-    num_ctx=32_768,
+GEMMA4_FAST_PROFILE = ModelProfile(
+    temperature=0.5,
+    num_ctx=65_536,
     num_predict=4_096,
-    history_tokens=22_000,
+    history_tokens=30_000,
     system_addendum=(
-        "Tu utilises le profil Lasme Rapide basé sur SmolLM3. Donne une "
-        "réponse concise, structurée et exacte. Utilise le raisonnement long "
-        "seulement lorsqu’il apporte un gain réel."
+        "Tu utilises le profil Lasme Rapide basé sur Gemma 4 E4B. Donne "
+        "une réponse concise, structurée et exacte."
     ),
     think=False,
-    keep_alive="20m",
-    options={
-        "top_p": 0.9,
-        "top_k": 40,
-        "repeat_penalty": 1.08,
-        "repeat_last_n": 256,
-    },
+    options={"top_p": 0.9, "top_k": 40},
+    runtime_id=FAST_MODEL,
 )
 
-QWEN_VISION_PROFILE = ModelProfile(
-    temperature=0.35,
-    num_ctx=16_384,
-    num_predict=6_144,
-    history_tokens=10_500,
+GEMMA4_MINIMAL_PROFILE = ModelProfile(
+    temperature=0.5,
+    num_ctx=32_768,
+    num_predict=3_072,
+    history_tokens=16_000,
     system_addendum=(
-        "Tu utilises le profil Lasme Vision basé sur Qwen3-VL. Analyse les "
-        "images, documents visuels, tableaux, interfaces et graphiques avec "
-        "précision. Pour le texte et le code, distingue les observations "
-        "certaines des déductions et vérifie le résultat avant de répondre."
+        "Tu utilises le profil Lasme Minimal basé sur Gemma 4 E2B. "
+        "Réponds de façon courte et directe."
     ),
     think=False,
-    keep_alive="8m",
-    options={
-        "top_p": 0.9,
-        "top_k": 40,
-        "repeat_penalty": 1.08,
-        "repeat_last_n": 256,
-    },
-)
-
-GEMMA_FABLE_PROFILE = ModelProfile(
-    temperature=1.0,
-    num_ctx=65_536,
-    num_predict=8_192,
-    history_tokens=48_000,
-    system_addendum=(
-        "Tu utilises le profil technique et agentique Gemma 4 Fable. Pour les "
-        "problèmes complexes, inspecte d'abord les éléments disponibles, "
-        "distingue faits et hypothèses, construis une solution en plusieurs "
-        "étapes puis vérifie le résultat avant de répondre. N'invente jamais "
-        "un fichier, une commande exécutée, un résultat d'outil ou une source."
-    ),
-    options={
-        "top_p": 0.95,
-        "top_k": 64,
-        "repeat_penalty": 1.1,
-        "repeat_last_n": 256,
-    },
-)
-
-# Muse Glimmer 30B (q4_K_M-dflash) is the resident agentic model. Measured
-# on the RTX 4070 Ti SUPER with 16 GiB of VRAM: ~19 tok/s with flash
-# attention, ~15.9/16.4 GiB VRAM. The DFlash draft needs Ollama's automatic
-# GPU offload: forcing num_gpu breaks llama.cpp memory fitting, so the client
-# must NOT send num_gpu for this model. A 16K context keeps the KV cache
-# small enough for the 18 GB of weights + the 1.6 GB DFlash draft.
-GLIMMER_PROFILE = ModelProfile(
-    temperature=0.35,
-    num_ctx=16_384,
-    num_predict=8_192,
-    history_tokens=12_000,
-    system_addendum=(
-        "Tu utilises le profil agentique Muse Glimmer. Pour toute question "
-        "factuelle ou récente, utilise les outils de recherche Web quand ils "
-        "sont disponibles et vérifie tes affirmations. Distingue ce que tu "
-        "sais de ce que tu déduis. Produis des réponses sourcées et nettes."
-    ),
-    keep_alive="15m",
-    options={
-        "top_p": 0.9,
-        "top_k": 40,
-        "repeat_penalty": 1.08,
-        "repeat_last_n": 256,
-    },
+    options={"top_p": 0.9, "top_k": 40},
+    runtime_id=MINIMAL_MODEL,
 )
 
 
 def get_model_profile(model: str) -> ModelProfile:
-    normalized = (model or "").lower()
-    if "glimmer" in normalized:
-        return GLIMMER_PROFILE
-    if "smol" in normalized:
-        return SMOL_FAST_PROFILE
-    if "qwen" in normalized or "vision" in normalized:
-        return QWEN_VISION_PROFILE
-    if "fable" in normalized:
-        return GEMMA_FABLE_PROFILE
-    return GEMMA_CHAT_PROFILE
+    """Legacy entry point: chat tuning for any model string."""
+    runtime = resolve_runtime_profile(model)
+    if runtime.id == FAST_MODEL:
+        return GEMMA4_FAST_PROFILE
+    if runtime.id == MINIMAL_MODEL:
+        return GEMMA4_MINIMAL_PROFILE
+    return GEMMA4_CHAT_PROFILE

@@ -17,6 +17,23 @@ class Settings(BaseModel):
     app_name: str = "Lasme LLM"
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+    # llama.cpp runtime (v2). The supervisor launches llama-server in
+    # router mode from these settings; the client talks OpenAI-compatible
+    # HTTP to llama_base_url.
+    llama_server_path: str = os.getenv("LLAMA_SERVER_PATH", "")
+    llama_base_url: str = os.getenv(
+        "LLAMA_BASE_URL",
+        "http://"
+        + os.getenv("LLAMA_HOST", "127.0.0.1")
+        + ":"
+        + os.getenv("LLAMA_PORT", "8080"),
+    )
+    llama_host: str = os.getenv("LLAMA_HOST", "127.0.0.1")
+    llama_port: int = int(os.getenv("LLAMA_PORT", "8080"))
+    llama_models_max: int = int(os.getenv("LLAMA_MODELS_MAX", "2"))
+    llama_startup_timeout: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
+    hf_cache_dir: str = os.getenv("HF_HOME", "")
+
     # Search Engine Configuration
     perplexity_api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
     perplexity_sonar_model: str = os.getenv("PERPLEXITY_SONAR_MODEL", "sonar")
@@ -33,12 +50,14 @@ class Settings(BaseModel):
         True,
     )
 
-    # Preferred models optimized for RTX 4070 Ti SUPER (16 GB VRAM)
-    coding_model: str = os.getenv("CODING_MODEL", "lasme-qwen-vision")
-    chat_model: str = os.getenv("CHAT_MODEL", "gemma-4-chat")
-    reasoning_model: str = os.getenv("REASONING_MODEL", "lasme-qwen-vision")
-    fast_model: str = os.getenv("FAST_MODEL", "lasme-smol-fast")
-    vision_model: str = os.getenv("VISION_MODEL", "lasme-qwen-vision")
+    # Preferred models (v2): profile ids served by the llama.cpp router.
+    # Vision is native on Gemma 4 (mmproj), so the quality profile covers
+    # chat, coding, reasoning and vision; E4B is the fast lane.
+    coding_model: str = os.getenv("CODING_MODEL", "gemma-4-12b")
+    chat_model: str = os.getenv("CHAT_MODEL", "gemma-4-12b")
+    reasoning_model: str = os.getenv("REASONING_MODEL", "gemma-4-12b")
+    fast_model: str = os.getenv("FAST_MODEL", "gemma-4-e4b")
+    vision_model: str = os.getenv("VISION_MODEL", "gemma-4-12b")
     # Additional models selectable in the UI without being defaults.
     extra_models: list[str] = [
         m.strip()

@@ -1,55 +1,62 @@
 import unittest
 
 from core.inference.profiles import (
-    GEMMA_CHAT_PROFILE,
-    GEMMA_FABLE_PROFILE,
+    FAST_MODEL,
+    GEMMA4_CHAT_PROFILE,
+    GEMMA4_FAST_PROFILE,
+    GEMMA4_MINIMAL_PROFILE,
+    MINIMAL_MODEL,
+    QUALITY_MODEL,
     get_model_profile,
+    resolve_runtime_profile,
 )
 
 
 class ModelProfileTests(unittest.TestCase):
     def test_selects_chat_profile_with_or_without_latest_tag(self):
+        self.assertIs(get_model_profile("gemma-4-chat"), GEMMA4_CHAT_PROFILE)
         self.assertIs(
-            get_model_profile("gemma-4-chat"),
-            GEMMA_CHAT_PROFILE,
-        )
-        self.assertIs(
-            get_model_profile("gemma-4-chat:latest"),
-            GEMMA_CHAT_PROFILE,
+            get_model_profile("gemma-4-chat:latest"), GEMMA4_CHAT_PROFILE
         )
 
-    def test_selects_fable_profile_with_or_without_latest_tag(self):
-        self.assertIs(
-            get_model_profile("gemma-4-fable"),
-            GEMMA_FABLE_PROFILE,
-        )
-        self.assertIs(
-            get_model_profile("gemma-4-fable:latest"),
-            GEMMA_FABLE_PROFILE,
-        )
+    def test_legacy_runtime_models_fall_back_to_quality(self):
+        # muse-glimmer, fable and qwen-vision were heterogeneous Ollama
+        # models; the v2 platform serves one Gemma 4 family and maps every
+        # legacy chat/agent alias onto the quality profile.
+        for legacy in (
+            "muse-glimmer:30b-q4_K_M-dflash",
+            "gemma-4-fable",
+            "lasme-qwen-vision",
+        ):
+            self.assertIs(get_model_profile(legacy), GEMMA4_CHAT_PROFILE)
+            self.assertEqual(
+                resolve_runtime_profile(legacy).id, QUALITY_MODEL, legacy
+            )
 
-    def test_selects_fast_and_vision_profiles(self):
+    def test_selects_fast_and_minimal_profiles(self):
         fast = get_model_profile("lasme-smol-fast")
-        vision = get_model_profile("lasme-qwen-vision")
-        self.assertLess(fast.num_ctx, GEMMA_CHAT_PROFILE.num_ctx)
+        minimal = get_model_profile(MINIMAL_MODEL)
+        self.assertIs(fast, GEMMA4_FAST_PROFILE)
+        self.assertIs(minimal, GEMMA4_MINIMAL_PROFILE)
+        self.assertLess(fast.num_ctx, GEMMA4_CHAT_PROFILE.num_ctx)
         self.assertFalse(fast.think)
-        self.assertFalse(vision.think)
-        self.assertIn("Vision", vision.system_addendum)
+        self.assertFalse(minimal.think)
+        self.assertTrue(fast.system_addendum)
 
-    def test_profiles_use_full_power_settings(self):
-        for profile in (GEMMA_CHAT_PROFILE, GEMMA_FABLE_PROFILE):
-            self.assertEqual(profile.num_ctx, 65_536)
-            self.assertEqual(profile.num_predict, 8_192)
-            self.assertEqual(profile.history_tokens, 48_000)
-            self.assertTrue(profile.think)
-            self.assertTrue(profile.system_addendum)
-            self.assertEqual(profile.options["top_p"], 0.95)
-            self.assertEqual(profile.options["top_k"], 64)
-            self.assertEqual(profile.options["repeat_penalty"], 1.1)
+    def test_quality_profile_uses_measured_phase0_settings(self):
+        # Context 128K and history budget sized from Phase 0 measurements
+        # (docs/BENCHMARKS_PHASE0.md): 128K fits in 12.9 GiB with MTP n=4.
+        self.assertEqual(GEMMA4_CHAT_PROFILE.num_ctx, 131_072)
+        self.assertEqual(GEMMA4_CHAT_PROFILE.num_predict, 8_192)
+        self.assertEqual(GEMMA4_CHAT_PROFILE.history_tokens, 60_000)
+        self.assertTrue(GEMMA4_CHAT_PROFILE.think)
+        self.assertEqual(GEMMA4_CHAT_PROFILE.options["top_p"], 0.95)
+        self.assertEqual(GEMMA4_CHAT_PROFILE.options["top_k"], 64)
 
-    def test_resident_chat_model_uses_ollama_numeric_sentinel(self):
-        self.assertEqual(GEMMA_CHAT_PROFILE.keep_alive, -1)
-        self.assertIsInstance(GEMMA_CHAT_PROFILE.keep_alive, int)
+    def test_profiles_carry_runtime_ids(self):
+        self.assertEqual(GEMMA4_CHAT_PROFILE.runtime_id, QUALITY_MODEL)
+        self.assertEqual(GEMMA4_FAST_PROFILE.runtime_id, FAST_MODEL)
+        self.assertEqual(GEMMA4_MINIMAL_PROFILE.runtime_id, MINIMAL_MODEL)
 
 
 if __name__ == "__main__":
