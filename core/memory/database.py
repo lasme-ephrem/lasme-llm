@@ -12,6 +12,9 @@ SCHEMA_VERSION = 2
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Espace principal"
 DEFAULT_PROJECT_DESCRIPTION = "Espace permanent pour vos conversations générales."
+# Modèle par défaut de la plateforme ; unique source de vérité pour le
+# schéma, les migrations et les valeurs de repli.
+DEFAULT_MODEL = "muse-glimmer:30b-q4_K_M-dflash"
 PROJECT_TYPES = {
     "general",
     "research",
@@ -122,13 +125,13 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            cursor.execute("""
+            cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     instructions TEXT NOT NULL DEFAULT '',
-                    default_model TEXT NOT NULL DEFAULT 'muse-glimmer:30b-q4_K_M-dflash',
+                    default_model TEXT NOT NULL DEFAULT '{DEFAULT_MODEL}',
                     memory_mode TEXT NOT NULL DEFAULT 'project',
                     project_type TEXT NOT NULL DEFAULT 'general',
                     tags TEXT NOT NULL DEFAULT '[]',
@@ -144,12 +147,13 @@ class DatabaseManager:
                 INSERT OR IGNORE INTO projects
                     (id, name, description, instructions, default_model,
                      memory_mode, created_at, updated_at)
-                VALUES (?, ?, ?, '', 'muse-glimmer:30b-q4_K_M-dflash', 'global', ?, ?)
+                VALUES (?, ?, ?, '', ?, 'global', ?, ?)
                 """,
                 (
                     DEFAULT_PROJECT_ID,
                     DEFAULT_PROJECT_NAME,
                     DEFAULT_PROJECT_DESCRIPTION,
+                    DEFAULT_MODEL,
                     now,
                     now,
                 ),
@@ -193,12 +197,14 @@ class DatabaseManager:
                 ),
             )
             cursor.execute(
-                "UPDATE projects SET default_model = 'muse-glimmer:30b-q4_K_M-dflash' "
-                "WHERE default_model IN ('gemma-4-fable', 'gemma-4-chat')"
+                "UPDATE projects SET default_model = ? "
+                "WHERE default_model IN ('gemma-4-fable', 'gemma-4-chat')",
+                (DEFAULT_MODEL,),
             )
             cursor.execute(
-                "UPDATE sessions SET model = 'muse-glimmer:30b-q4_K_M-dflash' "
-                "WHERE model IN ('gemma-4-fable', 'gemma-4-chat')"
+                "UPDATE sessions SET model = ? "
+                "WHERE model IN ('gemma-4-fable', 'gemma-4-chat')",
+                (DEFAULT_MODEL,),
             )
             session_columns = {
                 row["name"]
@@ -530,7 +536,7 @@ class DatabaseManager:
         *,
         description: str = "",
         instructions: str = "",
-        default_model: str = "muse-glimmer:30b-q4_K_M-dflash",
+        default_model: str = DEFAULT_MODEL,
         memory_mode: str = "project",
         project_type: str = "general",
         tags: Optional[List[str]] = None,

@@ -8,6 +8,7 @@ from chat.server import main as server_main
 from core.artifacts.store import ArtifactStore
 from core.files.store import ProjectFileStore
 from core.memory.database import (
+    DEFAULT_MODEL,
     DEFAULT_PROJECT_DESCRIPTION,
     DEFAULT_PROJECT_ID,
     DEFAULT_PROJECT_NAME,
@@ -38,7 +39,7 @@ class ProjectConversationTests(unittest.TestCase):
                 DEFAULT_PROJECT_DESCRIPTION,
             )
             self.assertEqual(project["instructions"], "")
-            self.assertEqual(project["default_model"], "gemma-4-chat")
+            self.assertEqual(project["default_model"], DEFAULT_MODEL)
             self.assertEqual(project["memory_mode"], "off")
             self.assertFalse(manager.delete_project(DEFAULT_PROJECT_ID))
 
@@ -63,7 +64,7 @@ class ProjectConversationTests(unittest.TestCase):
 
             self.assertEqual(
                 migrated.get_session(session["id"])["model"],
-                "gemma-4-chat",
+                DEFAULT_MODEL,
             )
             connection = sqlite3.connect(database_path)
             try:
