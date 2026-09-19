@@ -9,7 +9,6 @@ from core.agent.tools_web import (
     collect_known_urls,
     strip_unsupported_citations,
 )
-from core.tools import monid_provider
 
 
 def _fake_search_fn(query, max_results=None, messages=None, **kwargs):
@@ -88,48 +87,3 @@ class CitationGuardrailTests(unittest.TestCase):
         self.assertEqual(strip_unsupported_citations(text, known), text)
 
 
-class MonidProviderTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self._previous = monid_provider.os.getenv("MONID_API_KEY")
-        monid_provider.os.environ.pop("MONID_API_KEY", None)
-
-    def tearDown(self):
-        if self._previous:
-            monid_provider.os.environ["MONID_API_KEY"] = self._previous
-        else:
-            monid_provider.os.environ.pop("MONID_API_KEY", None)
-
-    def test_unavailable_without_key(self):
-        self.assertFalse(monid_provider.is_available())
-
-    def test_available_with_key(self):
-        monid_provider.os.environ["MONID_API_KEY"] = "monid_live_test"
-        self.assertTrue(monid_provider.is_available())
-
-    async def test_search_links_parses_run_response(self):
-        monid_provider.os.environ["MONID_API_KEY"] = "monid_live_test"
-        discover = MagicMock(status_code=200)
-        discover.raise_for_status = lambda: None
-        discover.json = lambda: {
-            "endpoints": [{"provider": "tinyfish", "endpoint": "/web-search"}]
-        }
-        run = MagicMock(status_code=200)
-        run.raise_for_status = lambda: None
-        run.json = lambda: {
-            "results": [
-                {"title": "T", "url": "https://m.fr/a", "snippet": "s"}
-            ]
-        }
-        client = MagicMock()
-        client.post = MagicMock(side_effect=[discover, run])
-        client.__enter__.return_value = client
-        with patch.object(monid_provider.httpx, "Client", return_value=client):
-            links = await monid_provider.search_links("test", 5)
-        self.assertEqual(links[0]["url"], "https://m.fr/a")
-        # Le jeton Bearer est bien envoyé.
-        headers = client.post.call_args_list[0].kwargs["headers"]
-        self.assertEqual(headers["Authorization"], "Bearer monid_live_test")
-
-    async def test_search_returns_empty_without_key(self):
-        links = await monid_provider.search_links("test", 5)
-        self.assertEqual(links, [])

@@ -442,6 +442,9 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
+                web_search.monid_provider, "is_available", return_value=False
+            ),
+            patch.object(
                 web_search,
                 "_search_with_sonar",
                 side_effect=web_search.SonarSearchError(
@@ -482,6 +485,9 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "brave_search_api_key", ""),
             patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", True),
+            patch.object(
+                web_search.monid_provider, "is_available", return_value=False
+            ),
             patch.object(
                 web_search,
                 "_search_with_sonar",
@@ -538,6 +544,9 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
+                web_search.monid_provider, "is_available", return_value=False
+            ),
+            patch.object(
                 web_search,
                 "_search_with_sonar",
                 side_effect=web_search.SonarSearchError(
@@ -568,6 +577,9 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "brave_search_api_key", "brave-key"),
             patch.object(web_search.settings, "search_specialists_enabled", False),
             patch.object(web_search.settings, "searxng_enabled", False),
+            patch.object(
+                web_search.monid_provider, "is_available", return_value=False
+            ),
             patch.object(
                 web_search,
                 "_search_with_sonar",

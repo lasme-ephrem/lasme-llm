@@ -45,6 +45,11 @@ class Settings(BaseModel):
     ).rstrip("/")
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
+    # Monid (tinyfish gateway) : premier provider de la chaîne de recherche
+    # web. Optionnel — sans clé, Monid est simplement absent de la chaîne.
+    monid_api_key: str = os.getenv("MONID_API_KEY", "")
+    monid_max_price_usd: float = float(os.getenv("MONID_MAX_PRICE_USD", "0.01"))
+    monid_timeout_s: int = int(os.getenv("MONID_TIMEOUT_S", "30"))
     search_specialists_enabled: bool = _env_bool(
         "SEARCH_SPECIALISTS_ENABLED",
         True,

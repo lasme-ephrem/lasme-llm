@@ -4,11 +4,11 @@ Design (W phases):
 - NO provider synthesis: Perplexity Sonar is never called by the agent;
   the search tool returns RAW ranked links and OUR model does the
   reading, comparing and citing through ``fetch_pages``.
-- Provider chain (all link providers, no Docker): DuckDuckGo →
-  specialists (GDELT/OpenAlex/Wikimedia) → Brave → Tavily. The proven
-  ranking (dedup, authority, freshness, MMR) is reused. An alternate
-  link provider (tinyfish via Monid, if MONID_API_KEY is set) plugs in
-  ahead of the chain through the same contract.
+- Provider chain (all link providers, no Docker): Monid (tinyfish, if
+  MONID_API_KEY is set) → DuckDuckGo → specialists (GDELT/OpenAlex/
+  Wikimedia) → Brave → Tavily. The proven ranking (dedup, authority,
+  freshness, MMR) is reused. Monid lives inside the chain itself
+  (first provider, automatic fallback), not as a pre-chain shortcut.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from core.agent.tools import (
     ToolDefinition,
     ToolRegistry,
 )
-from core.tools import monid_provider
 
 RECENCY_HINTS = {
     "hour": " (dernière heure)",
@@ -158,25 +157,18 @@ async def _run_web_search(
     max_results = int(args.get("max_results") or 5)
 
     # Agentic rule: link providers only — never a synthesizing provider.
-    payload: Dict[str, Any] | None = None
-    if monid_provider.is_available():
-        try:
-            links = await monid_provider.search_links(query, max_results)
-            if links:
-                payload = {"results": links, "errors": [], "engine": "tinyfish/Monid"}
-        except Exception:
-            payload = None  # fall through to the local chain
-    if payload is None:
-        payload = await asyncio.to_thread(
-            search_fn,
-            query,
-            max_results,
-            None,
-            skip_primary_provider=True,
-            force_full_chain=(recency != "any"),
-        )
-        payload.pop("provider_answer", None)
-        payload.pop("answer_mode", None)
+    # Monid (if configured) is tried inside the chain itself, as its first
+    # provider, with automatic fallback to the local providers.
+    payload = await asyncio.to_thread(
+        search_fn,
+        query,
+        max_results,
+        None,
+        skip_primary_provider=True,
+        force_full_chain=(recency != "any"),
+    )
+    payload.pop("provider_answer", None)
+    payload.pop("answer_mode", None)
     return _format_search_results(payload)
 
 
