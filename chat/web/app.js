@@ -2158,29 +2158,58 @@ function formatThinkingDuration(duration) {
     return `${String(Math.round(seconds * 10) / 10).replace(".", ",")} s`;
 }
 
+// Rotating loading phrases shown in the panel header while streaming.
+const THINKING_PHRASES = [
+    "Réflexion en cours…",
+    "Analyse des éléments…",
+    "Évaluation des pistes…",
+    "Mise en ordre des idées…",
+];
+const THINKING_PHRASE_MS = 2600;
+
+const THINKING_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"></path><path d="M19 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"></path></svg>`;
+const THINKING_CHEVRON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+
 function ensureThinkingPanel(bubble) {
     let panel = bubble.querySelector(":scope > .thinking-panel");
     if (panel) return panel;
     const typingIndicator = bubble.querySelector(".typing-indicator");
     if (typingIndicator) typingIndicator.remove();
 
-    panel = document.createElement("details");
+    panel = document.createElement("div");
     panel.className = "thinking-panel streaming";
-    panel.open = true;
+    panel.dataset.mode = "stream";
 
-    const summary = document.createElement("summary");
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "thinking-header";
+    const icon = document.createElement("span");
+    icon.className = "thinking-icon";
+    icon.innerHTML = THINKING_ICON;
     const label = document.createElement("span");
-    label.className = "thinking-panel-label";
-    label.textContent = "Réflexion";
-    const pulse = document.createElement("span");
-    pulse.className = "thinking-pulse";
-    pulse.setAttribute("aria-hidden", "true");
-    summary.append(label, pulse);
+    label.className = "thinking-label";
+    label.textContent = THINKING_PHRASES[0];
+    const duration = document.createElement("span");
+    duration.className = "thinking-duration";
+    const chevron = document.createElement("span");
+    chevron.className = "thinking-chevron";
+    chevron.innerHTML = THINKING_CHEVRON;
+    header.append(icon, label, duration, chevron);
 
+    const window_ = document.createElement("div");
+    window_.className = "thinking-window";
     const pre = document.createElement("pre");
     pre.className = "thinking-text";
+    window_.appendChild(pre);
 
-    panel.append(summary, pre);
+    header.addEventListener("click", () => {
+        if (panel.classList.contains("streaming")) return;
+        setThinkingMode(
+            panel,
+            panel.dataset.mode === "full" ? "mid" : "full"
+        );
+    });
+    panel.append(header, window_);
 
     // Panel sits above the answer content, below the live tool cards.
     const toolsGroup = bubble.querySelector(":scope > .agent-tools-group");
@@ -2194,15 +2223,42 @@ function ensureThinkingPanel(bubble) {
     return panel;
 }
 
+function setThinkingMode(panel, mode) {
+    panel.dataset.mode = mode;
+    const window_ = panel.querySelector(".thinking-window");
+    if (window_ && mode === "mid") window_.scrollTop = 0;
+}
+
+function startThinkingPhrases(panel) {
+    const label = panel.querySelector(".thinking-label");
+    if (!label || panel._lasmePhraseTimer) return;
+    let index = 0;
+    panel._lasmePhraseTimer = window.setInterval(() => {
+        index = (index + 1) % THINKING_PHRASES.length;
+        label.classList.add("phrase-fade");
+        window.setTimeout(() => {
+            label.textContent = THINKING_PHRASES[index];
+            label.classList.remove("phrase-fade");
+        }, 180);
+    }, THINKING_PHRASE_MS);
+}
+
+function stopThinkingPhrases(panel) {
+    if (panel._lasmePhraseTimer) {
+        window.clearInterval(panel._lasmePhraseTimer);
+        panel._lasmePhraseTimer = null;
+    }
+}
+
 function handleReasoningStart(bubble) {
     const panel = ensureThinkingPanel(bubble);
     if (panel._lasmeCollapseTimer) {
         clearTimeout(panel._lasmeCollapseTimer);
         panel._lasmeCollapseTimer = null;
     }
-    panel.classList.remove("collapsing");
     panel.classList.add("streaming");
-    panel.open = true;
+    setThinkingMode(panel, "stream");
+    startThinkingPhrases(panel);
     const pre = panel.querySelector(".thinking-text");
     // A second reasoning run in the same bubble: keep prior text, add a gap.
     if (pre && pre.textContent) pre.textContent += "\n\n";
@@ -2212,61 +2268,43 @@ function appendReasoningDelta(bubble, text) {
     const value = String(text || "");
     if (!value) return;
     const panel = ensureThinkingPanel(bubble);
+    const window_ = panel.querySelector(".thinking-window");
     const pre = panel.querySelector(".thinking-text");
-    if (!pre) return;
+    if (!pre || !window_) return;
+    // Follow the stream only if the user did not scroll away.
+    const follow = window_.scrollTop + window_.clientHeight
+        >= window_.scrollHeight - 24;
     pre.textContent += value;
     pre.classList.toggle(
         "is-scrollable",
         pre.scrollHeight > pre.clientHeight + 4
     );
-    pre.scrollTop = pre.scrollHeight;
-}
-
-function collapseThinkingPanel(panel) {
-    panel._lasmeCollapseTimer = null;
-    if (!panel.open) return;
-    const pre = panel.querySelector(".thinking-text");
-    if (!pre) {
-        panel.open = false;
-        return;
-    }
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-        panel.open = false;
-        pre.scrollTop = 0;
-        return;
-    }
-    // Soft collapse: pin the current height, then animate it down to 0.
-    panel.classList.add("collapsing");
-    pre.style.maxHeight = `${pre.offsetHeight}px`;
-    requestAnimationFrame(() => {
-        pre.style.maxHeight = "0px";
-    });
-    window.setTimeout(() => {
-        panel.classList.remove("collapsing");
-        panel.open = false;
-        pre.style.maxHeight = "";
-        pre.scrollTop = 0;
-    }, 340);
+    if (follow) window_.scrollTop = window_.scrollHeight;
 }
 
 function handleReasoningDone(bubble, duration) {
     const panel = bubble.querySelector(":scope > .thinking-panel");
     if (!panel) return;
     panel.classList.remove("streaming");
+    stopThinkingPhrases(panel);
+    const label = panel.querySelector(".thinking-label");
+    if (label) label.textContent = "Réflexion";
     const durationText = formatThinkingDuration(duration);
-    if (durationText) {
-        const label = panel.querySelector(".thinking-panel-label");
-        if (label) label.textContent = `Réflexion · ${durationText}`;
+    const durationEl = panel.querySelector(".thinking-duration");
+    if (durationEl && durationText) {
+        durationEl.textContent = `· ${durationText}`;
     }
     const pre = panel.querySelector(".thinking-text");
-    const delay = pre && pre.textContent.length > 240 ? 0 : 1500;
+    const delay = pre && pre.textContent.length > 240 ? 350 : 1600;
     if (panel._lasmeCollapseTimer) {
         clearTimeout(panel._lasmeCollapseTimer);
     }
-    panel._lasmeCollapseTimer = window.setTimeout(
-        () => collapseThinkingPanel(panel),
-        delay
-    );
+    panel._lasmeCollapseTimer = window.setTimeout(() => {
+        panel._lasmeCollapseTimer = null;
+        // Collapse to the middle window: the reasoning stays visible and
+        // scrollable, the answer takes over the conversation flow.
+        setThinkingMode(panel, "mid");
+    }, delay);
 }
 
 // content_reset: the streamed answer so far was NOT the real response
@@ -2285,8 +2323,11 @@ function resetStreamedAnswer(bubble, preambleText) {
         clearTimeout(panel._lasmeCollapseTimer);
         panel._lasmeCollapseTimer = null;
     }
-    panel.classList.remove("collapsing", "streaming");
-    panel.open = true;
+    stopThinkingPhrases(panel);
+    panel.classList.remove("streaming");
+    const label = panel.querySelector(".thinking-label");
+    if (label) label.textContent = "Réflexion";
+    setThinkingMode(panel, "mid");
     const pre = panel.querySelector(".thinking-text");
     if (pre) {
         const separator = pre.textContent ? "\n\n" : "";
@@ -2297,7 +2338,6 @@ function resetStreamedAnswer(bubble, preambleText) {
             "is-scrollable",
             pre.scrollHeight > pre.clientHeight + 4
         );
-        pre.scrollTop = pre.scrollHeight;
     }
 }
 
