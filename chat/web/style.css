@@ -3853,6 +3853,277 @@ body.sidebar-resizing {
     color: var(--text-secondary);
 }
 
+/* Inline source chips (ChatGPT-style citations) */
+.answer-content .source-chip-group {
+    display: inline-flex;
+    vertical-align: baseline;
+    margin-left: 0.4rem;
+}
+
+.source-chip {
+    appearance: none;
+    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.12rem 0.5rem 0.12rem 0.18rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 0.73rem;
+    font-weight: 500;
+    line-height: 1.25;
+    cursor: pointer;
+    user-select: none;
+    vertical-align: middle;
+    transition:
+        border-color 0.16s ease,
+        box-shadow 0.16s ease,
+        color 0.16s ease;
+}
+
+.source-chip:hover,
+.source-chip:focus-visible,
+.source-chip.open {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+    outline: none;
+}
+
+.source-chip-favicon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    border-width: 1px;
+    border-color: var(--border);
+}
+
+.source-chip-domain {
+    max-width: 17ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.source-chip-extra {
+    padding: 0 0.32rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-size: 0.64rem;
+    font-weight: 650;
+    line-height: 1.45;
+}
+
+.source-chip-chevron {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    transition: transform 0.16s ease;
+}
+
+.source-chip-chevron svg {
+    width: 9px;
+    height: 9px;
+}
+
+.source-chip.open .source-chip-chevron {
+    transform: rotate(90deg);
+    opacity: 1;
+}
+
+/* Hover/tap preview card for an inline source chip.
+   Fixed positioning is computed in JS from the chip's bounding rect. */
+.source-chip-popover {
+    position: fixed;
+    z-index: 200;
+    width: min(320px, calc(100vw - 16px));
+    padding: 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+    box-shadow:
+        0 12px 32px rgba(15, 23, 42, 0.14),
+        0 2px 8px rgba(15, 23, 42, 0.06);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.source-chip-popover.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.source-chip-popover::after {
+    content: "";
+    position: absolute;
+    bottom: -5.5px;
+    left: var(--source-caret-x, 20px);
+    width: 10px;
+    height: 10px;
+    background: var(--bg-card);
+    border-left: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    transform: rotate(45deg);
+}
+
+.source-chip-popover.below::after {
+    top: -5.5px;
+    bottom: auto;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    border-left: 0;
+    border-top: 0;
+    transform: rotate(45deg);
+}
+
+.source-chip-popover-link {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.45rem 0.5rem;
+    border-radius: 9px;
+    text-decoration: none;
+    color: inherit;
+    transition: background 0.16s ease;
+}
+
+.source-chip-popover-link:hover {
+    background: var(--bg-hover);
+}
+
+.source-chip-popover-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.source-chip-popover-favicon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    border-width: 1px;
+    border-color: var(--border);
+}
+
+.source-chip-popover-domain {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.source-chip-popover-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.source-chip-popover-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+    padding: 0.35rem 0.35rem 0.05rem;
+    border-top: 1px solid var(--border);
+}
+
+.source-chip-popover-arrow {
+    appearance: none;
+    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.16s ease, color 0.16s ease;
+}
+
+.source-chip-popover-arrow svg {
+    width: 11px;
+    height: 11px;
+}
+
+.source-chip-popover-arrow:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.source-chip-popover-arrow:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.source-chip-popover-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0 0.15rem;
+}
+
+.source-chip-popover-dot {
+    appearance: none;
+    font: inherit;
+    width: 6px;
+    height: 6px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--border);
+    cursor: pointer;
+    transition: background 0.16s ease, transform 0.16s ease;
+}
+
+.source-chip-popover-dot:hover {
+    background: var(--text-secondary);
+}
+
+.source-chip-popover-dot.active {
+    background: var(--accent);
+    transform: scale(1.15);
+}
+
+.source-chip-popover-counter {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .source-chip,
+    .source-chip-chevron,
+    .source-chip-popover-link,
+    .source-chip-popover-arrow,
+    .source-chip-popover-dot {
+        transition: none;
+    }
+
+    .source-chip-popover {
+        transform: none;
+        transition: opacity 0.001ms;
+    }
+}
+
 /* Code Blocks */
 .code-wrapper {
     position: relative;

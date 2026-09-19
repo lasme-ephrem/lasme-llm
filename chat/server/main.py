@@ -8,7 +8,7 @@ import secrets
 import time
 import unicodedata
 from contextlib import asynccontextmanager
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 import httpx
 from pathlib import Path
 from fastapi import (
@@ -736,6 +736,154 @@ def compact_web_source_metadata(
             }
         )
     return {"web_results": sources} if sources else {}
+
+
+# --- Sources découvertes par l'agent lui-même (web_search / fetch_pages) ---
+# La pré-recherche remplit web_results_data via search_report, mais quand
+# l'agent cherche et lit avec SES outils pendant un run, les résultats
+# n'existent que dans le journal du run (EventLog.to_list() : dicts à plat,
+# payload fusionné au niveau supérieur). On les re-parse pour alimenter le
+# drawer et la persistance au même format que search_report["results"].
+
+_AGENT_SEARCH_TITLE_RE = re.compile(r"^\[(\d+)\]\s+(.+?)\s*$")
+_AGENT_SEARCH_URL_RE = re.compile(r"^\s+(https?://\S+)\s*$")
+_AGENT_FETCH_URL_RE = re.compile(r"^##\s+(https?://\S+)")
+
+
+def normalize_source_url(url: str) -> str:
+    """Clé de déduplication d'une source : host sans www., sans schéma,
+    sans slash final (chemin et query conservés tels quels)."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    parts = urlparse(raw)
+    host = (parts.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parts.path.rstrip("/")
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{host}{path}{query}"
+
+
+def _title_from_url(url: str) -> str:
+    """Titre lisible déduit d'une URL fetchée dont le titre est inconnu."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    parts = urlparse(raw)
+    host = (parts.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    segments = [segment for segment in parts.path.split("/") if segment]
+    label = unquote(segments[-1]) if segments else ""
+    label = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", label)
+    label = re.sub(r"[-_+]+", " ", label).strip()
+    if not label:
+        return host or raw
+    return f"{label[:1].upper()}{label[1:]}"
+
+
+def _iter_search_output_entries(output: str):
+    """Paires (titre, url) d'un output web_search : ligne « [n] titre »
+    suivie de la ligne indentée « url » (format _format_search_results)."""
+    lines = str(output or "").splitlines()
+    for index, line in enumerate(lines):
+        header = _AGENT_SEARCH_TITLE_RE.match(line)
+        if not header:
+            continue
+        if index + 1 < len(lines):
+            url_match = _AGENT_SEARCH_URL_RE.match(lines[index + 1])
+            if url_match:
+                yield header.group(2).strip(), url_match.group(1)
+
+
+def _iter_fetch_output_urls(output: str):
+    """URLs réellement lues par fetch_pages (« ## url (n caractères) »).
+    Les sections en ERREUR (page non lue) ne sont pas des sources."""
+    lines = str(output or "").splitlines()
+    urls: List[str] = []
+    for index, line in enumerate(lines):
+        match = _AGENT_FETCH_URL_RE.match(line)
+        if not match:
+            continue
+        body = lines[index + 1] if index + 1 < len(lines) else ""
+        if body.lstrip().startswith("ERREUR"):
+            continue
+        urls.append(match.group(1))
+    return urls
+
+
+def extract_agent_sources(
+    events: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Sources Web que l'agent a trouvées via ses propres outils.
+
+    Parcourt les tool_result du journal de run et parse les outputs de
+    web_search (liens numérotés) et fetch_pages (« ## url (n caractères) »).
+    Retourne des dicts au même format que web_results_data : une URL déjà
+    vue ne duplique pas d'entrée — un titre réel de web_search prime sur
+    un titre déduit de l'URL par fetch_pages.
+    """
+    found: Dict[str, Dict[str, Any]] = {}
+    titled_by_search: Dict[str, bool] = {}
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("type") != "tool_result":
+            continue
+        name = str(event.get("name") or "")
+        output = str(event.get("output") or "")
+        if name == "web_search":
+            entries = list(_iter_search_output_entries(output))
+        elif name == "fetch_pages":
+            entries = [
+                (_title_from_url(url), url)
+                for url in _iter_fetch_output_urls(output)
+            ]
+        else:
+            continue
+        for title, url in entries:
+            key = normalize_source_url(url)
+            if not key:
+                continue
+            entry = found.get(key)
+            if entry is None:
+                found[key] = {
+                    "title": title[:300],
+                    "url": url[:2_000],
+                    "engine": "agent",
+                    "snippet": "",
+                }
+                titled_by_search[key] = name == "web_search"
+            elif name == "web_search" and not titled_by_search.get(key):
+                # URL d'abord vue via fetch_pages : le vrai titre de la
+                # recherche remplace le titre déduit de l'URL.
+                entry["title"] = title[:300]
+                titled_by_search[key] = True
+    return list(found.values())
+
+
+def merge_dedup_sources(
+    existing: List[Dict[str, Any]],
+    extra: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Fusionne deux listes de sources : l'existant d'abord (priorité
+    pré-recherche, ordre conservé), les ajoutes en fin, sans doublon
+    d'URL normalisée."""
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for item in list(existing or []) + list(extra or []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        key = normalize_source_url(url)
+        if not url or not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
 
 
 def previous_verified_web_context(
@@ -3443,6 +3591,7 @@ async def chat_stream(req: ChatRequest):
         stream_messages = [dict(message) for message in messages_payload]
         local_search_query = search_query
         web_results_data = []
+        web_search_event_emitted = False
         provider_answer = ""
         answer_mode = None
         answer_provider = None
@@ -3566,6 +3715,7 @@ async def chat_stream(req: ChatRequest):
                 )
             )
             yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': web_event_message, 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
+            web_search_event_emitted = True
 
         if (
             strict_grounding
@@ -3953,6 +4103,24 @@ async def chat_stream(req: ChatRequest):
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
         if agent_result is not None:
+            # Les sources trouvées par les outils de l'agent (web_search /
+            # fetch_pages pendant le run) complètent celles de la
+            # pré-recherche : priorité à l'existant, ajouts en fin, dédup
+            # par URL normalisée. La persistance et le drawer en profitent.
+            sources_before_agent = len(web_results_data)
+            web_results_data = merge_dedup_sources(
+                web_results_data,
+                extract_agent_sources(agent_result.log.to_list()),
+            )
+            if (
+                len(web_results_data) > sources_before_agent
+                and not web_search_event_emitted
+            ):
+                # Aucun web_search_done n'a été émis par le pré-flux :
+                # c'est l'agent qui a découvert les sources, on émet le
+                # même événement pour que le drawer les affiche.
+                web_search_event_emitted = True
+                yield f"data: {json.dumps({'type': 'web_search_done', 'status': 'ok', 'engine': 'agent', 'answer_mode': answer_mode, 'message': f'{len(web_results_data)} sources Web consultées', 'web_results': web_results_data, 'result_count': len(web_results_data)})}\n\n"
             if agent_tool_names:
                 # W5 : une URL citée doit avoir été vue par l'agent
                 # (résultats de recherche ou pages réellement fetchées).

@@ -2116,6 +2116,60 @@ function sourceFallbackIcon() {
     `;
 }
 
+// Shared domain/favicon resolution for the sources drawer AND the inline
+// source chips (multi-part public suffixes such as co.uk are handled here).
+const MULTI_PART_TLD_SUFFIXES = new Set([
+    "co.uk", "org.uk", "com.au", "com.br",
+    "co.jp", "co.kr", "com.cn", "com.mx", "co.in"
+]);
+
+function buildSourceMeta(result) {
+    const safeUrl = safeHttpUrl(result?.url);
+    if (!safeUrl) return null;
+    try {
+        const parsedUrl = new URL(safeUrl, window.location.origin);
+        const domain = parsedUrl.hostname.replace(/^www\./, "");
+        const domainParts = domain.split(".");
+        const lastTwoLabels = domainParts.slice(-2).join(".");
+        const registrableLabelCount = (
+            MULTI_PART_TLD_SUFFIXES.has(lastTwoLabels) ? 3 : 2
+        );
+        const faviconDomain = domainParts.length > registrableLabelCount
+            ? domainParts.slice(-registrableLabelCount).join(".")
+            : domain;
+        return {
+            result,
+            safeUrl,
+            domain,
+            faviconDomain,
+            faviconUrl: `/favicons/${encodeURIComponent(faviconDomain)}`,
+            initial: (faviconDomain[0] || "S").toUpperCase()
+        };
+    } catch (error) {
+        return null;
+    }
+}
+
+// Normalize a URL for chip↔paragraph association: drop protocol, www and
+// trailing slash; comparison happens per host + path prefix (see
+// sourceKeysMatch) so /article and /article/section associate.
+function normalizeSourceUrlKey(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    try {
+        const parsed = new URL(raw, window.location.origin);
+        if (!["http:", "https:"].includes(parsed.protocol)) return null;
+        const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+        if (!host) return null;
+        const port = parsed.port ? `:${parsed.port}` : "";
+        const pathAndQuery = `${parsed.pathname}${parsed.search}`
+            .replace(/\/+$/, "");
+        return `${host}${port}${pathAndQuery}`;
+    } catch (_) {
+        return null;
+    }
+}
+
 function renderAssistantActivity(container, kind, state, title, detail = "") {
     const selector = `.assistant-activity[data-kind="${kind}"]`;
     let activity = container.querySelector(selector);
@@ -2857,6 +2911,10 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
         }
         renderRichContent(answerDiv, mainAnswer, webResults);
 
+        // ChatGPT-style inline source chips (idempotent pass, safe to run on
+        // every render: streaming paints and history loads share this path).
+        attachInlineSourceChips(answerDiv, webResults);
+
         // 3. Render Modern Expandable Sources Drawer at the bottom if Web Results exist
         if (webResults && webResults.length > 0) {
             let sourcesDrawer = container.querySelector(".sources-drawer-container");
@@ -2866,36 +2924,7 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
 
                 const countStr = webResults.length > 1 ? `${webResults.length} sources` : `1 source`;
                 const sourceMeta = webResults
-                    .map(result => {
-                        const safeUrl = safeHttpUrl(result.url);
-                        if (!safeUrl) return null;
-                        try {
-                            const parsedUrl = new URL(safeUrl, window.location.origin);
-                            const domain = parsedUrl.hostname.replace(/^www\./, "");
-                            const domainParts = domain.split(".");
-                            const lastTwoLabels = domainParts.slice(-2).join(".");
-                            const multiPartSuffixes = new Set([
-                                "co.uk", "org.uk", "com.au", "com.br",
-                                "co.jp", "co.kr", "com.cn", "com.mx", "co.in"
-                            ]);
-                            const registrableLabelCount = (
-                                multiPartSuffixes.has(lastTwoLabels) ? 3 : 2
-                            );
-                            const faviconDomain = domainParts.length > registrableLabelCount
-                                ? domainParts.slice(-registrableLabelCount).join(".")
-                                : domain;
-                            return {
-                                result,
-                                safeUrl,
-                                domain,
-                                faviconDomain,
-                                faviconUrl: `/favicons/${encodeURIComponent(faviconDomain)}`,
-                                initial: (faviconDomain[0] || "S").toUpperCase()
-                            };
-                        } catch (error) {
-                            return null;
-                        }
-                    })
+                    .map(result => buildSourceMeta(result))
                     .filter(Boolean);
                 const uniqueFaviconSources = [];
                 const seenFaviconDomains = new Set();
@@ -3113,6 +3142,440 @@ function renderRichContent(container, text, webResults) {
     // Step 8: Replace Unicode Country Flag Emojis with Twemoji SVGs for Windows
     replaceFlagsWithSvg(container);
 }
+
+// ── Inline source chips (ChatGPT-style citations) ─────────────────────────
+//
+// After the markdown answer is rendered, each `p`/`li` that cites one of the
+// webResults gets a compact pill appended: [favicon] domain +N ›. Hovering
+// (desktop) or tapping (touch) the pill opens a single reusable preview
+// popover per message, anchored above the chip (flipped below when clipped).
+
+const SOURCE_CHIP_OPEN_DELAY_MS = 120;
+const SOURCE_CHIP_CLOSE_DELAY_MS = 200;
+const SOURCE_CHIP_DOMAIN_MAX_CHARS = 16;
+const FINE_POINTER_QUERY = typeof window.matchMedia === "function"
+    ? window.matchMedia("(hover: hover) and (pointer: fine)")
+    : null;
+let activeSourceChipPopover = null;
+
+function sourceChipHoverCapable() {
+    return FINE_POINTER_QUERY ? FINE_POINTER_QUERY.matches : true;
+}
+
+function sourceKeysMatch(firstKey, secondKey) {
+    if (!firstKey || !secondKey) return false;
+    if (firstKey === secondKey) return true;
+    const [shorter, longer] = firstKey.length <= secondKey.length
+        ? [firstKey, secondKey]
+        : [secondKey, firstKey];
+    if (!longer.startsWith(shorter)) return false;
+    const boundary = longer.charAt(shorter.length);
+    return boundary === "/" || boundary === "?" || boundary === "&";
+}
+
+const SOURCE_BARE_URL_PATTERN = /https?:\/\/[^\s<>"'`)\]}]+/gi;
+
+function collectBlockUrlKeys(block) {
+    const keys = new Set();
+    if (!block || block.nodeType !== 1) return keys;
+
+    const belongsToNestedListItem = node => {
+        const ownerItem = node.parentElement?.closest("li");
+        return Boolean(ownerItem && ownerItem !== block);
+    };
+
+    block.querySelectorAll("a[href]").forEach(anchor => {
+        if (anchor.closest("code, pre")) return;
+        if (belongsToNestedListItem(anchor)) return;
+        const key = normalizeSourceUrlKey(anchor.getAttribute("href"));
+        if (key) keys.add(key);
+    });
+
+    // Bare URLs typed in the paragraph text (outside code and links).
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+        if (!node.nodeValue) continue;
+        if (node.parentElement?.closest("code, pre, a")) continue;
+        if (belongsToNestedListItem(node)) continue;
+        const matches = node.nodeValue.match(SOURCE_BARE_URL_PATTERN);
+        if (!matches) continue;
+        matches.forEach(match => {
+            const key = normalizeSourceUrlKey(
+                match.replace(/[.,;:!?'"\u2019\u201d]+$/, "")
+            );
+            if (key) keys.add(key);
+        });
+    }
+    return keys;
+}
+
+function attachInlineSourceChips(answerDiv, webResults) {
+    if (!answerDiv) return;
+
+    // Close a stale popover whose anchor chip was wiped by a re-render.
+    const host = answerDiv.parentElement;
+    const existingPopover = host?.querySelector(":scope > .source-chip-popover");
+    if (
+        existingPopover
+        && existingPopover._lasmeChip
+        && !existingPopover._lasmeChip.isConnected
+    ) {
+        hideSourceChipPopover(existingPopover);
+    }
+
+    const sourceMetas = (Array.isArray(webResults) ? webResults : [])
+        .map(result => buildSourceMeta(result))
+        .filter(Boolean);
+    if (!sourceMetas.length) return;
+
+    sourceMetas.forEach(meta => {
+        meta.matchKey = normalizeSourceUrlKey(meta.safeUrl);
+    });
+
+    answerDiv.querySelectorAll("p, li").forEach(block => {
+        if (block.closest("blockquote")) return;
+        // Loose markdown lists wrap content in li > p; the chip lives on the li.
+        if (block.tagName === "P" && block.closest("li")) return;
+        // Idempotency guard: skip blocks that already carry their chip group.
+        if (block.querySelector(".source-chip-group")) return;
+
+        const blockKeys = collectBlockUrlKeys(block);
+        if (!blockKeys.size) return;
+
+        const matched = sourceMetas.filter(meta => {
+            if (!meta.matchKey) return false;
+            for (const blockKey of blockKeys) {
+                if (sourceKeysMatch(blockKey, meta.matchKey)) return true;
+            }
+            return false;
+        });
+        if (!matched.length) return;
+
+        const group = createSourceChipGroup(matched);
+        const nestedList = block.tagName === "LI"
+            ? block.querySelector("ul, ol")
+            : null;
+        if (nestedList) block.insertBefore(group, nestedList);
+        else block.appendChild(group);
+    });
+}
+
+function createSourceChipGroup(sources) {
+    const primary = sources[0];
+    const extraCount = Math.max(0, sources.length - 1);
+    const domainLabel = primary.domain.length > SOURCE_CHIP_DOMAIN_MAX_CHARS
+        ? `${primary.domain.slice(0, SOURCE_CHIP_DOMAIN_MAX_CHARS - 1)}…`
+        : primary.domain;
+
+    const group = document.createElement("span");
+    group.className = "source-chip-group";
+    group._lasmeSources = sources;
+
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "source-chip";
+    chip.setAttribute("aria-haspopup", "dialog");
+    chip.setAttribute("aria-expanded", "false");
+    chip.title = primary.result?.title || primary.domain;
+
+    const faviconShell = document.createElement("span");
+    faviconShell.className = "source-favicon-shell source-chip-favicon";
+    faviconShell.title = primary.domain;
+    faviconShell.innerHTML = `
+        <span class="source-favicon-fallback">${sourceFallbackIcon()}</span>
+        <img class="source-favicon" src="${escapeHtml(primary.faviconUrl)}" alt="">
+    `;
+    faviconShell.querySelector(".source-favicon")?.addEventListener(
+        "error",
+        event => {
+            const image = event.currentTarget;
+            image.src = "/source-fallback.svg";
+            image.classList.add("generic");
+        },
+        { once: true }
+    );
+
+    const domainSpan = document.createElement("span");
+    domainSpan.className = "source-chip-domain";
+    domainSpan.textContent = domainLabel;
+
+    chip.appendChild(faviconShell);
+    chip.appendChild(domainSpan);
+
+    if (extraCount > 0) {
+        const extra = document.createElement("span");
+        extra.className = "source-chip-extra";
+        extra.textContent = `+${extraCount}`;
+        chip.appendChild(extra);
+    }
+
+    const chevron = document.createElement("span");
+    chevron.className = "source-chip-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m9 6 6 6-6 6"></path>
+        </svg>
+    `;
+    chip.appendChild(chevron);
+
+    chip.addEventListener("mouseenter", () => {
+        if (!sourceChipHoverCapable()) return;
+        scheduleSourcePopoverOpen(chip);
+    });
+    chip.addEventListener("mouseleave", () => {
+        scheduleSourcePopoverClose(chip);
+    });
+    // Desktop: toggles as well (pins the card); touch: tap toggles the card.
+    chip.addEventListener("click", event => {
+        event.preventDefault();
+        toggleSourcePopoverForChip(chip);
+    });
+
+    group.appendChild(chip);
+    return group;
+}
+
+function sourceChipHostFor(chip) {
+    return chip.closest(".bubble") || chip.closest(".answer-content");
+}
+
+function ensureSourceChipPopover(host) {
+    if (!host) return null;
+    let popover = host.querySelector(":scope > .source-chip-popover");
+    if (!popover) {
+        popover = document.createElement("div");
+        popover.className = "source-chip-popover";
+        popover.setAttribute("role", "dialog");
+        popover.setAttribute("aria-label", "Source citée");
+        popover.hidden = true;
+        popover.addEventListener("mouseenter", () => {
+            clearTimeout(popover._lasmeCloseTimer);
+        });
+        popover.addEventListener("mouseleave", () => {
+            scheduleSourcePopoverClose(null, popover);
+        });
+        host.appendChild(popover);
+    }
+    return popover;
+}
+
+function scheduleSourcePopoverOpen(chip) {
+    const popover = ensureSourceChipPopover(sourceChipHostFor(chip));
+    if (!popover) return;
+    clearTimeout(popover._lasmeOpenTimer);
+    clearTimeout(popover._lasmeCloseTimer);
+    popover._lasmeOpenTimer = setTimeout(() => {
+        openSourceChipPopover(chip);
+    }, SOURCE_CHIP_OPEN_DELAY_MS);
+}
+
+function scheduleSourcePopoverClose(chip, popoverOverride) {
+    const popover = popoverOverride
+        || (chip ? ensureSourceChipPopover(sourceChipHostFor(chip)) : null);
+    if (!popover) return;
+    // Cancel a pending open even if the card was never shown yet.
+    clearTimeout(popover._lasmeOpenTimer);
+    if (popover.hidden) return;
+    clearTimeout(popover._lasmeCloseTimer);
+    popover._lasmeCloseTimer = setTimeout(() => {
+        hideSourceChipPopover(popover);
+    }, SOURCE_CHIP_CLOSE_DELAY_MS);
+}
+
+function toggleSourcePopoverForChip(chip) {
+    const popover = ensureSourceChipPopover(sourceChipHostFor(chip));
+    if (!popover) return;
+    if (!popover.hidden && popover._lasmeChip === chip) {
+        hideSourceChipPopover(popover);
+        return;
+    }
+    clearTimeout(popover._lasmeOpenTimer);
+    clearTimeout(popover._lasmeCloseTimer);
+    openSourceChipPopover(chip);
+}
+
+function openSourceChipPopover(chip) {
+    const group = chip.closest(".source-chip-group");
+    const sources = group?._lasmeSources;
+    if (!sources || !sources.length) return;
+    const popover = ensureSourceChipPopover(sourceChipHostFor(chip));
+    if (!popover) return;
+
+    clearTimeout(popover._lasmeOpenTimer);
+    clearTimeout(popover._lasmeCloseTimer);
+    if (activeSourceChipPopover && activeSourceChipPopover !== popover) {
+        hideSourceChipPopover(activeSourceChipPopover);
+    }
+
+    popover._lasmeChip = chip;
+    popover._lasmeSources = sources;
+    popover._lasmeIndex = 0;
+    renderSourceChipPopover(popover);
+    popover.hidden = false;
+    positionSourceChipPopover(popover);
+    requestAnimationFrame(() => {
+        if (!popover.hidden) popover.classList.add("visible");
+    });
+    chip.classList.add("open");
+    chip.setAttribute("aria-expanded", "true");
+    activeSourceChipPopover = popover;
+}
+
+function renderSourceChipPopover(popover) {
+    const sources = popover._lasmeSources || [];
+    const index = popover._lasmeIndex || 0;
+    const meta = sources[index];
+    if (!meta) return;
+    const title = String(meta.result?.title || "").trim() || meta.domain;
+
+    let navHtml = "";
+    if (sources.length > 1) {
+        const dots = sources.map((item, dotIndex) => `
+            <button type="button"
+                    class="source-chip-popover-dot${dotIndex === index ? " active" : ""}"
+                    data-source-index="${dotIndex}"
+                    aria-label="Source ${dotIndex + 1} : ${escapeHtml(item.domain)}"
+                    title="${escapeHtml(item.domain)}"></button>
+        `).join("");
+        navHtml = `
+            <div class="source-chip-popover-nav">
+                <button type="button" class="source-chip-popover-arrow"
+                        data-source-step="-1" aria-label="Source précédente"
+                        ${index === 0 ? "disabled" : ""}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2.4" stroke-linecap="round"
+                         stroke-linejoin="round"><path d="m15 6-6 6 6 6"></path></svg>
+                </button>
+                <span class="source-chip-popover-dots">${dots}</span>
+                <button type="button" class="source-chip-popover-arrow"
+                        data-source-step="1" aria-label="Source suivante"
+                        ${index === sources.length - 1 ? "disabled" : ""}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2.4" stroke-linecap="round"
+                         stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+                </button>
+                <span class="source-chip-popover-counter">${index + 1}/${sources.length}</span>
+            </div>
+        `;
+    }
+
+    popover.innerHTML = `
+        <a class="source-chip-popover-link"
+           href="${escapeHtml(meta.safeUrl)}"
+           target="_blank"
+           rel="noopener noreferrer">
+            <span class="source-chip-popover-head">
+                <span class="source-favicon-shell source-chip-popover-favicon">
+                    <span class="source-favicon-fallback">${sourceFallbackIcon()}</span>
+                    <img class="source-favicon" src="${escapeHtml(meta.faviconUrl)}" alt="">
+                </span>
+                <span class="source-chip-popover-domain">${escapeHtml(meta.domain)}</span>
+            </span>
+            <span class="source-chip-popover-title">${escapeHtml(title)}</span>
+        </a>
+        ${navHtml}
+    `;
+
+    popover.querySelectorAll(".source-favicon").forEach(image => {
+        image.addEventListener("error", () => {
+            image.src = "/source-fallback.svg";
+            image.classList.add("generic");
+        }, { once: true });
+    });
+    const goTo = nextIndex => {
+        if (nextIndex < 0 || nextIndex >= sources.length) return;
+        popover._lasmeIndex = nextIndex;
+        renderSourceChipPopover(popover);
+        positionSourceChipPopover(popover);
+    };
+    popover.querySelectorAll(".source-chip-popover-dot").forEach(dot => {
+        dot.addEventListener("click", () => {
+            goTo(Number(dot.dataset.sourceIndex) || 0);
+        });
+    });
+    popover.querySelectorAll(".source-chip-popover-arrow").forEach(arrow => {
+        arrow.addEventListener("click", () => {
+            goTo((popover._lasmeIndex || 0) + (Number(arrow.dataset.sourceStep) || 0));
+        });
+    });
+}
+
+function positionSourceChipPopover(popover) {
+    const chip = popover._lasmeChip;
+    if (!chip || !chip.isConnected) return;
+    const rect = chip.getBoundingClientRect();
+    const margin = 8;
+    const gap = 8;
+    const width = popover.offsetWidth || 288;
+    const height = popover.offsetHeight || 120;
+
+    let left = rect.left + rect.width / 2 - width / 2;
+    left = Math.min(
+        Math.max(left, margin),
+        Math.max(margin, window.innerWidth - width - margin)
+    );
+
+    // Prefer above the chip; flip below when there is no room.
+    const below = rect.top < height + gap + 12;
+    let top = below ? rect.bottom + gap : rect.top - height - gap;
+    top = Math.min(
+        Math.max(top, margin),
+        Math.max(margin, window.innerHeight - height - margin)
+    );
+
+    popover.classList.toggle("below", below);
+    popover.style.left = `${Math.round(left)}px`;
+    popover.style.top = `${Math.round(top)}px`;
+    const caretX = Math.round(
+        Math.min(
+            Math.max(rect.left + rect.width / 2 - left - 5, 14),
+            Math.max(14, width - 24)
+        )
+    );
+    popover.style.setProperty("--source-caret-x", `${caretX}px`);
+}
+
+function hideSourceChipPopover(popover) {
+    if (!popover) return;
+    clearTimeout(popover._lasmeOpenTimer);
+    clearTimeout(popover._lasmeCloseTimer);
+    const chip = popover._lasmeChip;
+    if (chip) {
+        chip.classList.remove("open");
+        if (chip.isConnected) chip.setAttribute("aria-expanded", "false");
+    }
+    popover._lasmeChip = null;
+    popover._lasmeSources = null;
+    popover.classList.remove("visible", "below");
+    popover.hidden = true;
+    if (activeSourceChipPopover === popover) activeSourceChipPopover = null;
+}
+
+// Global dismissal + repositioning for whichever popover is currently open.
+document.addEventListener("pointerdown", event => {
+    if (!activeSourceChipPopover) return;
+    if (activeSourceChipPopover.contains(event.target)) return;
+    const chip = activeSourceChipPopover._lasmeChip;
+    if (chip && chip.contains(event.target)) return;
+    hideSourceChipPopover(activeSourceChipPopover);
+});
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && activeSourceChipPopover) {
+        hideSourceChipPopover(activeSourceChipPopover);
+    }
+});
+window.addEventListener("resize", () => {
+    if (activeSourceChipPopover) positionSourceChipPopover(activeSourceChipPopover);
+});
+window.addEventListener("scroll", () => {
+    if (!activeSourceChipPopover) return;
+    const chip = activeSourceChipPopover._lasmeChip;
+    if (!chip || !chip.isConnected) hideSourceChipPopover(activeSourceChipPopover);
+    else positionSourceChipPopover(activeSourceChipPopover);
+}, true);
 
 function tableToTsv(table) {
     return Array.from(table.rows)
