@@ -12,12 +12,19 @@ from typing import Any, Dict, List, Optional
 from core.agent.tools import (
     CATEGORY_EXEC,
     CATEGORY_READ,
+    CATEGORY_WRITE,
     ToolDefinition,
     ToolRegistry,
 )
 
 MAX_RAG_OUTPUT = 6_000
 MAX_FILE_OUTPUT = 8_000
+
+ARTIFACT_KIND_CHOICES = [
+    "document", "code", "markdown", "table", "research",
+    "html", "interactive", "diagram", "mindmap", "chart",
+    "presentation",
+]
 
 
 def _format_rag_results(chunks: List[Dict[str, Any]]) -> str:
@@ -48,6 +55,9 @@ def register_platform_tools(
     file_store: Optional[Any] = None,
     vision_client: Optional[Any] = None,
     vision_model: str = "gemma-4-12b",
+    prebound_image: Optional[str] = None,
+    artifact_store: Optional[Any] = None,
+    default_project_id: str = "default",
 ) -> None:
     if rag_search_fn is not None:
         async def _rag_search(args: Dict[str, Any]) -> str:
@@ -191,15 +201,14 @@ def register_platform_tools(
 
     if vision_client is not None:
         async def _analyze_image(args: Dict[str, Any]) -> str:
+            image = args.get("image_base64") or prebound_image or ""
             message = {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": str(args["question"])},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{args['image_base64']}"
-                        },
+                        "image_url": {"url": f"data:image/jpeg;base64,{image}"},
                     },
                 ],
             }
@@ -211,29 +220,139 @@ def register_platform_tools(
             )
             return response["message"]["content"] or "(aucune réponse)"
 
+        properties: Dict[str, Any] = {
+            "question": {"type": "string"},
+            "max_tokens": {"type": "integer", "enum": [300, 700, 1500]},
+        }
+        required = ["question"]
+        description = (
+            "Analyse l'image jointe à la mission (photo, capture, diagramme, "
+            "tableau) avec le modèle de vision local. Pose la question "
+            "précise à répondre sur l'image."
+        )
+        if not prebound_image:
+            properties["image_base64"] = {
+                "type": "string",
+                "description": "Image encodée en base64",
+            }
+            required = ["image_base64", "question"]
+            description = (
+                "Analyse une image (photo, capture, diagramme, tableau) "
+                "avec le modèle de vision local. Fournis la question "
+                "précise à répondre sur l'image."
+            )
+
         registry.register(
             ToolDefinition(
                 name="analyze_image",
-                description=(
-                    "Analyse une image (photo, capture, diagramme, tableau) "
-                    "avec le modèle de vision local. Fournis la question "
-                    "précise à répondre sur l'image."
-                ),
+                description=description,
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "image_base64": {
-                            "type": "string",
-                            "description": "Image encodée en base64",
-                        },
-                        "question": {"type": "string"},
-                        "max_tokens": {"type": "integer", "enum": [300, 700, 1500]},
-                    },
-                    "required": ["image_base64", "question"],
+                    "properties": properties,
+                    "required": required,
                 },
                 handler=_analyze_image,
                 category=CATEGORY_READ,
                 timeout_s=120.0,
                 max_output_chars=4_000,
+            )
+        )
+
+    if artifact_store is not None:
+        async def _artifact_create(args: Dict[str, Any]) -> str:
+            artifact = artifact_store.create(
+                project_id=args.get("project_id") or default_project_id,
+                title=str(args["title"]),
+                content=str(args["content"]),
+                kind=str(args.get("kind") or "document"),
+            )
+            return (
+                f"Artefact créé : « {artifact['title']} » (id={artifact['id']}, "
+                f"type={artifact['kind']}). Visible dans le Canvas du projet."
+            )
+
+        async def _artifact_update(args: Dict[str, Any]) -> str:
+            updated = artifact_store.add_version(
+                str(args["artifact_id"]),
+                str(args["content"]),
+                change_summary=str(args.get("change_summary") or "Mise à jour agent"),
+            )
+            if updated is None:
+                return "ERREUR: artefact introuvable."
+            return (
+                f"Artefact mis à jour : version {updated.get('version_number')} "
+                f"(id={updated.get('id')})."
+            )
+
+        async def _artifacts_list(args: Dict[str, Any]) -> str:
+            items = artifact_store.list(args.get("project_id") or default_project_id)
+            if not items:
+                return "Aucun artefact dans ce projet."
+            rows = [
+                f"- {a.get('id')} | {a.get('title')} | {a.get('kind')} "
+                f"| v{a.get('version', '?')}"
+                for a in items[:25]
+            ]
+            return "\n".join(rows)
+
+        registry.register(
+            ToolDefinition(
+                name="artifact_create",
+                description=(
+                    "Crée un artefact Canvas durable et exportable dans le "
+                    "projet : document markdown, code, tableau, rapport de "
+                    "recherche, diagramme, présentation… À utiliser pour "
+                    "toute production destinée à être conservée."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {
+                            "type": "string",
+                            "description": "Contenu complet (markdown selon le type)",
+                        },
+                        "kind": {"type": "string", "enum": ARTIFACT_KIND_CHOICES},
+                    },
+                    "required": ["title", "content"],
+                },
+                handler=_artifact_create,
+                category=CATEGORY_WRITE,
+                timeout_s=20.0,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="artifact_update",
+                description=(
+                    "Remplace le contenu d'un artefact existant (nouvelle "
+                    "version). Utilise artifacts_list pour les ids."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "change_summary": {"type": "string"},
+                    },
+                    "required": ["artifact_id", "content"],
+                },
+                handler=_artifact_update,
+                category=CATEGORY_WRITE,
+                timeout_s=20.0,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="artifacts_list",
+                description="Liste les artefacts Canvas du projet avec leurs ids.",
+                parameters={
+                    "type": "object",
+                    "properties": {"project_id": {"type": "string"}},
+                    "required": [],
+                },
+                handler=_artifacts_list,
+                category=CATEGORY_READ,
+                timeout_s=15.0,
             )
         )

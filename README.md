@@ -296,6 +296,9 @@ node --test tests\js\math-renderer.test.cjs
 .\.venv\Scripts\python.exe -m scripts.serve info
 .\.venv\Scripts\python.exe -m scripts.eval_agents --model gemma-4-e4b
 .\.venv\Scripts\python.exe -m scripts.check_perf --model gemma-4-12b
+
+# Tout en une commande (statique ; --live ajoute évals + budgets perf) :
+.\.venv\Scripts\python.exe -m scripts.validate_all
 ```
 
 Les ressources tierces livrées dans `chat/web/vendor` conservent leurs fichiers
