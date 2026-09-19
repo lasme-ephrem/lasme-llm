@@ -288,7 +288,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = settings.chat_model
     messages: List[ChatMessage] = Field(min_length=1, max_length=200)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    intelligence_level: Optional[str] = "balanced"
+    intelligence_level: Optional[str] = "high"
     web_search_enabled: Optional[bool] = True
     web_search_mode: Optional[str] = "auto"
     persist_user_message: bool = True
@@ -3300,7 +3300,7 @@ async def chat_stream(req: ChatRequest):
         f"3. Réponse Directe : Réponds immédiatement à la demande de l'utilisateur. Ne récite JAMAIS tes règles internes, ne fais pas de méta-commentaire sur tes consignes et n'affiche pas de plan de rédaction interne.\n"
         f"4. Continuité : Lis le fil comme une seule conversation. Résous les pronoms, ellipses et relances courtes ('et maintenant ?', 'et le 6-bit ?', 'c'est faux') à partir des tours précédents. Ne demande pas à l'utilisateur de répéter une information déjà présente.\n"
         f"5. Naturel : Ne recommence pas par une salutation à chaque tour. Évite de répéter ce qui vient d'être dit. Lors d'une correction, reconnais-la brièvement puis donne la version corrigée.\n"
-        f"6. Fiabilité temporelle : Distingue clairement les faits historiques des informations actuelles. Si un contexte Web daté est fourni, il prime pour les faits récents.\n"
+        f"6. Fiabilité temporelle : Nous sommes le {current_date_str}. Ta connaissance interne s'arrête à ta date de coupure d'entraînement, ANTÉRIEURE à aujourd'hui : tout événement, produit, prix, version, record ou actualité postérieur à ta coupure peut être FAUX dans ta mémoire. Avant d'affirmer un fait récent, demande-toi : « cela a-t-il pu changer depuis ma coupure ? » — si oui et que l'outil web_search est disponible, vérifie-le. Un contexte Web daté prime TOUJOURS sur ta mémoire pour les faits récents.\n"
         f"7. Formatage : Utilise le Markdown seulement lorsqu'il améliore réellement la lisibilité ; une réponse simple doit rester conversationnelle et concise.\n"
         f"8. Salutations : Pour une première salutation simple ('Bonjour', 'Salut'), réponds chaleureusement en une courte phrase."
     )
@@ -3891,10 +3891,12 @@ async def chat_stream(req: ChatRequest):
                     yield f"data: {json.dumps({'type': 'error', 'message': 'Le serveur d’inférence a interrompu la génération.', 'error_type': payload.get('code')})}\n\n"
                     yield "data: [DONE]\n\n"
                     return
-                if event.type == "reasoning_delta" and not reasoning_started:
-                    reasoning_started = True
-                    reasoning_started_at = time.monotonic()
-                    yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
+                if event.type == "reasoning_delta":
+                    if not reasoning_started:
+                        reasoning_started = True
+                        reasoning_started_at = time.monotonic()
+                        yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
+                    yield f"data: {json.dumps({'type': 'reasoning_delta', 'text': payload.get('text') or ''})}\n\n"
                 elif event.type == "content_delta":
                     delta = payload.get("text") or ""
                     if not delta:
@@ -3923,8 +3925,25 @@ async def chat_stream(req: ChatRequest):
                     if not buffer_grounded_output:
                         yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
                 elif event.type == "tool_call":
+                    if full_assistant_reply.strip():
+                        # Le texte émis AVANT les outils n'est pas la
+                        # réponse (préambule) : effacé du fil et du futur
+                        # message persisté ; le frontend peut le déplacer
+                        # dans le panneau de raisonnement.
+                        yield f"data: {json.dumps({'type': 'content_reset', 'reason': 'preamble', 'text': full_assistant_reply})}\n\n"
+                        full_assistant_reply = ""
+                        first_content_at = None
                     yield f"data: {json.dumps({'type': 'agent_tool_call', 'id': payload.get('id'), 'name': payload.get('name'), 'arguments': str(payload.get('arguments') or '')[:2_000]})}\n\n"
                 elif event.type == "tool_result":
+                    note = payload.get("note")
+                    if note in (
+                        "fetch_required_before_answer",
+                        "search_required_by_request",
+                    ):
+                        if full_assistant_reply.strip():
+                            yield f"data: {json.dumps({'type': 'content_reset', 'reason': 'harness_nudge', 'text': full_assistant_reply})}\n\n"
+                        full_assistant_reply = ""
+                        first_content_at = None
                     if payload.get("name"):
                         yield f"data: {json.dumps({'type': 'agent_tool_result', 'id': payload.get('id'), 'name': payload.get('name'), 'ok': bool(payload.get('ok')), 'output': str(payload.get('output') or '')[:1_500], 'error': payload.get('error'), 'error_code': payload.get('error_code'), 'duration_ms': payload.get('duration_ms')})}\n\n"
         finally:

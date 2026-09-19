@@ -242,9 +242,9 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(btn => {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
-            reasoningLevelSelect.value = btn.dataset.level || "balanced";
+            reasoningLevelSelect.value = btn.dataset.level || "high";
             if (selectedReasoningName) {
-                selectedReasoningName.textContent = btn.dataset.label || "Équilibré";
+                selectedReasoningName.textContent = btn.dataset.label || "Approfondi";
             }
             document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(option => {
                 option.classList.remove("intel-active");
@@ -1613,7 +1613,7 @@ async function sendChatMessage(options = {}) {
                 selected_file_ids: requestSelectedFileIds,
                 model: selectedModel,
                 messages: cleanHistory,
-                intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "balanced",
+                intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "high",
                 web_search_enabled: webSearchToggle.checked,
                 web_search_mode: activeWebMode,
                 persist_user_message: (
