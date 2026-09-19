@@ -63,6 +63,16 @@
   background: var(--bg-primary, #101017); color: inherit;
   border: 1px solid var(--border, #2a2a35);
 }
+.composer-column { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.attach-chip { display: flex; align-items: center; gap: 8px; }
+.attach-chip img {
+  height: 44px; max-width: 90px; object-fit: cover;
+  border-radius: 6px; border: 1px solid var(--border, #2a2a35);
+}
+.attach-chip button {
+  border: none; background: transparent; color: var(--muted, #8b8b9e);
+  cursor: pointer; font-size: 13px;
+}
 .agent-composer button, .agent-top select {
   border-radius: 10px; border: 1px solid var(--border, #2a2a35);
   background: var(--bg-secondary, #17171f); color: inherit;
@@ -126,7 +136,15 @@
   <main class="agent-timeline" id="timeline"></main>
   <div class="agent-metrics" id="metrics"></div>
   <form class="agent-composer" id="composer">
-    <textarea id="prompt" placeholder="Donne une mission à l'agent… (Entrée pour envoyer)" rows="2"></textarea>
+    <div class="composer-column">
+      <div id="attachChip" class="attach-chip" hidden>
+        <img id="attachThumb" alt="Image jointe">
+        <button type="button" id="attachRemove" title="Retirer l'image">✕</button>
+      </div>
+      <textarea id="prompt" placeholder="Donne une mission à l'agent… (Entrée pour envoyer)" rows="2"></textarea>
+    </div>
+    <button type="button" id="attachBtn" title="Joindre une image">📎</button>
+    <input type="file" id="attachInput" accept="image/png,image/jpeg,image/webp" hidden>
     <button type="button" id="stop" hidden>Arrêter</button>
     <button type="submit" class="primary" id="send">Envoyer</button>
   </form>

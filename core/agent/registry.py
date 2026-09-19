@@ -19,11 +19,14 @@ def build_agent_registry(
     file_store: Optional[Any] = None,
     vision_client: Optional[Any] = None,
     vision_model: str = "gemma-4-12b",
+    prebound_image: Optional[str] = None,
 ) -> ToolRegistry:
     """Builtin tools + web + platform tools, with injectable engines.
 
     ``search_fn``/``fetch_fn`` default to the proven v1 chain; a tinyfish
     (Monid) engine can be injected later without touching contracts.
+    ``prebound_image`` attaches one image to the whole run: analyze_image
+    then takes only a question.
     """
     registry = build_default_registry()
 
@@ -37,5 +40,6 @@ def build_agent_registry(
         file_store=file_store,
         vision_client=vision_client,
         vision_model=vision_model,
+        prebound_image=prebound_image,
     )
     return registry

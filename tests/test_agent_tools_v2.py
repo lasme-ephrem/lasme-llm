@@ -138,6 +138,46 @@ class PlatformToolsTests(unittest.IsolatedAsyncioTestCase):
         registry = self._registry()
         self.assertNotIn("analyze_image", registry.names())
 
+    async def test_prebound_image_simplifies_vision_schema(self):
+        class FakeVisionClient:
+            async def chat(self, model, messages, **kwargs):
+                self.messages = messages
+                return {"message": {"content": "un carré rouge"}}
+
+        vision = FakeVisionClient()
+        registry = build_agent_registry(
+            search_fn=_fake_search_fn,
+            fetch_fn=_fake_fetch_fn,
+            vision_client=vision,
+            prebound_image="QUJD",  # "ABC" en base64
+        )
+        tool = registry.get("analyze_image")
+        self.assertNotIn("image_base64", tool.parameters["properties"])
+        result = await registry.execute(
+            "analyze_image", '{"question": "Que vois-tu ?"}'
+        )
+        self.assertTrue(result.ok)
+        self.assertIn("un carré rouge", result.output)
+        # L'image pré-liée part bien dans la requête vision.
+        parts = vision.messages[0]["content"]
+        self.assertIn("QUJD", parts[1]["image_url"]["url"])
+
+    async def test_vision_tool_without_prebound_requires_image(self):
+        class FakeVisionClient:
+            async def chat(self, model, messages, **kwargs):
+                return {"message": {"content": "ok"}}
+
+        registry = build_agent_registry(
+            search_fn=_fake_search_fn,
+            fetch_fn=_fake_fetch_fn,
+            vision_client=FakeVisionClient(),
+        )
+        missing = await registry.execute(
+            "analyze_image", '{"question": "Que vois-tu ?"}'
+        )
+        self.assertFalse(missing.ok)
+        self.assertEqual(missing.error_code, "schema_violation")
+
     async def test_unknown_tool_lists_available(self):
         registry = self._registry()
         result = await registry.execute("nope", "{}")

@@ -13,9 +13,15 @@ const stopBtn = document.getElementById("stop");
 const historyList = document.getElementById("historyList");
 const newRunBtn = document.getElementById("newRunBtn");
 const historyToggle = document.getElementById("historyToggle");
+const attachBtn = document.getElementById("attachBtn");
+const attachInput = document.getElementById("attachInput");
+const attachChip = document.getElementById("attachChip");
+const attachThumb = document.getElementById("attachThumb");
+const attachRemove = document.getElementById("attachRemove");
 
 let controller = null;
 let replayMode = false;
+let attachedImage = null; // { base64, dataUrl }
 const history = []; // {role, content} — seuls les finals alimentent le contexte
 
 function el(tag, className, text) {
@@ -177,7 +183,7 @@ function clearTimeline() {
 
 /* ------------------------------------------------------------- live runs */
 
-async function streamAgent(messages, model, maxTurns) {
+async function streamAgent(messages, model, maxTurns, imageBase64 = null) {
   controller = new AbortController();
   stopBtn.hidden = false;
   sendBtn.disabled = true;
@@ -188,7 +194,10 @@ async function streamAgent(messages, model, maxTurns) {
     const response = await fetch("/api/agent/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, model, max_turns: maxTurns }),
+      body: JSON.stringify({
+        messages, model, max_turns: maxTurns,
+        ...(imageBase64 ? { image_base64: imageBase64 } : {}),
+      }),
       signal: controller.signal,
     });
     if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -297,14 +306,25 @@ async function loadModels() {
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = promptEl.value.trim();
-  if (!text || controller) return;
+  if ((!text && !attachedImage) || controller) return;
   replayMode = false;
   promptEl.value = "";
   clearTimeline();
   const renderer = new TimelineRenderer();
-  renderer.addUserMessage(text);
-  const messages = [...history, { role: "user", content: text }];
-  streamAgent(messages, modelSelect.value, Number(turnsSelect.value));
+  const image = attachedImage ? attachedImage.base64 : null;
+  if (attachedImage) {
+    const chip = el("div", "user-msg");
+    const img = document.createElement("img");
+    img.src = attachedImage.dataUrl;
+    img.style.maxHeight = "120px";
+    img.style.borderRadius = "8px";
+    chip.appendChild(img);
+    timeline.appendChild(chip);
+    detachImage();
+  }
+  renderer.addUserMessage(text || "Analyse cette image.");
+  const messages = [...history, { role: "user", content: text || "Analyse cette image." }];
+  streamAgent(messages, modelSelect.value, Number(turnsSelect.value), image);
 });
 
 promptEl.addEventListener("keydown", (event) => {
@@ -328,6 +348,37 @@ newRunBtn.addEventListener("click", () => {
 historyToggle?.addEventListener("click", () => {
   document.querySelector(".agent-history")?.classList.toggle("open");
 });
+
+/* --------------------------------------------------------- image attach */
+
+function detachImage() {
+  attachedImage = null;
+  attachChip.hidden = true;
+  attachInput.value = "";
+}
+
+attachBtn.addEventListener("click", () => attachInput.click());
+
+attachInput.addEventListener("change", async () => {
+  const file = attachInput.files && attachInput.files[0];
+  if (!file) return;
+  if (file.size > 4 * 1024 * 1024) {
+    metricsEl.textContent = "Image trop lourde (max 4 Mo).";
+    attachInput.value = "";
+    return;
+  }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  attachedImage = { dataUrl, base64: String(dataUrl).split(",")[1] || "" };
+  attachThumb.src = dataUrl;
+  attachChip.hidden = false;
+});
+
+attachRemove.addEventListener("click", detachImage);
 
 loadModels();
 loadHistory();

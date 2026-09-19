@@ -48,6 +48,7 @@ def register_platform_tools(
     file_store: Optional[Any] = None,
     vision_client: Optional[Any] = None,
     vision_model: str = "gemma-4-12b",
+    prebound_image: Optional[str] = None,
 ) -> None:
     if rag_search_fn is not None:
         async def _rag_search(args: Dict[str, Any]) -> str:
@@ -191,15 +192,14 @@ def register_platform_tools(
 
     if vision_client is not None:
         async def _analyze_image(args: Dict[str, Any]) -> str:
+            image = args.get("image_base64") or prebound_image or ""
             message = {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": str(args["question"])},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{args['image_base64']}"
-                        },
+                        "image_url": {"url": f"data:image/jpeg;base64,{image}"},
                     },
                 ],
             }
@@ -211,25 +211,36 @@ def register_platform_tools(
             )
             return response["message"]["content"] or "(aucune réponse)"
 
+        properties: Dict[str, Any] = {
+            "question": {"type": "string"},
+            "max_tokens": {"type": "integer", "enum": [300, 700, 1500]},
+        }
+        required = ["question"]
+        description = (
+            "Analyse l'image jointe à la mission (photo, capture, diagramme, "
+            "tableau) avec le modèle de vision local. Pose la question "
+            "précise à répondre sur l'image."
+        )
+        if not prebound_image:
+            properties["image_base64"] = {
+                "type": "string",
+                "description": "Image encodée en base64",
+            }
+            required = ["image_base64", "question"]
+            description = (
+                "Analyse une image (photo, capture, diagramme, tableau) "
+                "avec le modèle de vision local. Fournis la question "
+                "précise à répondre sur l'image."
+            )
+
         registry.register(
             ToolDefinition(
                 name="analyze_image",
-                description=(
-                    "Analyse une image (photo, capture, diagramme, tableau) "
-                    "avec le modèle de vision local. Fournis la question "
-                    "précise à répondre sur l'image."
-                ),
+                description=description,
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "image_base64": {
-                            "type": "string",
-                            "description": "Image encodée en base64",
-                        },
-                        "question": {"type": "string"},
-                        "max_tokens": {"type": "integer", "enum": [300, 700, 1500]},
-                    },
-                    "required": ["image_base64", "question"],
+                    "properties": properties,
+                    "required": required,
                 },
                 handler=_analyze_image,
                 category=CATEGORY_READ,

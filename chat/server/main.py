@@ -279,6 +279,7 @@ class AgentStreamRequest(BaseModel):
     model: Optional[str] = None
     max_turns: int = Field(default=8, ge=1, le=16)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    image_base64: Optional[str] = Field(default=None, max_length=8_000_000)
 
 AGENT_SYSTEM_PROMPT = (
     "Tu es Lasme, un assistant agentique local. Tu disposes d'outils : "
@@ -3115,10 +3116,17 @@ async def agent_stream(req: AgentStreamRequest):
         file_store=project_file_store,
         vision_client=client,
         vision_model=settings.vision_model,
+        prebound_image=(req.image_base64 or None),
     )
+    system_prompt = AGENT_SYSTEM_PROMPT
+    if req.image_base64:
+        system_prompt += (
+            " Une image est jointe à cette mission : utilise l'outil "
+            "analyze_image avec ta question pour l'examiner."
+        )
     config = AgentConfig(
         model=selected_model,
-        system_prompt=AGENT_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         max_turns=req.max_turns,
         temperature=(
             get_model_profile(selected_model).temperature
