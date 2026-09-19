@@ -102,7 +102,8 @@ const mobilePickerMedia = window.matchMedia("(max-width: 768px)");
 
 function modelIconMarkup(model) {
     const normalized = String(model || "").toLowerCase();
-    if (normalized.includes("smol") || normalized.includes("fast")) {
+    if (normalized.includes("smol") || normalized.includes("fast")
+        || normalized.includes("e4b") || normalized.includes("e2b")) {
         return `
             <svg viewBox="0 0 24 24" fill="none">
                 <path d="M4 8.25h6M2.5 12h6M4 15.75h6" class="model-mark-detail"></path>
@@ -133,6 +134,7 @@ function updateModelIdentity(model) {
     if (!modelTriggerIcon) return;
     const normalized = String(model || "").toLowerCase();
     const identity = normalized.includes("smol") || normalized.includes("fast")
+        || normalized.includes("e4b") || normalized.includes("e2b")
         ? "fast"
         : (normalized.includes("qwen") || normalized.includes("vision") ? "vision" : "chat");
     ["chat", "fast", "vision", "fable"].forEach(name => {
@@ -222,7 +224,7 @@ if (modelPickerTrigger && modelPickerDropdown) {
     });
 }
 
-updateModelIdentity(inputModelSelect?.value || "muse-glimmer:30b-q4_K_M-dflash");
+updateModelIdentity(inputModelSelect?.value || "gemma-4-12b");
 
 if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     reasoningPickerTrigger.addEventListener("click", (e) => {
@@ -1579,7 +1581,7 @@ async function sendChatMessage(options = {}) {
             return rest;
         });
 
-        const selectedModel = inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash";
+        const selectedModel = inputModelSelect ? inputModelSelect.value : "gemma-4-12b";
         const activeWebMode = webSearchBtn
             ? (webSearchBtn.dataset.mode || "auto")
             : "auto";
@@ -1967,7 +1969,7 @@ async function sendChatMessage(options = {}) {
         if (activeSessionIdForStream && fullResponse) {
             void loadSuggestedQuestions(
                 activeSessionIdForStream,
-                inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash",
+                inputModelSelect ? inputModelSelect.value : "gemma-4-12b",
                 assistantBubble
             );
         }
@@ -2279,9 +2281,14 @@ function renderGenerationPerformance(container, rawStats) {
         );
     }
     if (stats.model) {
-        const modelLabel = String(stats.model).includes("fable")
-            ? "Gemma 4 Fable"
-            : "Gemma 4 Chat";
+        const modelKey = String(stats.model || "").toLowerCase();
+        const modelLabel = modelKey.includes("256k")
+            ? "Gemma 4 12B · 256K"
+            : modelKey.includes("e4b")
+            ? "Gemma 4 E4B"
+            : modelKey.includes("e2b")
+            ? "Gemma 4 E2B"
+            : "Gemma 4 12B";
         detailParts.push(modelLabel);
     }
     performance.title = detailParts.length
