@@ -32,7 +32,6 @@ from core.inference.profiles import (
     RUNTIME_PROFILES,
     get_model_profile,
 )
-from core.agent.registry import build_agent_registry
 from chat.server.routers.agent import AgentDeps, create_agent_router
 from core.config import settings
 from core.tools.web_search import (

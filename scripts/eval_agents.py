@@ -80,6 +80,23 @@ SCENARIOS = [
         "check_extra": _has_time,
         "expect_tools": 2,
     },
+    {
+        "name": "outil_inexistant",
+        "prompt": (
+            "Traduit 'bonjour' en anglais. Si l'outil exact n'existe pas, "
+            "réponds directement sans inventer d'outil."
+        ),
+        "expect": "hello",
+    },
+    {
+        "name": "echo_determinisme",
+        "prompt": (
+            "Utilise l'outil echo avec le texte LASME-OK-42 puis répète "
+            "exactement ce qu'il retourne."
+        ),
+        "expect": "lasme-ok-42",
+        "expect_tools": 1,
+    },
 ]
 
 
