@@ -3622,7 +3622,14 @@ async def chat_stream(req: ChatRequest):
             )
             yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': web_event_message, 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
 
-        if strict_grounding and not web_results_data:
+        if (
+            strict_grounding
+            and not web_results_data
+            and not web_tools_available
+        ):
+            # Le web est désactivé par l'utilisateur ET la demande exige
+            # des faits vérifiés : refus honnête. Quand les outils web
+            # sont disponibles, l'agent recherche et lit lui-même (W3).
             if is_commercial_comparison(last_user_msg):
                 full_assistant_reply = (
                     "Je n’ai pas obtenu au moins deux sources suffisamment "
