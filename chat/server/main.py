@@ -32,11 +32,15 @@ from core.inference.profiles import (
     RUNTIME_PROFILES,
     get_model_profile,
 )
-from core.agent.builtin import build_default_registry
+from core.agent.registry import build_agent_registry
 from core.agent.events import AgentEvent
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.config import settings
-from core.tools.web_search import format_search_results
+from core.tools.web_search import (
+    fetch_url_content,
+    format_search_results,
+    search_web_detailed,
+)
 from core.tools.search_providers import detect_search_vertical
 from core.tools.search_ranking import (
     is_commercial_comparison,
@@ -3077,7 +3081,21 @@ async def generate_follow_up_suggestions(req: SuggestionRequest):
 async def agent_stream(req: AgentStreamRequest):
     """Agentic run with typed SSE events: reasoning, tool calls, results."""
     selected_model = _validate_model_name(req.model or settings.chat_model)
-    registry = build_default_registry()
+
+    async def rag_search(query: str, top_k: int):
+        return rag_store.search_scopes(
+            [DEFAULT_PROJECT_ID], query, top_k=top_k
+        )
+
+    registry = build_agent_registry(
+        search_fn=search_web_detailed,
+        fetch_fn=fetch_url_content,
+        rag_search_fn=rag_search,
+        python_runner=python_runner,
+        file_store=project_file_store,
+        vision_client=client,
+        vision_model=settings.vision_model,
+    )
     config = AgentConfig(
         model=selected_model,
         system_prompt=AGENT_SYSTEM_PROMPT,
