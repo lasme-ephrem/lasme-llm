@@ -345,10 +345,10 @@
                                 <input type="checkbox" id="webSearchToggle" checked style="display:none;">
 
                                 <select id="inputModelSelect" class="input-model-dropdown" style="display:none;">
-                                    <option value="muse-glimmer:30b-q4_K_M-dflash" selected>Muse Glimmer</option>
-                                    <option value="gemma-4-chat">Gemma 4 Chat</option>
-                                    <option value="lasme-smol-fast">Lasme Rapide</option>
-                                    <option value="lasme-qwen-vision">Lasme Vision</option>
+                                    <option value="gemma-4-12b" selected>Gemma 4 12B</option>
+                                    <option value="gemma-4-e4b">Gemma 4 E4B</option>
+                                    <option value="gemma-4-e2b">Gemma 4 E2B</option>
+                                    <option value="gemma-4-12b-256k">Gemma 4 12B 256K</option>
                                 </select>
 
                                 <!-- Model Selection Popover Menu -->
@@ -361,13 +361,13 @@
                                                 <path d="M8.5 8.95h7M8.5 11.35h4.5" class="model-mark-detail"></path>
                                             </svg>
                                         </span>
-                                        <span class="intel-label" id="selectedModelName">Muse Glimmer</span>
+                                        <span class="intel-label" id="selectedModelName">Gemma 4 12B</span>
                                         <svg class="intel-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                                     </button>
                                     <div class="intelligence-dropdown" id="modelPickerDropdown">
                                         <div class="intel-header">Modèle Actif</div>
 
-                                        <button type="button" class="intel-option intel-active" data-model="muse-glimmer:30b-q4_K_M-dflash" data-label="Muse Glimmer">
+                                        <button type="button" class="intel-option intel-active" data-model="gemma-4-12b" data-label="Gemma 4 12B">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap model-mark model-mark-chat" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
@@ -377,13 +377,13 @@
                                                     </svg>
                                                 </div>
                                                 <div class="intel-option-text">
-                                                    <div class="intel-option-name">Muse Glimmer</div>
-                                                    <div class="intel-option-desc">Glimmer 30B · Q4 · Flash Attn · agentique</div>
+                                                    <div class="intel-option-name">Gemma 4 12B</div>
+                                                    <div class="intel-option-desc">Qualité & agent · 128K · vision native</div>
                                                 </div>
                                             </div>
                                             <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
-                                        <button type="button" class="intel-option" data-model="gemma-4-chat" data-label="Gemma 4 Chat">
+                                        <button type="button" class="intel-option" data-model="gemma-4-e4b" data-label="Gemma 4 E4B">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap model-mark model-mark-chat" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
@@ -393,13 +393,13 @@
                                                     </svg>
                                                 </div>
                                                 <div class="intel-option-text">
-                                                    <div class="intel-option-name">Gemma 4 Chat</div>
-                                                    <div class="intel-option-desc">Chat généraliste · Q4</div>
+                                                    <div class="intel-option-name">Gemma 4 E4B</div>
+                                                    <div class="intel-option-desc">Vitesse · réponses rapides</div>
                                                 </div>
                                             </div>
                                             <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
-                                        <button type="button" class="intel-option" data-model="lasme-smol-fast" data-label="Lasme Rapide">
+                                        <button type="button" class="intel-option" data-model="gemma-4-e2b" data-label="Gemma 4 E2B">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap model-mark model-mark-fast" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
@@ -409,13 +409,13 @@
                                                     </svg>
                                                 </div>
                                                 <div class="intel-option-text">
-                                                    <div class="intel-option-name">Lasme Rapide</div>
+                                                    <div class="intel-option-name">Gemma 4 E2B</div>
                                                     <div class="intel-option-desc">SmolLM3 3B · Q6 · très rapide</div>
                                                 </div>
                                             </div>
                                             <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
-                                        <button type="button" class="intel-option" data-model="lasme-qwen-vision" data-label="Lasme Vision">
+                                        <button type="button" class="intel-option" data-model="gemma-4-12b-256k" data-label="Gemma 4 12B 256K">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap model-mark model-mark-vision" aria-hidden="true">
                                                     <svg viewBox="0 0 24 24" fill="none">
@@ -425,7 +425,7 @@
                                                     </svg>
                                                 </div>
                                                 <div class="intel-option-text">
-                                                    <div class="intel-option-name">Lasme Vision</div>
+                                                    <div class="intel-option-name">Gemma 4 12B 256K</div>
                                                     <div class="intel-option-desc">Qwen3-VL 8B · Q4 · images</div>
                                                 </div>
                                             </div>

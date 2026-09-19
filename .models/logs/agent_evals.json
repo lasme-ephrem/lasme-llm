@@ -1,16 +1,16 @@
 {
   "model": "gemma-4-e4b",
-  "ts": "2026-09-19T06:59:32",
+  "ts": "2026-09-19T07:28:26",
   "rows": [
     {
       "scenario": "calc_direct",
       "ok": true,
-      "final_excerpt": "Le résultat de (17*23)+100 est **491**.",
+      "final_excerpt": "Le résultat de (17*23)+100 est 491.",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.3
+      "seconds": 2.8
     },
     {
       "scenario": "calc_puissance",
@@ -30,17 +30,17 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.0
+      "seconds": 1.2
     },
     {
       "scenario": "heure",
       "ok": true,
-      "final_excerpt": "Nous sommes le **samedi 19 septembre 2026**.\n\nIl est actuellement **06:59:28** (heure de Paris/Madrid en heure d'été).",
+      "final_excerpt": "Nous sommes le **samedi 19 septembre 2026** à **07:28:21** (heure de Paris/Madrid, heure d'été).",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.3
+      "seconds": 1.1
     },
     {
       "scenario": "sans_outil",
@@ -50,7 +50,7 @@
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.0
+      "seconds": 1.1
     },
     {
       "scenario": "multi_outils",
@@ -60,17 +60,17 @@
       "tool_calls": 2,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.2
+      "seconds": 1.0
     },
     {
       "scenario": "outil_inexistant",
       "ok": true,
-      "final_excerpt": "Bonjour se traduit par \"Hello\" ou \"Good morning\" en anglais.",
+      "final_excerpt": "Bonjour se traduit par \"hello\" ou \"good morning\" en anglais.",
       "turns": 1,
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.9
+      "seconds": 0.6
     },
     {
       "scenario": "echo_determinisme",

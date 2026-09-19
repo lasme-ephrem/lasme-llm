@@ -33,6 +33,8 @@ from core.inference.profiles import (
     get_model_profile,
 )
 from chat.server.routers.agent import AgentDeps, create_agent_router
+from core.agent.orchestrator import AgentConfig, AgentOrchestrator
+from core.agent.registry import build_agent_registry
 from core.config import settings
 from core.tools.web_search import (
     fetch_url_content,
@@ -3851,60 +3853,138 @@ async def chat_stream(req: ChatRequest):
             strict_grounding and web_results_data
         )
 
-        async for chunk in client.stream_chat(
+        # --- Boucle agentique ------------------------------------------------
+        # Le chat passe par l’orchestrateur : même contrat SSE que avant
+        # (reasoning_start/done, content_delta, generation_stats), plus les
+        # événements d’outils (agent_tool_call / agent_tool_result) que le
+        # frontend rend en cartes repliables.
+        rag_scope_ids = (
+            [req.document_scope_id] if req.document_scope_id else [project_id]
+        )
+
+        async def chat_rag_search(query: str, top_k: int):
+            return rag_store.search_scopes(
+                rag_scope_ids,
+                query,
+                top_k=top_k,
+                file_ids=req.selected_file_ids or None,
+            )
+
+        chat_registry = build_agent_registry(
+            search_fn=search_web_detailed,
+            fetch_fn=fetch_url_content,
+            rag_search_fn=chat_rag_search,
+            python_runner=python_runner,
+            file_store=project_file_store,
+            vision_client=client,
+            vision_model=settings.vision_model,
+            artifact_store=artifact_store,
+            default_project_id=project_id,
+        )
+        agent_config = AgentConfig(
             model=selected_model,
-            messages=stream_messages,
+            system_prompt="",  # stream_messages porte déjà le prompt système
+            max_turns=6,
+            initial_tool_budget=output_budget,
             temperature=final_temperature,
-            num_ctx=model_profile.num_ctx,
-            num_predict=output_budget,
-            options=model_profile.options,
-            think=reasoning_effort,
-        ):
-            if chunk.get("_error"):
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Le serveur d’inférence a interrompu la génération.', 'error_type': chunk['_error']})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-            message_chunk = chunk.get("message", {})
-            thinking_delta = message_chunk.get("thinking", "")
-            if thinking_delta and not reasoning_started:
-                reasoning_started = True
-                reasoning_started_at = time.monotonic()
-                yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
+            think=(
+                reasoning_effort
+                if reasoning_effort is not None
+                else model_profile.think
+            ),
+        )
+        chat_orchestrator = AgentOrchestrator(
+            client, chat_registry, agent_config
+        )
+        agent_tool_names: List[str] = []
+        agent_queue: asyncio.Queue = asyncio.Queue()
 
-            delta = message_chunk.get("content", "")
-            if delta:
-                if first_content_at is None:
-                    first_content_at = time.monotonic()
-                if reasoning_started and not reasoning_finished:
-                    reasoning_finished = True
-                    duration = round(time.monotonic() - reasoning_started_at, 1)
-                    summary_parts = ["Analyse terminée."]
-                    if context_selection.selected_message_count > 1:
-                        summary_parts.insert(
-                            0,
-                            "Contexte de la conversation pris en compte.",
-                        )
-                    if web_results_data:
-                        summary_parts.insert(
-                            0,
-                            f"{len(web_results_data)} sources Web consultées.",
-                        )
-                    if rag_context:
-                        summary_parts.insert(0, "Documents joints analysés.")
-                    yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': ' '.join(summary_parts)})}\n\n"
+        def on_agent_event(event) -> None:
+            if event.type == "tool_call":
+                agent_tool_names.append(event.payload.get("name") or "?")
+            agent_queue.put_nowait(event)
 
-                clean_delta = clean_model_text(delta)
-                full_assistant_reply += clean_delta
-                if not buffer_grounded_output:
-                    yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
-
-            if chunk.get("done"):
-                generation_stats = build_generation_stats(
-                    chunk,
-                    model=selected_model,
-                    started_at=generation_started_at,
-                    first_content_at=first_content_at,
+        async def run_chat_agent():
+            try:
+                return await chat_orchestrator.run(
+                    stream_messages, on_event=on_agent_event
                 )
+            finally:
+                agent_queue.put_nowait(None)
+
+        agent_task = asyncio.create_task(run_chat_agent())
+        agent_result = None
+        try:
+            while True:
+                event = await agent_queue.get()
+                if event is None:
+                    break
+                payload = event.payload
+                if event.type == "agent_error":
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Le serveur d’inférence a interrompu la génération.', 'error_type': payload.get('code')})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                if event.type == "reasoning_delta" and not reasoning_started:
+                    reasoning_started = True
+                    reasoning_started_at = time.monotonic()
+                    yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
+                elif event.type == "content_delta":
+                    delta = payload.get("text") or ""
+                    if not delta:
+                        continue
+                    if first_content_at is None:
+                        first_content_at = time.monotonic()
+                    if reasoning_started and not reasoning_finished:
+                        reasoning_finished = True
+                        duration = round(time.monotonic() - reasoning_started_at, 1)
+                        summary_parts = ["Analyse terminée."]
+                        if context_selection.selected_message_count > 1:
+                            summary_parts.insert(
+                                0,
+                                "Contexte de la conversation pris en compte.",
+                            )
+                        if web_results_data:
+                            summary_parts.insert(
+                                0,
+                                f"{len(web_results_data)} sources Web consultées.",
+                            )
+                        if rag_context:
+                            summary_parts.insert(0, "Documents joints analysés.")
+                        yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': ' '.join(summary_parts)})}\n\n"
+                    clean_delta = clean_model_text(delta)
+                    full_assistant_reply += clean_delta
+                    if not buffer_grounded_output:
+                        yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
+                elif event.type == "tool_call":
+                    yield f"data: {json.dumps({'type': 'agent_tool_call', 'id': payload.get('id'), 'name': payload.get('name'), 'arguments': str(payload.get('arguments') or '')[:2_000]})}\n\n"
+                elif event.type == "tool_result":
+                    if payload.get("name"):
+                        yield f"data: {json.dumps({'type': 'agent_tool_result', 'id': payload.get('id'), 'name': payload.get('name'), 'ok': bool(payload.get('ok')), 'output': str(payload.get('output') or '')[:1_500], 'error': payload.get('error'), 'error_code': payload.get('error_code'), 'duration_ms': payload.get('duration_ms')})}\n\n"
+        finally:
+            if not agent_task.done():
+                agent_task.cancel()
+        if agent_task.done() and not agent_task.cancelled():
+            agent_result = agent_task.exception() is None and agent_task.result() or None
+
+        if agent_result is not None:
+            elapsed = time.monotonic() - generation_started_at
+            gen_seconds = (
+                (time.monotonic() - first_content_at) if first_content_at else 0.0
+            )
+            synthetic_final_chunk = {
+                "eval_count": agent_result.usage.get("output_tokens", 0),
+                "prompt_eval_count": agent_result.usage.get("prompt_tokens", 0),
+                "eval_duration": int(gen_seconds * 1e9),
+                "prompt_eval_duration": int(max(elapsed - gen_seconds, 0.0) * 1e9),
+                "total_duration": int(elapsed * 1e9) + 1,
+                "done_reason": agent_result.done_reason,
+            }
+            generation_stats = build_generation_stats(
+                synthetic_final_chunk,
+                model=selected_model,
+                started_at=generation_started_at,
+                first_content_at=first_content_at,
+            )
 
         if reasoning_started and not reasoning_finished:
             duration = round(time.monotonic() - reasoning_started_at, 1)
@@ -3953,6 +4033,26 @@ async def chat_stream(req: ChatRequest):
                 )
                 if generation_stats:
                     message_metadata["generation_stats"] = generation_stats
+                if agent_result is not None and (
+                    agent_result.turns > 1 or agent_tool_names
+                ):
+                    try:
+                        agent_run_id = db.save_agent_run(
+                            model=selected_model,
+                            prompt=last_user_msg,
+                            final_text=full_assistant_reply,
+                            done_reason=agent_result.done_reason,
+                            turns=agent_result.turns,
+                            events=agent_result.log.to_list(),
+                            usage=agent_result.usage,
+                        )
+                        message_metadata["agent"] = {
+                            "run_id": agent_run_id,
+                            "turns": agent_result.turns,
+                            "tools": agent_tool_names,
+                        }
+                    except Exception:  # la persistance agent ne doit pas casser le chat
+                        pass
                 assistant_message_id = db.add_message(
                     session_id,
                     "assistant",

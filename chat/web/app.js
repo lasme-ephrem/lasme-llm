@@ -102,7 +102,8 @@ const mobilePickerMedia = window.matchMedia("(max-width: 768px)");
 
 function modelIconMarkup(model) {
     const normalized = String(model || "").toLowerCase();
-    if (normalized.includes("smol") || normalized.includes("fast")) {
+    if (normalized.includes("smol") || normalized.includes("fast")
+        || normalized.includes("e4b") || normalized.includes("e2b")) {
         return `
             <svg viewBox="0 0 24 24" fill="none">
                 <path d="M4 8.25h6M2.5 12h6M4 15.75h6" class="model-mark-detail"></path>
@@ -133,6 +134,7 @@ function updateModelIdentity(model) {
     if (!modelTriggerIcon) return;
     const normalized = String(model || "").toLowerCase();
     const identity = normalized.includes("smol") || normalized.includes("fast")
+        || normalized.includes("e4b") || normalized.includes("e2b")
         ? "fast"
         : (normalized.includes("qwen") || normalized.includes("vision") ? "vision" : "chat");
     ["chat", "fast", "vision", "fable"].forEach(name => {
@@ -222,7 +224,7 @@ if (modelPickerTrigger && modelPickerDropdown) {
     });
 }
 
-updateModelIdentity(inputModelSelect?.value || "muse-glimmer:30b-q4_K_M-dflash");
+updateModelIdentity(inputModelSelect?.value || "gemma-4-12b");
 
 if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     reasoningPickerTrigger.addEventListener("click", (e) => {
@@ -1546,6 +1548,7 @@ async function sendChatMessage(options = {}) {
     let generationStatsMeta = null;
     
     let reasoningDuration = null;
+    const agentToolEvents = [];
 
     const streamController = new AbortController();
     let streamKey = initialStreamKey;
@@ -1578,7 +1581,7 @@ async function sendChatMessage(options = {}) {
             return rest;
         });
 
-        const selectedModel = inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash";
+        const selectedModel = inputModelSelect ? inputModelSelect.value : "gemma-4-12b";
         const activeWebMode = webSearchBtn
             ? (webSearchBtn.dataset.mode || "auto")
             : "auto";
@@ -1821,6 +1824,30 @@ async function sendChatMessage(options = {}) {
                             parsed.summary || ""
                         );
                     }
+                    if (parsed.type === "agent_tool_call") {
+                        agentToolEvents.push(parsed);
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "tools",
+                            "active",
+                            `Outil · ${parsed.name || "?"}`,
+                            shortToolArgs(parsed.arguments)
+                        );
+                    }
+                    if (parsed.type === "agent_tool_result") {
+                        agentToolEvents.push(parsed);
+                        renderAssistantActivity(
+                            assistantBubble,
+                            "tools",
+                            parsed.ok ? "done" : "warning",
+                            `Outil · ${parsed.name || "?"}`,
+                            parsed.ok
+                                ? (parsed.duration_ms
+                                    ? `${parsed.duration_ms} ms`
+                                    : "terminé")
+                                : (parsed.error_code || "échec")
+                        );
+                    }
                     if (parsed.type === "generation_stats") {
                         generationStatsMeta = parsed;
                     }
@@ -1908,6 +1935,12 @@ async function sendChatMessage(options = {}) {
                                 generationStatsMeta
                             );
                         }
+                        if (agentToolEvents.length) {
+                            renderAgentToolsSummary(
+                                assistantBubble,
+                                agentToolEvents
+                            );
+                        }
                         followStreamingResponse(
                             userMessage,
                             assistantMessage
@@ -1936,7 +1969,7 @@ async function sendChatMessage(options = {}) {
         if (activeSessionIdForStream && fullResponse) {
             void loadSuggestedQuestions(
                 activeSessionIdForStream,
-                inputModelSelect ? inputModelSelect.value : "muse-glimmer:30b-q4_K_M-dflash",
+                inputModelSelect ? inputModelSelect.value : "gemma-4-12b",
                 assistantBubble
             );
         }
@@ -1951,6 +1984,9 @@ async function sendChatMessage(options = {}) {
             }
             if (isStreamVisible()) {
                 renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
+                if (agentToolEvents.length) {
+                    renderAgentToolsSummary(assistantBubble, agentToolEvents);
+                }
             }
             streamConversationHistory.push({ role: "assistant", content: fullResponse });
         } else {
@@ -2121,6 +2157,65 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
     `;
 }
 
+function shortToolArgs(raw) {
+    try {
+        const text = JSON.stringify(JSON.parse(raw || "{}"));
+        return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+    } catch {
+        return (raw || "").slice(0, 160);
+    }
+}
+
+function renderAgentToolsSummary(container, events) {
+    container.querySelector(".agent-tools-group")?.remove();
+    const calls = new Map();
+    for (const event of events) {
+        if (event.type === "agent_tool_call") {
+            calls.set(event.id ?? calls.size, { call: event, result: null });
+        } else if (event.type === "agent_tool_result") {
+            const entry = calls.get(event.id)
+                || [...calls.values()].find((candidate) => !candidate.result);
+            if (entry) entry.result = event;
+        }
+    }
+    if (!calls.size) return;
+    const group = document.createElement("div");
+    group.className = "agent-tools-group";
+    for (const { call, result } of calls.values()) {
+        const card = document.createElement("details");
+        card.className = `agent-tool-card ${result && !result.ok ? "ko" : "ok"}`;
+        const summary = document.createElement("summary");
+        const meta = result
+            ? (result.ok
+                ? (result.duration_ms ? `${result.duration_ms} ms` : "< 5 ms")
+                : (result.error_code || "échec"))
+            : "…";
+        summary.textContent = `${call.name || "?"} — ${meta}`;
+        const args = document.createElement("pre");
+        args.className = "agent-tool-args";
+        try {
+            args.textContent = JSON.stringify(
+                JSON.parse(call.arguments || "{}"), null, 2
+            );
+        } catch {
+            args.textContent = call.arguments || "";
+        }
+        card.append(summary, args);
+        if (result) {
+            const output = document.createElement("pre");
+            output.className = "agent-tool-output";
+            output.textContent = result.ok
+                ? (result.output || "(vide)")
+                : `${result.error_code || "erreur"} : ${result.error || ""}`;
+            card.appendChild(output);
+            if (!result.ok) card.open = true;
+        }
+        group.appendChild(card);
+    }
+    container.querySelector(".assistant-activity[data-kind=\"tools\"]")?.remove();
+    container.prepend(group);
+}
+
 function formatPerformanceNumber(value, maximumFractionDigits = 1) {
     const number = Number(value);
     if (!Number.isFinite(number)) return "";
@@ -2186,9 +2281,14 @@ function renderGenerationPerformance(container, rawStats) {
         );
     }
     if (stats.model) {
-        const modelLabel = String(stats.model).includes("fable")
-            ? "Gemma 4 Fable"
-            : "Gemma 4 Chat";
+        const modelKey = String(stats.model || "").toLowerCase();
+        const modelLabel = modelKey.includes("256k")
+            ? "Gemma 4 12B · 256K"
+            : modelKey.includes("e4b")
+            ? "Gemma 4 E4B"
+            : modelKey.includes("e2b")
+            ? "Gemma 4 E2B"
+            : "Gemma 4 12B";
         detailParts.push(modelLabel);
     }
     performance.title = detailParts.length

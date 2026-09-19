@@ -14,7 +14,7 @@ DEFAULT_PROJECT_NAME = "Espace principal"
 DEFAULT_PROJECT_DESCRIPTION = "Espace permanent pour vos conversations générales."
 # Modèle par défaut de la plateforme ; unique source de vérité pour le
 # schéma, les migrations et les valeurs de repli.
-DEFAULT_MODEL = "muse-glimmer:30b-q4_K_M-dflash"
+DEFAULT_MODEL = "gemma-4-12b"
 PROJECT_TYPES = {
     "general",
     "research",
@@ -217,6 +217,18 @@ class DatabaseManager:
             cursor.execute(
                 "UPDATE sessions SET model = ? "
                 "WHERE model IN ('gemma-4-fable', 'gemma-4-chat')",
+                (DEFAULT_MODEL,),
+            )
+            # La transition v2 retire Muse Glimmer au profit des profils
+            # Gemma 4 servis par le router llama.cpp.
+            cursor.execute(
+                "UPDATE projects SET default_model = ? "
+                "WHERE default_model LIKE 'muse-glimmer%'",
+                (DEFAULT_MODEL,),
+            )
+            cursor.execute(
+                "UPDATE sessions SET model = ? "
+                "WHERE model LIKE 'muse-glimmer%'",
                 (DEFAULT_MODEL,),
             )
             session_columns = {
