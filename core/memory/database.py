@@ -116,6 +116,19 @@ class DatabaseManager:
                 )
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    model TEXT NOT NULL,
+                    prompt TEXT NOT NULL DEFAULT '',
+                    final_text TEXT NOT NULL DEFAULT '',
+                    done_reason TEXT NOT NULL DEFAULT 'stop',
+                    turns INTEGER NOT NULL DEFAULT 0,
+                    events TEXT NOT NULL DEFAULT '[]',
+                    usage TEXT NOT NULL DEFAULT '{}'
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS personal_memories (
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
@@ -996,5 +1009,90 @@ class DatabaseManager:
             cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             conn.commit()
+
+    # ------------------------------------------------------------ agent runs
+
+    def save_agent_run(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        final_text: str,
+        done_reason: str,
+        turns: int,
+        events: List[Dict[str, Any]],
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        run_id = str(uuid.uuid4())
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs
+                    (id, model, prompt, final_text, done_reason, turns,
+                     events, usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    model,
+                    prompt[:2_000],
+                    final_text,
+                    done_reason,
+                    turns,
+                    json.dumps(events, ensure_ascii=False),
+                    json.dumps(usage or {}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        return run_id
+
+    def list_agent_runs(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, model, prompt, done_reason, turns
+                FROM agent_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "model": row["model"],
+                "prompt": row["prompt"],
+                "done_reason": row["done_reason"],
+                "turns": row["turns"],
+            }
+            for row in rows
+        ]
+
+    def get_agent_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, created_at, model, prompt, final_text,
+                       done_reason, turns, events, usage
+                FROM agent_runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            **dict(row),
+            "events": json.loads(row["events"] or "[]"),
+            "usage": json.loads(row["usage"] or "{}"),
+        }
+
+    def delete_agent_run(self, run_id: str) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_runs WHERE id = ?", (run_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
 db = DatabaseManager()

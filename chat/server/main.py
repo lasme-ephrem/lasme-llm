@@ -3077,6 +3077,26 @@ async def generate_follow_up_suggestions(req: SuggestionRequest):
         return {"suggestions": []}
 
 
+@app.get("/api/agent/runs")
+async def list_agent_runs(limit: int = 30):
+    return {"runs": db.list_agent_runs(min(limit, 100))}
+
+
+@app.get("/api/agent/runs/{run_id}")
+async def get_agent_run(run_id: str):
+    run = db.get_agent_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run introuvable.")
+    return run
+
+
+@app.delete("/api/agent/runs/{run_id}")
+async def delete_agent_run(run_id: str):
+    if not db.delete_agent_run(run_id):
+        raise HTTPException(status_code=404, detail="Run introuvable.")
+    return {"ok": True}
+
+
 @app.post("/api/agent/stream")
 async def agent_stream(req: AgentStreamRequest):
     """Agentic run with typed SSE events: reasoning, tool calls, results."""
@@ -3114,10 +3134,22 @@ async def agent_stream(req: AgentStreamRequest):
 
     async def run_agent() -> None:
         try:
-            await orchestrator.run(
+            result = await orchestrator.run(
                 [message.model_dump(exclude={"images"}) for message in req.messages],
                 on_event=on_event,
             )
+            try:
+                db.save_agent_run(
+                    model=selected_model,
+                    prompt=req.messages[-1].content if req.messages else "",
+                    final_text=result.final_text,
+                    done_reason=result.done_reason,
+                    turns=result.turns,
+                    events=result.log.to_list(),
+                    usage=result.usage,
+                )
+            except Exception:  # persistence must never break the stream
+                pass
         except Exception as exc:  # never leave the queue waiting
             on_event(
                 AgentEvent(
