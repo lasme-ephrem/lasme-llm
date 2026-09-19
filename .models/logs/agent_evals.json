@@ -1,0 +1,67 @@
+{
+  "model": "gemma-4-12b",
+  "ts": "2026-09-19T06:39:48",
+  "rows": [
+    {
+      "scenario": "calc_direct",
+      "ok": true,
+      "final_excerpt": "Le résultat de (17*23)+100 est 491.",
+      "turns": 2,
+      "tool_calls": 1,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 2.3
+    },
+    {
+      "scenario": "calc_puissance",
+      "ok": true,
+      "final_excerpt": "Le résultat de 2**10 + 24 est 1048.",
+      "turns": 2,
+      "tool_calls": 1,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 1.1
+    },
+    {
+      "scenario": "somme_gauss",
+      "ok": true,
+      "final_excerpt": "La somme des entiers de 1 à 100 est de 5050.",
+      "turns": 2,
+      "tool_calls": 1,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 1.5
+    },
+    {
+      "scenario": "heure",
+      "ok": true,
+      "final_excerpt": "Nous sommes aujourd'hui samedi 19 septembre 2026, et il est 06:39.",
+      "turns": 2,
+      "tool_calls": 1,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 0.9
+    },
+    {
+      "scenario": "sans_outil",
+      "ok": true,
+      "final_excerpt": "Blanc",
+      "turns": 1,
+      "tool_calls": 0,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 0.8
+    },
+    {
+      "scenario": "multi_outils",
+      "ok": true,
+      "final_excerpt": "Le résultat de (12*12) est 144 et nous sommes aujourd'hui samedi.",
+      "turns": 3,
+      "tool_calls": 2,
+      "malformed": 0,
+      "done_reason": "stop",
+      "seconds": 1.6
+    }
+  ],
+  "success_rate": 1.0
+}

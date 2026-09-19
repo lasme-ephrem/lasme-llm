@@ -1,9 +1,11 @@
 # Lasme LLM
 
-Assistant IA local, multimodal et souverain, optimisé pour Ollama et une
-RTX 4070 Ti SUPER 16 Go. Lasme LLM réunit conversations naturelles, recherche
-Web sourcée, bibliothèque documentaire, RAG hybride, Canvas interactif,
-exports bureautiques et exécution Python isolée.
+Assistant IA local, agentique, multimodal et souverain, propulsé par
+llama.cpp et une RTX 4070 Ti SUPER 16 Go. Lasme LLM réunit conversations
+naturelles, **console agent avec outils** (web, RAG, Python sandboxé,
+fichiers, vision), recherche Web sourcée, bibliothèque documentaire,
+RAG hybride, Canvas interactif, exports bureautiques et exécution
+Python isolée.
 
 <p align="center">
   <img
@@ -17,9 +19,13 @@ exports bureautiques et exécution Python isolée.
 
 - **Chat local en streaming** : conversations branchables, édition d’un ancien
   message, régénération, réponses temporaires et métriques d’inférence.
-- **Trois profils spécialisés** : Gemma 4 Chat pour la qualité générale,
-  SmolLM3 pour la vitesse et Qwen3-VL pour les images, les documents visuels,
-  le code et les tâches de raisonnement.
+- **Système agentique** : boucle orchestrateur déterministe (raisonnement →
+  outils → réponse) avec registre d’outils à schémas stricts, détection de
+  boucle et budget de tours ; console dédiée sur `/agent.html`.
+- **Quatre profils Gemma 4 QAT** servis par un llama-server en mode router :
+  12B qualité (211 tok/s mesurés, 128K), E4B vitesse (129 tok/s, TTFT
+  98 ms), E2B minimal, et 12B 256K tokens — speculative decoding MTP
+  partout.
 - **Recherche Web adaptative** : Sonar, moteurs spécialisés, SearXNG, Brave,
   Tavily et DuckDuckGo avec bascule selon la qualité, la disponibilité et les
   quotas.
@@ -45,11 +51,12 @@ flowchart TD
     API --> RAG["RAG hybride · lexical + vecteur + MMR"]
     API --> SEARCH["Orchestrateur de recherche Web"]
     API --> RUNNER["Runner Python Docker isolé"]
-    API --> OLLAMA["Ollama · :11434"]
+    API --> AGENT["Orchestrateur agentique · outils"]
+    API --> LLAMA["llama-server (router) · :8080"]
 
-    OLLAMA --> GEMMA["Gemma 4 Chat · Q4_0"]
-    OLLAMA --> SMOL["SmolLM3 3B · UD-Q6_K_XL"]
-    OLLAMA --> VISION["Qwen3-VL 8B · UD-Q4_K_XL"]
+    LLAMA --> G12B["Gemma 4 12B QAT · 128K · MTP"]
+    LLAMA --> E4B["Gemma 4 E4B QAT · 64K · MTP"]
+    LLAMA --> E2B["Gemma 4 E2B QAT · 32K · MTP"]
 
     SEARCH --> SONAR["Perplexity Sonar"]
     SEARCH --> SPECIALISTS["GDELT · OpenAlex · Wikimedia"]
@@ -59,25 +66,30 @@ flowchart TD
 Cloudflared, lorsqu’il est utilisé, est seulement un tunnel HTTPS vers FastAPI.
 Il ne constitue pas un serveur d’inférence.
 
-## Modèles
+## Modèles et runtime (v2)
 
-| Interface | Identifiant Ollama | Rôle | Contexte |
-| --- | --- | --- | ---: |
-| Gemma 4 Chat | `gemma-4-chat` | Modèle général par défaut, résident | 65 536 |
-| Lasme Rapide | `lasme-smol-fast` | Réponses courtes et très rapides | 32 768 |
-| Lasme Vision | `lasme-qwen-vision` | Images, tableaux, code, raisonnement | 16 384 |
+| Profil | Identifiant | Rôle | Contexte | Mesuré |
+| --- | --- | --- | ---: | --- |
+| Qualité/Agent | `gemma-4-12b` | Défaut, vision native, agent | 128K | 211 tok/s |
+| Vitesse | `gemma-4-e4b` | Résident, réponses rapides | 64K | 129 tok/s |
+| Minimal | `gemma-4-e2b` | Configs modestes | 32K | 214 tok/s |
+| Max-contexte | `gemma-4-12b-256k` | Très longs documents | 256K | 162 tok/s |
 
-Les deux modèles additionnels proviennent des dépôts GGUF officiels
-[Unsloth SmolLM3-3B-GGUF](https://huggingface.co/unsloth/SmolLM3-3B-GGUF)
-et
-[Unsloth Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen3-VL-8B-Instruct-GGUF).
-Le script `scripts/install_fast_models.ps1` crée les alias Ollama propres sans
-laisser de modèle temporaire visible. Aucun GGUF n’est versionné dans Git.
+Les GGUF QAT proviennent de
+[unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF)
+(et déclinaisons E4B/E2B) : qualité quasi-fp16 à taille 4 bits, drafter
+MTP embarqué, vision mmproj incluse. Le superviseur
+(`python -m scripts.serve`) génère le preset du router, télécharge ce
+qui manque et expose `start/stop/status/metrics/info`. Les alias
+Ollama historiques (`gemma-4-chat`, `lasme-smol-fast`…) restent
+acceptés et routés vers les profils v2. Mesures complètes :
+[docs/BENCHMARKS_PHASE0.md](docs/BENCHMARKS_PHASE0.md).
 
 ## Installation
 
-Prérequis : Python, Ollama et, pour le runner Python et SearXNG, Docker
-Desktop.
+Prérequis : Python, un build llama.cpp avec CUDA (voir
+[docs/ROADMAP_REFONTE.md](docs/ROADMAP_REFONTE.md)) et, pour le runner
+Python et SearXNG, Docker Desktop.
 
 ```powershell
 git clone https://github.com/lasme-ephrem/lasme-llm.git
@@ -85,7 +97,6 @@ Set-Location lasme-llm
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_fast_models.ps1
 docker build -t lasme-python-runner:latest .\infra\runner
 ```
 
@@ -277,9 +288,14 @@ Pollinations et se désactive avec
 .\.venv\Scripts\python.exe -m compileall -q chat core coding scripts tests
 node --check chat\web\app.js
 node --check chat\web\workspace.js
+node --check chat\web\agent.js
 node --test tests\js\math-renderer.test.cjs
 .\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m scripts.evaluate_models
+
+# Runtime llama.cpp v2 (nécessite le router démarré) :
+.\.venv\Scripts\python.exe -m scripts.serve info
+.\.venv\Scripts\python.exe -m scripts.eval_agents --model gemma-4-e4b
+.\.venv\Scripts\python.exe -m scripts.check_perf --model gemma-4-12b
 ```
 
 Les ressources tierces livrées dans `chat/web/vendor` conservent leurs fichiers
