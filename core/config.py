@@ -1,9 +1,17 @@
+import logging
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
 load_dotenv()
+
+# uvicorn ne configure que ses propres loggers : sans ceci, les traces INFO de
+# l'app (moteur de recherche utilisé, coût [monid], etc.) restent invisibles.
+# basicConfig est un no-op si un handler existe déjà.
+logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("primp").setLevel(logging.WARNING)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
