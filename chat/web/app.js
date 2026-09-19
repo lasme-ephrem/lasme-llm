@@ -2913,78 +2913,9 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
 
         // ChatGPT-style inline source chips (idempotent pass, safe to run on
         // every render: streaming paints and history loads share this path).
+        // The sources live ONLY here, attached to each cited paragraph —
+        // there is deliberately no bottom sources drawer.
         attachInlineSourceChips(answerDiv, webResults);
-
-        // 3. Render Modern Expandable Sources Drawer at the bottom if Web Results exist
-        if (webResults && webResults.length > 0) {
-            let sourcesDrawer = container.querySelector(".sources-drawer-container");
-            if (!sourcesDrawer) {
-                sourcesDrawer = document.createElement("div");
-                sourcesDrawer.className = "sources-drawer-container";
-
-                const countStr = webResults.length > 1 ? `${webResults.length} sources` : `1 source`;
-                const sourceMeta = webResults
-                    .map(result => buildSourceMeta(result))
-                    .filter(Boolean);
-                const uniqueFaviconSources = [];
-                const seenFaviconDomains = new Set();
-                sourceMeta.forEach(item => {
-                    if (
-                        uniqueFaviconSources.length < 3
-                        && !seenFaviconDomains.has(item.faviconDomain)
-                    ) {
-                        seenFaviconDomains.add(item.faviconDomain);
-                        uniqueFaviconSources.push(item);
-                    }
-                });
-                const faviconStack = uniqueFaviconSources.map(item => `
-                    <span class="source-favicon-shell" title="${escapeHtml(item.domain)}">
-                        <span class="source-favicon-fallback">${sourceFallbackIcon()}</span>
-                        <img class="source-favicon" src="${escapeHtml(item.faviconUrl)}" alt="">
-                    </span>
-                `).join("");
-                
-                sourcesDrawer.innerHTML = `
-                    <button type="button" class="sources-drawer-header" aria-expanded="false">
-                        <span class="sources-favicon-stack" aria-hidden="true">
-                            ${faviconStack}
-                        </span>
-                        <span>${countStr}</span>
-                    </button>
-                    <div class="sources-drawer-body">
-                        ${sourceMeta.map(item => `
-                            <a href="${escapeHtml(item.safeUrl)}" target="_blank" rel="noopener noreferrer" class="source-card">
-                                <span class="source-favicon-shell source-card-favicon">
-                                    <span class="source-favicon-fallback">${sourceFallbackIcon()}</span>
-                                    <img class="source-favicon" src="${escapeHtml(item.faviconUrl)}" alt="">
-                                </span>
-                                <div class="source-info">
-                                    <div class="source-title">${escapeHtml(item.result.title || item.domain)}</div>
-                                    <div class="source-domain">${escapeHtml(item.domain)}</div>
-                                </div>
-                            </a>
-                        `).join("")}
-                    </div>
-                `;
-
-                const drawerHeader = sourcesDrawer.querySelector(".sources-drawer-header");
-                drawerHeader.addEventListener("click", () => {
-                    sourcesDrawer.classList.toggle("open");
-                    drawerHeader.setAttribute(
-                        "aria-expanded",
-                        sourcesDrawer.classList.contains("open") ? "true" : "false"
-                    );
-                });
-                sourcesDrawer.querySelectorAll(".source-favicon").forEach(image => {
-                    image.addEventListener("error", () => {
-                        image.src = "/source-fallback.svg";
-                        image.classList.add("generic");
-                    }, { once: true });
-                });
-
-                container.appendChild(sourcesDrawer);
-            }
-        }
     }
 }
 
@@ -3264,9 +3195,6 @@ function attachInlineSourceChips(answerDiv, webResults) {
 function createSourceChipGroup(sources) {
     const primary = sources[0];
     const extraCount = Math.max(0, sources.length - 1);
-    const domainLabel = primary.domain.length > SOURCE_CHIP_DOMAIN_MAX_CHARS
-        ? `${primary.domain.slice(0, SOURCE_CHIP_DOMAIN_MAX_CHARS - 1)}…`
-        : primary.domain;
 
     const group = document.createElement("span");
     group.className = "source-chip-group";
@@ -3296,12 +3224,10 @@ function createSourceChipGroup(sources) {
         { once: true }
     );
 
-    const domainSpan = document.createElement("span");
-    domainSpan.className = "source-chip-domain";
-    domainSpan.textContent = domainLabel;
-
+    // ChatGPT-style: the chip shows ONLY the favicon (+N badge when the
+    // paragraph cites several sources). Domain and title live in the
+    // hover card, the chip title and the aria labels.
     chip.appendChild(faviconShell);
-    chip.appendChild(domainSpan);
 
     if (extraCount > 0) {
         const extra = document.createElement("span");
@@ -3309,17 +3235,6 @@ function createSourceChipGroup(sources) {
         extra.textContent = `+${extraCount}`;
         chip.appendChild(extra);
     }
-
-    const chevron = document.createElement("span");
-    chevron.className = "source-chip-chevron";
-    chevron.setAttribute("aria-hidden", "true");
-    chevron.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m9 6 6 6-6 6"></path>
-        </svg>
-    `;
-    chip.appendChild(chevron);
 
     chip.addEventListener("mouseenter", () => {
         if (!sourceChipHoverCapable()) return;
