@@ -33,6 +33,7 @@ from core.inference.profiles import (
     get_model_profile,
 )
 from chat.server.routers.agent import AgentDeps, create_agent_router
+from chat.server.routers.meta import MetaDeps, create_meta_router
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.agent.registry import build_agent_registry
 from core.agent.tools_web import (
@@ -1436,94 +1437,7 @@ async def async_update_personal_memory(model: str):
         except Exception:
             return
 
-@app.get("/api/health")
-async def health_check():
-    checks: Dict[str, Any] = {
-        "database": {"status": "ok", "required": True},
-        "ollama": {
-            "status": "unknown",
-            "models": [],
-            "required": True,
-        },
-    }
-    try:
-        db.list_sessions()
-    except Exception as exc:
-        checks["database"] = {
-            "status": "error",
-            "error": type(exc).__name__,
-            "required": True,
-        }
-    try:
-        models = await client.list_models()
-        model_names = [
-            str(model.get("name") or "")
-            for model in models
-            if model.get("name")
-        ]
-        required_models = list(
-            dict.fromkeys(
-                [
-                    settings.chat_model,
-                    settings.fast_model,
-                    settings.vision_model,
-                ]
-            )
-        )
-        missing_models = [
-            model
-            for model in required_models
-            if not _model_is_available(model, model_names)
-        ]
-        checks["ollama"] = {
-            "status": "ok" if not missing_models else "error",
-            "models": model_names,
-            "required_models": required_models,
-            "missing_models": missing_models,
-            "required": True,
-        }
-    except Exception as exc:
-        checks["ollama"] = {
-            "status": "error",
-            "error": type(exc).__name__,
-            "required": True,
-        }
-    runner_available = await python_runner.available()
-    checks["runner"] = {
-        "status": "ok" if runner_available else "unavailable",
-        "required": True,
-        "engine": "docker",
-    }
-    ocr = rag_store.ocr_capabilities()
-    checks["ocr"] = {
-        "status": "ok" if ocr.get("available") else "unavailable",
-        "required": False,
-        **ocr,
-    }
-    overall = (
-        "ok"
-        if all(
-            check["status"] == "ok"
-            for check in checks.values()
-            if check.get("required", True)
-        )
-        else "degraded"
-    )
-    return {
-        "status": overall,
-        "server": "LasmeLLM local API",
-        "version": app.version,
-        "checks": checks,
-    }
-
-@app.get("/api/models")
-async def get_models():
-    models = await client.list_models()
-    return {"models": models}
-
-
-@app.get("/api/capabilities")
-async def get_capabilities():
+async def _build_capabilities() -> dict:
     try:
         installed_models = [
             str(model.get("name") or "")
@@ -1532,19 +1446,15 @@ async def get_capabilities():
         ]
     except Exception:
         installed_models = []
-    vision_available = _model_is_available(
-        settings.vision_model,
-        installed_models,
-    )
-    fast_available = _model_is_available(
-        settings.fast_model,
-        installed_models,
-    )
     return {
-        "vision_enabled": vision_available,
+        "vision_enabled": _model_is_available(
+            settings.vision_model, installed_models
+        ),
         "vision_model": settings.vision_model,
         "fast_model": settings.fast_model,
-        "fast_model_enabled": fast_available,
+        "fast_model_enabled": _model_is_available(
+            settings.fast_model, installed_models
+        ),
         "installed_models": installed_models,
         "ocr": rag_store.ocr_capabilities(),
         "external_image_generation_enabled": settings.external_image_generation_enabled,
@@ -1554,22 +1464,25 @@ async def get_capabilities():
         "projects_enabled": True,
         "project_file_library_enabled": True,
         "supported_project_files": [
-            "pdf",
-            "txt",
-            "md",
-            "docx",
-            "xlsx",
-            "pptx",
-            "png",
-            "jpg",
-            "jpeg",
-            "webp",
+            "pdf", "txt", "md", "docx", "xlsx", "pptx",
+            "png", "jpg", "jpeg", "webp",
         ],
         "canvas_enabled": True,
         "artifact_exports": sorted(EXPORT_FORMATS),
         "deep_research_enabled": True,
         "hybrid_rag_enabled": True,
     }
+
+
+app.include_router(create_meta_router(MetaDeps(
+    client=client,
+    db=db,
+    python_runner=python_runner,
+    rag_store=rag_store,
+    settings=settings,
+    app_version=app.version,
+    capabilities_builder=_build_capabilities,
+)))
 
 
 # --- PROJECTS ---
@@ -3398,6 +3311,21 @@ async def chat_stream(req: ChatRequest):
             "question de connaissance générale. Après web_search, lis les "
             "pages avec fetch_pages avant de citer quoi que ce soit."
         )
+
+    # Axe 4 : une image jointe au chat est pré-liée au run — l'agent
+    # l'examine via analyze_image avec la question qu'il juge utile.
+    prebound_chat_image = ""
+    for message in reversed(req.messages):
+        if message.images:
+            raw = message.images[0]
+            prebound_chat_image = raw.split(",", 1)[1] if "," in raw else raw
+            break
+    if prebound_chat_image:
+        system_instruction += (
+            "\n12. Une image est jointe à cette conversation : utilise "
+            "l'outil analyze_image avec ta question pour l'examiner avant "
+            "de répondre, et base ton analyse sur ce que tu y vois."
+        )
     system_instruction += (
         "\n10. Qualité du livrable : Vérifie silencieusement avant de répondre que "
         "tu as traité chaque partie de la demande, que les nombres et unités sont "
@@ -3897,9 +3825,10 @@ async def chat_stream(req: ChatRequest):
             file_store=project_file_store,
             vision_client=client,
             vision_model=settings.vision_model,
-            artifact_store=artifact_store,
-            default_project_id=project_id,
-        )
+        artifact_store=artifact_store,
+        default_project_id=project_id,
+        prebound_image=(prebound_chat_image or None),
+    )
         agent_config = AgentConfig(
             model=selected_model,
             system_prompt="",  # stream_messages porte déjà le prompt système
