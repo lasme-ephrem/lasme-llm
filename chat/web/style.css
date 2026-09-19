@@ -3995,7 +3995,6 @@ body.sidebar-resizing {
 
 @media (prefers-reduced-motion: reduce) {
     .source-chip,
-    .source-chip-chevron,
     .source-chip-popover-link,
     .source-chip-popover-arrow,
     .source-chip-popover-dot {
