@@ -136,6 +136,12 @@ class AgentOrchestrator:
             "usage": {
                 "prompt_tokens": final_chunk.get("prompt_eval_count", 0),
                 "output_tokens": final_chunk.get("eval_count", 0),
+                # Temps de décodage réellement mesuré par le client (ns) :
+                # seule base honnête pour un tok/s agrégé multi-tours.
+                "eval_duration_ns": int(final_chunk.get("eval_duration") or 0),
+                "prompt_eval_duration_ns": int(
+                    final_chunk.get("prompt_eval_duration") or 0
+                ),
             },
         }
 
