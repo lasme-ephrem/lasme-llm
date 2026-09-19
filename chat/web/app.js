@@ -815,7 +815,7 @@ async function selectSession(sessionId) {
                     cleanText = msg.content.replace(/\!\[Image Attachée\]\((.*?)\)\n\n?/, "").trim();
                 }
             }
-            appendMessage(
+            const bubble = appendMessage(
                 msg.role,
                 cleanText,
                 imgUrl,
@@ -823,6 +823,12 @@ async function selectSession(sessionId) {
                 msg.id,
                 msg.metadata?.generation_stats || null
             );
+            if (msg.role === "assistant" && msg.metadata?.agent?.run_id) {
+                addAgentReplayAction(
+                    bubble.closest(".message"),
+                    msg.metadata.agent
+                );
+            }
             conversationHistory.push({ role: msg.role, content: msg.content });
         });
 
@@ -1324,6 +1330,7 @@ function setSendButtonState(state) {
     if (state === "stop") {
         sendChatBtn.classList.add("stop-mode");
         sendChatBtn.title = "Arrêter la génération";
+        sendChatBtn.setAttribute("aria-label", "Arrêter la génération");
         sendChatBtn.innerHTML = `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                 <rect x="5" y="5" width="14" height="14" rx="3"></rect>
@@ -1332,6 +1339,7 @@ function setSendButtonState(state) {
     } else {
         sendChatBtn.classList.remove("stop-mode");
         sendChatBtn.title = "Envoyer";
+        sendChatBtn.setAttribute("aria-label", "Envoyer le message");
         sendChatBtn.innerHTML = `
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="12" y1="19" x2="12" y2="5"></line>
@@ -1826,27 +1834,11 @@ async function sendChatMessage(options = {}) {
                     }
                     if (parsed.type === "agent_tool_call") {
                         agentToolEvents.push(parsed);
-                        renderAssistantActivity(
-                            assistantBubble,
-                            "tools",
-                            "active",
-                            `Outil · ${parsed.name || "?"}`,
-                            shortToolArgs(parsed.arguments)
-                        );
+                        upsertLiveAgentToolCard(assistantBubble, parsed);
                     }
                     if (parsed.type === "agent_tool_result") {
                         agentToolEvents.push(parsed);
-                        renderAssistantActivity(
-                            assistantBubble,
-                            "tools",
-                            parsed.ok ? "done" : "warning",
-                            `Outil · ${parsed.name || "?"}`,
-                            parsed.ok
-                                ? (parsed.duration_ms
-                                    ? `${parsed.duration_ms} ms`
-                                    : "terminé")
-                                : (parsed.error_code || "échec")
-                        );
+                        upsertLiveAgentToolCard(assistantBubble, parsed);
                     }
                     if (parsed.type === "generation_stats") {
                         generationStatsMeta = parsed;
@@ -2157,13 +2149,95 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
     `;
 }
 
-function shortToolArgs(raw) {
-    try {
-        const text = JSON.stringify(JSON.parse(raw || "{}"));
-        return text.length > 160 ? `${text.slice(0, 160)}…` : text;
-    } catch {
-        return (raw || "").slice(0, 160);
+function fillAgentToolCard(card, call, result) {
+    card.textContent = "";
+    if (call?.id !== undefined && call?.id !== null) {
+        card.dataset.toolId = String(call.id);
     }
+    card.className = `agent-tool-card ${result ? (result.ok ? "ok" : "ko") : "pending"}`;
+
+    const summary = document.createElement("summary");
+    if (!result) {
+        const spinner = document.createElement("span");
+        spinner.className = "tool-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        summary.appendChild(spinner);
+    }
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "agent-tool-name";
+    nameSpan.textContent = call?.name || "?";
+    const metaSpan = document.createElement("span");
+    metaSpan.className = "agent-tool-meta";
+    metaSpan.textContent = result
+        ? (result.ok
+            ? (result.duration_ms ? `${result.duration_ms} ms` : "< 5 ms")
+            : (result.error_code || "échec"))
+        : "en cours…";
+    summary.append(nameSpan, document.createTextNode(" — "), metaSpan);
+    card.appendChild(summary);
+
+    const args = document.createElement("pre");
+    args.className = "agent-tool-args";
+    try {
+        args.textContent = JSON.stringify(
+            JSON.parse(call?.arguments || "{}"), null, 2
+        );
+    } catch {
+        args.textContent = call?.arguments || "";
+    }
+    card.appendChild(args);
+
+    if (result) {
+        const output = document.createElement("pre");
+        output.className = "agent-tool-output";
+        output.textContent = result.ok
+            ? (result.output || "(vide)")
+            : `${result.error_code || "erreur"} : ${result.error || ""}`;
+        card.appendChild(output);
+        if (!result.ok) card.open = true;
+    }
+    return card;
+}
+
+function ensureAgentToolsGroup(container) {
+    let group = container.querySelector(":scope > .agent-tools-group");
+    if (!group) {
+        const typingIndicator = container.querySelector(".typing-indicator");
+        if (typingIndicator) typingIndicator.remove();
+        group = document.createElement("div");
+        group.className = "agent-tools-group";
+        container.prepend(group);
+    }
+    return group;
+}
+
+// Live rendering: one card per agent_tool_call, updated in place as soon as
+// the matching agent_tool_result arrives. The canonical rebuild still happens
+// in renderAgentToolsSummary at onComplete (after the final message render).
+function upsertLiveAgentToolCard(container, event) {
+    const group = ensureAgentToolsGroup(container);
+    if (event.type === "agent_tool_call") {
+        const card = document.createElement("details");
+        card._lasmeCall = event;
+        fillAgentToolCard(card, event, null);
+        group.appendChild(card);
+        return;
+    }
+    let card = null;
+    if (event.id !== undefined && event.id !== null) {
+        card = group.querySelector(
+            `.agent-tool-card[data-tool-id="${CSS.escape(String(event.id))}"]`
+        );
+    }
+    if (!card) {
+        card = group.querySelector(".agent-tool-card.pending");
+    }
+    if (!card) {
+        card = document.createElement("details");
+        group.appendChild(card);
+    }
+    const call = card._lasmeCall || { name: event.name };
+    fillAgentToolCard(card, call, event);
 }
 
 function renderAgentToolsSummary(container, events) {
@@ -2182,38 +2256,167 @@ function renderAgentToolsSummary(container, events) {
     const group = document.createElement("div");
     group.className = "agent-tools-group";
     for (const { call, result } of calls.values()) {
-        const card = document.createElement("details");
-        card.className = `agent-tool-card ${result && !result.ok ? "ko" : "ok"}`;
-        const summary = document.createElement("summary");
-        const meta = result
-            ? (result.ok
-                ? (result.duration_ms ? `${result.duration_ms} ms` : "< 5 ms")
-                : (result.error_code || "échec"))
-            : "…";
-        summary.textContent = `${call.name || "?"} — ${meta}`;
-        const args = document.createElement("pre");
-        args.className = "agent-tool-args";
-        try {
-            args.textContent = JSON.stringify(
-                JSON.parse(call.arguments || "{}"), null, 2
-            );
-        } catch {
-            args.textContent = call.arguments || "";
-        }
-        card.append(summary, args);
-        if (result) {
-            const output = document.createElement("pre");
-            output.className = "agent-tool-output";
-            output.textContent = result.ok
-                ? (result.output || "(vide)")
-                : `${result.error_code || "erreur"} : ${result.error || ""}`;
-            card.appendChild(output);
-            if (!result.ok) card.open = true;
-        }
-        group.appendChild(card);
+        group.appendChild(
+            fillAgentToolCard(document.createElement("details"), call, result)
+        );
     }
     container.querySelector(".assistant-activity[data-kind=\"tools\"]")?.remove();
     container.prepend(group);
+}
+
+const agentRunReplayCache = new Map();
+
+function buildAgentReplaySummaryLabel(agentMeta) {
+    const parts = [];
+    const turns = Number(agentMeta?.turns);
+    if (Number.isFinite(turns) && turns > 0) {
+        parts.push(`${turns} tour${turns > 1 ? "s" : ""}`);
+    }
+    const tools = Array.isArray(agentMeta?.tools)
+        ? agentMeta.tools.length
+        : Number(agentMeta?.tools);
+    if (Number.isFinite(tools) && tools > 0) {
+        parts.push(`${tools} outil${tools > 1 ? "s" : ""}`);
+    }
+    return parts.length
+        ? `Déroulé agent · ${parts.join(" · ")}`
+        : "Déroulé agent";
+}
+
+function addAgentReplayAction(messageElement, agentMeta) {
+    if (!messageElement || !agentMeta?.run_id) return;
+    const actions = messageElement.querySelector(".message-actions");
+    if (!actions || actions.querySelector("[data-action=\"agent-replay\"]")) {
+        return;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "message-action-btn";
+    button.dataset.action = "agent-replay";
+    button.dataset.tooltip = "Déroulé agent";
+    button.title = "Déroulé agent";
+    button.setAttribute("aria-label", "Déroulé agent");
+    button.innerHTML = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path>
+        </svg>
+        <span class="sr-only">Déroulé agent</span>
+    `;
+    button.addEventListener("click", () => {
+        void toggleAgentReplayPanel(messageElement, agentMeta);
+    });
+    actions.appendChild(button);
+}
+
+async function toggleAgentReplayPanel(messageElement, agentMeta) {
+    const bubble = messageElement.querySelector(".bubble");
+    if (!bubble) return;
+    const existing = bubble.querySelector(".replay-panel");
+    if (existing) {
+        existing.remove();
+        return;
+    }
+    const panel = document.createElement("details");
+    panel.className = "replay-panel";
+    panel.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = buildAgentReplaySummaryLabel(agentMeta);
+    const body = document.createElement("div");
+    body.className = "replay-panel-body";
+    body.innerHTML = `
+        <div class="replay-panel-status">
+            <span class="tool-spinner" aria-hidden="true"></span>
+            Chargement du déroulé…
+        </div>
+    `;
+    panel.append(summary, body);
+    bubble.appendChild(panel);
+
+    const runId = String(agentMeta.run_id);
+    // window.fetch is globally wrapped (top of app.js): the X-Lasme-Token
+    // header is injected automatically for same-origin /api/ requests.
+    let events = agentRunReplayCache.get(runId);
+    if (!events) {
+        try {
+            const resp = await fetch(
+                `${API_BASE}/agent/runs/${encodeURIComponent(runId)}`
+            );
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const run = await resp.json();
+            events = Array.isArray(run?.events) ? run.events : [];
+            agentRunReplayCache.set(runId, events);
+        } catch (err) {
+            if (!panel.isConnected) return;
+            body.textContent = "";
+            const errorLine = document.createElement("div");
+            errorLine.className = "replay-panel-status replay-panel-error";
+            errorLine.textContent = `Déroulé indisponible (${
+                err.message || "erreur réseau"
+            })`;
+            body.appendChild(errorLine);
+            return;
+        }
+    }
+    if (!panel.isConnected) return;
+    renderAgentReplayEvents(body, events);
+}
+
+function renderAgentReplayEvents(body, events) {
+    body.textContent = "";
+    const cards = new Map();
+    let rendered = 0;
+    for (const event of Array.isArray(events) ? events : []) {
+        if (event.type === "turn_start") {
+            const row = document.createElement("div");
+            row.className = "replay-turn";
+            row.textContent = `Tour ${event.turn ?? "?"}`;
+            body.appendChild(row);
+            rendered++;
+            continue;
+        }
+        if (event.type === "tool_call") {
+            const card = document.createElement("details");
+            card._lasmeCall = event;
+            fillAgentToolCard(card, event, null);
+            // Unresolved call in a stored run: no spinner, neutral meta.
+            card.classList.remove("pending");
+            const spinner = card.querySelector(".tool-spinner");
+            spinner?.remove();
+            const meta = card.querySelector(".agent-tool-meta");
+            if (meta) meta.textContent = "—";
+            cards.set(event.id ?? `call-${cards.size}`, card);
+            body.appendChild(card);
+            rendered++;
+            continue;
+        }
+        if (event.type === "tool_result") {
+            let card = null;
+            if (event.id !== undefined && event.id !== null) {
+                card = cards.get(event.id) || null;
+            }
+            if (!card) {
+                card = [...cards.values()].find(
+                    (candidate) => !candidate._lasmeResult
+                ) || null;
+            }
+            if (!card) {
+                card = document.createElement("details");
+                body.appendChild(card);
+            }
+            card._lasmeResult = event;
+            fillAgentToolCard(
+                card,
+                card._lasmeCall || { name: event.name },
+                event
+            );
+            rendered++;
+        }
+        // "final" (and any other event) is ignored: the message already
+        // displays the assistant's answer.
+    }
+    if (!rendered) {
+        body.textContent = "Aucun événement enregistré pour ce run.";
+    }
 }
 
 function formatPerformanceNumber(value, maximumFractionDigits = 1) {

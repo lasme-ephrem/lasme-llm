@@ -33,8 +33,13 @@ from core.inference.profiles import (
     get_model_profile,
 )
 from chat.server.routers.agent import AgentDeps, create_agent_router
+from chat.server.routers.meta import MetaDeps, create_meta_router
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.agent.registry import build_agent_registry
+from core.agent.tools_web import (
+    collect_known_urls,
+    strip_unsupported_citations,
+)
 from core.config import settings
 from core.tools.web_search import (
     fetch_url_content,
@@ -1432,94 +1437,7 @@ async def async_update_personal_memory(model: str):
         except Exception:
             return
 
-@app.get("/api/health")
-async def health_check():
-    checks: Dict[str, Any] = {
-        "database": {"status": "ok", "required": True},
-        "ollama": {
-            "status": "unknown",
-            "models": [],
-            "required": True,
-        },
-    }
-    try:
-        db.list_sessions()
-    except Exception as exc:
-        checks["database"] = {
-            "status": "error",
-            "error": type(exc).__name__,
-            "required": True,
-        }
-    try:
-        models = await client.list_models()
-        model_names = [
-            str(model.get("name") or "")
-            for model in models
-            if model.get("name")
-        ]
-        required_models = list(
-            dict.fromkeys(
-                [
-                    settings.chat_model,
-                    settings.fast_model,
-                    settings.vision_model,
-                ]
-            )
-        )
-        missing_models = [
-            model
-            for model in required_models
-            if not _model_is_available(model, model_names)
-        ]
-        checks["ollama"] = {
-            "status": "ok" if not missing_models else "error",
-            "models": model_names,
-            "required_models": required_models,
-            "missing_models": missing_models,
-            "required": True,
-        }
-    except Exception as exc:
-        checks["ollama"] = {
-            "status": "error",
-            "error": type(exc).__name__,
-            "required": True,
-        }
-    runner_available = await python_runner.available()
-    checks["runner"] = {
-        "status": "ok" if runner_available else "unavailable",
-        "required": True,
-        "engine": "docker",
-    }
-    ocr = rag_store.ocr_capabilities()
-    checks["ocr"] = {
-        "status": "ok" if ocr.get("available") else "unavailable",
-        "required": False,
-        **ocr,
-    }
-    overall = (
-        "ok"
-        if all(
-            check["status"] == "ok"
-            for check in checks.values()
-            if check.get("required", True)
-        )
-        else "degraded"
-    )
-    return {
-        "status": overall,
-        "server": "LasmeLLM local API",
-        "version": app.version,
-        "checks": checks,
-    }
-
-@app.get("/api/models")
-async def get_models():
-    models = await client.list_models()
-    return {"models": models}
-
-
-@app.get("/api/capabilities")
-async def get_capabilities():
+async def _build_capabilities() -> dict:
     try:
         installed_models = [
             str(model.get("name") or "")
@@ -1528,19 +1446,15 @@ async def get_capabilities():
         ]
     except Exception:
         installed_models = []
-    vision_available = _model_is_available(
-        settings.vision_model,
-        installed_models,
-    )
-    fast_available = _model_is_available(
-        settings.fast_model,
-        installed_models,
-    )
     return {
-        "vision_enabled": vision_available,
+        "vision_enabled": _model_is_available(
+            settings.vision_model, installed_models
+        ),
         "vision_model": settings.vision_model,
         "fast_model": settings.fast_model,
-        "fast_model_enabled": fast_available,
+        "fast_model_enabled": _model_is_available(
+            settings.fast_model, installed_models
+        ),
         "installed_models": installed_models,
         "ocr": rag_store.ocr_capabilities(),
         "external_image_generation_enabled": settings.external_image_generation_enabled,
@@ -1550,22 +1464,25 @@ async def get_capabilities():
         "projects_enabled": True,
         "project_file_library_enabled": True,
         "supported_project_files": [
-            "pdf",
-            "txt",
-            "md",
-            "docx",
-            "xlsx",
-            "pptx",
-            "png",
-            "jpg",
-            "jpeg",
-            "webp",
+            "pdf", "txt", "md", "docx", "xlsx", "pptx",
+            "png", "jpg", "jpeg", "webp",
         ],
         "canvas_enabled": True,
         "artifact_exports": sorted(EXPORT_FORMATS),
         "deep_research_enabled": True,
         "hybrid_rag_enabled": True,
     }
+
+
+app.include_router(create_meta_router(MetaDeps(
+    client=client,
+    db=db,
+    python_runner=python_runner,
+    rag_store=rag_store,
+    settings=settings,
+    app_version=app.version,
+    capabilities_builder=_build_capabilities,
+)))
 
 
 # --- PROJECTS ---
@@ -3333,18 +3250,13 @@ async def chat_stream(req: ChatRequest):
         if temporary
         else previous_verified_web_context(session_id)
     )
-    web_search_needed = (
-        should_perform_web_search(
-            last_user_msg,
-            user_toggle,
-            has_conversation_context=has_conversation_context,
-            mode=web_mode,
-            conversation_messages=req.messages,
-            has_prior_web_evidence=bool(prior_web_context),
-        )
-        if not has_images
-        else False
-    )
+    # W3 : plus de pré-recherche web — l'agent décide lui-même via ses
+    # outils. Les modes de l'UI contrôlent la DISPONIBILITÉ des outils :
+    # off → pas d'outils web ; auto → disponibles, l'agent juge ;
+    # always → disponibles + directive de recherche obligatoire.
+    web_tools_available = bool(user_toggle) and not has_images
+    force_web_search = web_tools_available and web_mode == "always"
+    web_search_needed = False
     strict_grounding = bool(
         user_toggle
         and not has_images
@@ -3384,6 +3296,36 @@ async def chat_stream(req: ChatRequest):
         "\\operatorname{VC}, \\mathbb{R}, \\mathbb{E}, etc. plutôt que "
         "\\VC, \\R ou \\E."
     )
+    if force_web_search:
+        system_instruction += (
+            "\n11. Recherche Web obligatoire : la demande nécessite des "
+            "informations actuelles. Utilise web_search, puis fetch_pages "
+            "sur les URLs pertinentes AVANT de répondre, et ne cite que ce "
+            "que tu as réellement lu dans les pages récupérées."
+        )
+    elif web_tools_available:
+        system_instruction += (
+            "\n11. Outils Web disponibles : utilise web_search UNIQUEMENT si "
+            "la question porte sur une information actuelle, récente ou "
+            "vérifiable en ligne — jamais pour un calcul, du code ou une "
+            "question de connaissance générale. Après web_search, lis les "
+            "pages avec fetch_pages avant de citer quoi que ce soit."
+        )
+
+    # Axe 4 : une image jointe au chat est pré-liée au run — l'agent
+    # l'examine via analyze_image avec la question qu'il juge utile.
+    prebound_chat_image = ""
+    for message in reversed(req.messages):
+        if message.images:
+            raw = message.images[0]
+            prebound_chat_image = raw.split(",", 1)[1] if "," in raw else raw
+            break
+    if prebound_chat_image:
+        system_instruction += (
+            "\n12. Une image est jointe à cette conversation : utilise "
+            "l'outil analyze_image avec ta question pour l'examiner avant "
+            "de répondre, et base ton analyse sur ce que tu y vois."
+        )
     system_instruction += (
         "\n10. Qualité du livrable : Vérifie silencieusement avant de répondre que "
         "tu as traité chaque partie de la demande, que les nombres et unités sont "
@@ -3489,9 +3431,7 @@ async def chat_stream(req: ChatRequest):
         answer_provider = None
         search_report: Dict[str, Any] = {}
         used_previous_web_context = False
-        web_status = "disabled" if not user_toggle else (
-            "skipped" if not web_search_needed else "pending"
-        )
+        web_status = "agent" if web_tools_available else "disabled"
 
         context_percentage = min(
             100,
@@ -3610,7 +3550,14 @@ async def chat_stream(req: ChatRequest):
             )
             yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': web_event_message, 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
 
-        if strict_grounding and not web_results_data:
+        if (
+            strict_grounding
+            and not web_results_data
+            and not web_tools_available
+        ):
+            # Le web est désactivé par l'utilisateur ET la demande exige
+            # des faits vérifiés : refus honnête. Quand les outils web
+            # sont disponibles, l'agent recherche et lit lui-même (W3).
             if is_commercial_comparison(last_user_msg):
                 full_assistant_reply = (
                     "Je n’ai pas obtenu au moins deux sources suffisamment "
@@ -3871,16 +3818,17 @@ async def chat_stream(req: ChatRequest):
             )
 
         chat_registry = build_agent_registry(
-            search_fn=search_web_detailed,
-            fetch_fn=fetch_url_content,
+            search_fn=search_web_detailed if web_tools_available else None,
+            fetch_fn=fetch_url_content if web_tools_available else None,
             rag_search_fn=chat_rag_search,
             python_runner=python_runner,
             file_store=project_file_store,
             vision_client=client,
             vision_model=settings.vision_model,
-            artifact_store=artifact_store,
-            default_project_id=project_id,
-        )
+        artifact_store=artifact_store,
+        default_project_id=project_id,
+        prebound_image=(prebound_chat_image or None),
+    )
         agent_config = AgentConfig(
             model=selected_model,
             system_prompt="",  # stream_messages porte déjà le prompt système
@@ -3967,6 +3915,13 @@ async def chat_stream(req: ChatRequest):
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
         if agent_result is not None:
+            if agent_tool_names:
+                # W5 : une URL citée doit avoir été vue par l'agent
+                # (résultats de recherche ou pages réellement fetchées).
+                known_urls = collect_known_urls(agent_result.log.to_list())
+                full_assistant_reply = strip_unsupported_citations(
+                    full_assistant_reply, known_urls
+                )
             elapsed = time.monotonic() - generation_started_at
             gen_seconds = (
                 (time.monotonic() - first_content_at) if first_content_at else 0.0

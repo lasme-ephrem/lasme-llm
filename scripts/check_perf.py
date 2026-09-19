@@ -45,6 +45,12 @@ def load_baselines() -> dict:
 
 
 def measure_tok_s(base_url: str, model: str, runs: int) -> float:
+    """Median throughput over N runs at temperature 0.
+
+    Greedy decoding keeps the MTP drafter's acceptance rate stable
+    (a temperature-0.7 story prompt made acceptance swing 16-94 %
+    between runs, masking real throughput by ±30 %).
+    """
     values = []
     with httpx.Client(base_url=base_url, timeout=300) as client:
         for _ in range(runs):
@@ -54,7 +60,7 @@ def measure_tok_s(base_url: str, model: str, runs: int) -> float:
                     "model": model,
                     "prompt": GEN_PROMPT,
                     "n_predict": 256,
-                    "temperature": 0.7,
+                    "temperature": 0.0,
                     "cache_prompt": True,
                 },
             )
