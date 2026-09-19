@@ -242,9 +242,9 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(btn => {
         btn.addEventListener("click", (e) => {
             e.stopPropagation();
-            reasoningLevelSelect.value = btn.dataset.level || "balanced";
+            reasoningLevelSelect.value = btn.dataset.level || "high";
             if (selectedReasoningName) {
-                selectedReasoningName.textContent = btn.dataset.label || "Équilibré";
+                selectedReasoningName.textContent = btn.dataset.label || "Approfondi";
             }
             document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(option => {
                 option.classList.remove("intel-active");
@@ -1613,7 +1613,7 @@ async function sendChatMessage(options = {}) {
                 selected_file_ids: requestSelectedFileIds,
                 model: selectedModel,
                 messages: cleanHistory,
-                intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "balanced",
+                intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "high",
                 web_search_enabled: webSearchToggle.checked,
                 web_search_mode: activeWebMode,
                 persist_user_message: (
@@ -1815,22 +1815,18 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "reasoning_start") {
-                        renderAssistantActivity(
-                            assistantBubble,
-                            "reasoning",
-                            "active",
-                            "Analyse en cours"
-                        );
+                        handleReasoningStart(assistantBubble);
+                    }
+                    if (parsed.type === "reasoning_delta") {
+                        appendReasoningDelta(assistantBubble, parsed.text);
                     }
                     if (parsed.type === "reasoning_done") {
                         reasoningDuration = parsed.duration;
-                        renderAssistantActivity(
-                            assistantBubble,
-                            "reasoning",
-                            "done",
-                            `Analyse terminée · ${parsed.duration || 0} s`,
-                            parsed.summary || ""
-                        );
+                        handleReasoningDone(assistantBubble, parsed.duration);
+                    }
+                    if (parsed.type === "content_reset") {
+                        fullResponse = "";
+                        resetStreamedAnswer(assistantBubble, parsed.text || "");
                     }
                     if (parsed.type === "agent_tool_call") {
                         agentToolEvents.push(parsed);
@@ -2149,14 +2145,200 @@ function renderAssistantActivity(container, kind, state, title, detail = "") {
     `;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming reasoning panel ("Réflexion").
+// One <details class="thinking-panel"> per assistant bubble, created on
+// reasoning_start, fed by reasoning_delta, auto-collapsed on reasoning_done.
+// content_reset moves the wrongly-streamed answer text into the same panel.
+// ---------------------------------------------------------------------------
+
+function formatThinkingDuration(duration) {
+    const seconds = Number(duration);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    return `${String(Math.round(seconds * 10) / 10).replace(".", ",")} s`;
+}
+
+function ensureThinkingPanel(bubble) {
+    let panel = bubble.querySelector(":scope > .thinking-panel");
+    if (panel) return panel;
+    const typingIndicator = bubble.querySelector(".typing-indicator");
+    if (typingIndicator) typingIndicator.remove();
+
+    panel = document.createElement("details");
+    panel.className = "thinking-panel streaming";
+    panel.open = true;
+
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.className = "thinking-panel-label";
+    label.textContent = "Réflexion";
+    const pulse = document.createElement("span");
+    pulse.className = "thinking-pulse";
+    pulse.setAttribute("aria-hidden", "true");
+    summary.append(label, pulse);
+
+    const pre = document.createElement("pre");
+    pre.className = "thinking-text";
+
+    panel.append(summary, pre);
+
+    // Panel sits above the answer content, below the live tool cards.
+    const toolsGroup = bubble.querySelector(":scope > .agent-tools-group");
+    if (toolsGroup) {
+        toolsGroup.after(panel);
+    } else {
+        const answer = bubble.querySelector(":scope > .answer-content");
+        if (answer) answer.before(panel);
+        else bubble.prepend(panel);
+    }
+    return panel;
+}
+
+function handleReasoningStart(bubble) {
+    const panel = ensureThinkingPanel(bubble);
+    if (panel._lasmeCollapseTimer) {
+        clearTimeout(panel._lasmeCollapseTimer);
+        panel._lasmeCollapseTimer = null;
+    }
+    panel.classList.remove("collapsing");
+    panel.classList.add("streaming");
+    panel.open = true;
+    const pre = panel.querySelector(".thinking-text");
+    // A second reasoning run in the same bubble: keep prior text, add a gap.
+    if (pre && pre.textContent) pre.textContent += "\n\n";
+}
+
+function appendReasoningDelta(bubble, text) {
+    const value = String(text || "");
+    if (!value) return;
+    const panel = ensureThinkingPanel(bubble);
+    const pre = panel.querySelector(".thinking-text");
+    if (!pre) return;
+    pre.textContent += value;
+    pre.classList.toggle(
+        "is-scrollable",
+        pre.scrollHeight > pre.clientHeight + 4
+    );
+    pre.scrollTop = pre.scrollHeight;
+}
+
+function collapseThinkingPanel(panel) {
+    panel._lasmeCollapseTimer = null;
+    if (!panel.open) return;
+    const pre = panel.querySelector(".thinking-text");
+    if (!pre) {
+        panel.open = false;
+        return;
+    }
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        panel.open = false;
+        pre.scrollTop = 0;
+        return;
+    }
+    // Soft collapse: pin the current height, then animate it down to 0.
+    panel.classList.add("collapsing");
+    pre.style.maxHeight = `${pre.offsetHeight}px`;
+    requestAnimationFrame(() => {
+        pre.style.maxHeight = "0px";
+    });
+    window.setTimeout(() => {
+        panel.classList.remove("collapsing");
+        panel.open = false;
+        pre.style.maxHeight = "";
+        pre.scrollTop = 0;
+    }, 340);
+}
+
+function handleReasoningDone(bubble, duration) {
+    const panel = bubble.querySelector(":scope > .thinking-panel");
+    if (!panel) return;
+    panel.classList.remove("streaming");
+    const durationText = formatThinkingDuration(duration);
+    if (durationText) {
+        const label = panel.querySelector(".thinking-panel-label");
+        if (label) label.textContent = `Réflexion · ${durationText}`;
+    }
+    const pre = panel.querySelector(".thinking-text");
+    const delay = pre && pre.textContent.length > 240 ? 0 : 1500;
+    if (panel._lasmeCollapseTimer) {
+        clearTimeout(panel._lasmeCollapseTimer);
+    }
+    panel._lasmeCollapseTimer = window.setTimeout(
+        () => collapseThinkingPanel(panel),
+        delay
+    );
+}
+
+// content_reset: the streamed answer so far was NOT the real response
+// (preamble before tool calls, or answer rejected by the harness).
+// Clear the markdown container and archive the text in the thinking panel.
+function resetStreamedAnswer(bubble, preambleText) {
+    window.LasmeProgressiveRenderer?.cancel(bubble);
+    bubble.querySelector(".answer-content")?.remove();
+    bubble.querySelector(".sources-drawer-container")?.remove();
+    bubble.querySelector(".generation-performance")?.remove();
+    bubble.querySelector(".generated-image-card")?.remove();
+    bubble.querySelector(".dalle-loader-card")?.remove();
+
+    const panel = ensureThinkingPanel(bubble);
+    if (panel._lasmeCollapseTimer) {
+        clearTimeout(panel._lasmeCollapseTimer);
+        panel._lasmeCollapseTimer = null;
+    }
+    panel.classList.remove("collapsing", "streaming");
+    panel.open = true;
+    const pre = panel.querySelector(".thinking-text");
+    if (pre) {
+        const separator = pre.textContent ? "\n\n" : "";
+        pre.textContent += (
+            `${separator}— préambule —\n${String(preambleText || "")}`
+        );
+        pre.classList.toggle(
+            "is-scrollable",
+            pre.scrollHeight > pre.clientHeight + 4
+        );
+        pre.scrollTop = pre.scrollHeight;
+    }
+}
+
+// Inline SVG icons per agent tool (stroke: currentColor, round joins).
+const TOOL_ICONS = {
+    web_search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"></circle><path d="M3.5 10.5h14M10.5 3.5c2.7 2.1 2.7 11.9 0 14"></path><path d="m15.9 15.9 4.4 4.4"></path></svg>`,
+    fetch_pages: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+    python_run: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg>`,
+    calculate: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 4H6l6 8-6 8h12"></path></svg>`,
+    analyze_image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>`,
+    artifact_create: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M12 12v6M9 15h6"></path></svg>`,
+    artifact_update: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l4 4v3.5"></path><path d="M14 3v5h5"></path><path d="m12.5 18.5 6-6 2 2-6 6h-2z"></path></svg>`,
+    artifacts_list: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><path d="M7 13h6"></path></svg>`,
+    rag_search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path></svg>`,
+    files_list: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>`,
+    files_read_text: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M9 13h6M9 17h4"></path></svg>`,
+    current_time: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>`,
+    echo: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12h3l3-8 4 16 3-11 2 3h5"></path></svg>`
+};
+
+const TOOL_ICON_DEFAULT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>`;
+
+function toolIconSvg(name) {
+    return TOOL_ICONS[String(name || "").trim()] || TOOL_ICON_DEFAULT;
+}
+
 function fillAgentToolCard(card, call, result) {
     card.textContent = "";
     if (call?.id !== undefined && call?.id !== null) {
         card.dataset.toolId = String(call.id);
     }
-    card.className = `agent-tool-card ${result ? (result.ok ? "ok" : "ko") : "pending"}`;
+    card.className = "agent-tool-card " + (
+        result ? (result.ok ? "ok settled" : "ko settled") : "pending"
+    );
 
     const summary = document.createElement("summary");
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "agent-tool-icon";
+    iconSpan.setAttribute("aria-hidden", "true");
+    iconSpan.innerHTML = toolIconSvg(call?.name);
+    summary.appendChild(iconSpan);
     if (!result) {
         const spinner = document.createElement("span");
         spinner.className = "tool-spinner";
@@ -2238,6 +2420,14 @@ function upsertLiveAgentToolCard(container, event) {
     }
     const call = card._lasmeCall || { name: event.name };
     fillAgentToolCard(card, call, event);
+    // Completion feedback: soft pop on success, light shake on failure.
+    // Only on the live update path, never on the canonical rebuild.
+    card.classList.add(event.ok ? "anim-pop" : "anim-shake");
+    card.addEventListener(
+        "animationend",
+        () => card.classList.remove("anim-pop", "anim-shake"),
+        { once: true }
+    );
 }
 
 function renderAgentToolsSummary(container, events) {
@@ -2254,7 +2444,7 @@ function renderAgentToolsSummary(container, events) {
     }
     if (!calls.size) return;
     const group = document.createElement("div");
-    group.className = "agent-tools-group";
+    group.className = "agent-tools-group no-anim";
     for (const { call, result } of calls.values()) {
         group.appendChild(
             fillAgentToolCard(document.createElement("details"), call, result)

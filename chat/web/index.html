@@ -436,44 +436,20 @@
                                     aria-label="Niveau de raisonnement"
                                     style="display:none;"
                                 >
-                                    <option value="fast">Rapide</option>
-                                    <option value="balanced" selected>Équilibré</option>
-                                    <option value="high">Approfondi</option>
+                                    <option value="high" selected>Approfondi</option>
                                     <option value="max">Maximum</option>
                                 </select>
 
                                 <div class="intelligence-picker reasoning-picker" id="reasoningPickerContainer">
                                     <button type="button" class="intelligence-trigger" id="reasoningPickerTrigger" aria-expanded="false">
                                         <span class="intel-trigger-icon">✦</span>
-                                        <span class="intel-label" id="selectedReasoningName">Équilibré</span>
+                                        <span class="intel-label" id="selectedReasoningName">Approfondi</span>
                                         <svg class="intel-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                                     </button>
                                     <div class="intelligence-dropdown reasoning-dropdown" id="reasoningPickerDropdown">
                                         <div class="intel-header">Niveau de raisonnement</div>
 
-                                        <button type="button" class="intel-option" data-level="fast" data-label="Rapide">
-                                            <div class="intel-option-left">
-                                                <div class="intel-option-icon-wrap intel-icon-fast">⚡</div>
-                                                <div class="intel-option-text">
-                                                    <div class="intel-option-name">Rapide</div>
-                                                    <div class="intel-option-desc">Réponse directe · raisonnement désactivé</div>
-                                                </div>
-                                            </div>
-                                            <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                        </button>
-
-                                        <button type="button" class="intel-option intel-active" data-level="balanced" data-label="Équilibré">
-                                            <div class="intel-option-left">
-                                                <div class="intel-option-icon-wrap intel-icon-balanced">✦</div>
-                                                <div class="intel-option-text">
-                                                    <div class="intel-option-name">Équilibré</div>
-                                                    <div class="intel-option-desc">Bon compromis entre vitesse et profondeur</div>
-                                                </div>
-                                            </div>
-                                            <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                        </button>
-
-                                        <button type="button" class="intel-option" data-level="high" data-label="Approfondi">
+                                        <button type="button" class="intel-option intel-active" data-level="high" data-label="Approfondi">
                                             <div class="intel-option-left">
                                                 <div class="intel-option-icon-wrap intel-icon-high">◆</div>
                                                 <div class="intel-option-text">
@@ -481,7 +457,7 @@
                                                     <div class="intel-option-desc">Analyse détaillée pour les demandes complexes</div>
                                                 </div>
                                             </div>
-                                            <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                            <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                         </button>
 
                                         <button type="button" class="intel-option" data-level="max" data-label="Maximum">
@@ -866,7 +842,7 @@
 
     <script src="math-renderer.js?v=20260729-currency"></script>
     <script src="progressive-renderer.js?v=20260730-citation-cleanup"></script>
-    <script src="app.js?v=20260919-identite-v2"></script>
+    <script src="app.js?v=20260919-thinking-anim"></script>
     <script src="workspace.js?v=20260730-live-project-counts"></script>
 </body>
 </html>
