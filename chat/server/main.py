@@ -33,8 +33,7 @@ from core.inference.profiles import (
     get_model_profile,
 )
 from core.agent.registry import build_agent_registry
-from core.agent.events import AgentEvent
-from core.agent.orchestrator import AgentConfig, AgentOrchestrator
+from chat.server.routers.agent import AgentDeps, create_agent_router
 from core.config import settings
 from core.tools.web_search import (
     fetch_url_content,
@@ -273,23 +272,6 @@ class ChatMessage(BaseModel):
 
 _memory_update_locks: Dict[str, asyncio.Lock] = {}
 _personal_memory_lock = asyncio.Lock()
-
-class AgentStreamRequest(BaseModel):
-    messages: List[ChatMessage] = Field(min_length=1, max_length=40)
-    model: Optional[str] = None
-    max_turns: int = Field(default=8, ge=1, le=16)
-    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    image_base64: Optional[str] = Field(default=None, max_length=8_000_000)
-    project_id: Optional[str] = Field(default=None, max_length=64)
-
-AGENT_SYSTEM_PROMPT = (
-    "Tu es Lasme, un assistant agentique local. Tu disposes d'outils : "
-    "utilise-les quand ils apportent une réponse plus exacte ou plus "
-    "fraîche que ta mémoire. Après chaque résultat d'outil, décide : "
-    "appeler un autre outil, ou répondre. Ne répète pas un appel d'outil "
-    "identique. Quand tu réponds, sois net, structuré et honnête sur tes "
-    "incertitudes. Cite les sources quand tu en utilises."
-)
 
 
 class ChatRequest(BaseModel):
@@ -3079,121 +3061,19 @@ async def generate_follow_up_suggestions(req: SuggestionRequest):
         return {"suggestions": []}
 
 
-@app.get("/api/agent/runs")
-async def list_agent_runs(limit: int = 30):
-    return {"runs": db.list_agent_runs(min(limit, 100))}
-
-
-@app.get("/api/agent/runs/{run_id}")
-async def get_agent_run(run_id: str):
-    run = db.get_agent_run(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="Run introuvable.")
-    return run
-
-
-@app.delete("/api/agent/runs/{run_id}")
-async def delete_agent_run(run_id: str):
-    if not db.delete_agent_run(run_id):
-        raise HTTPException(status_code=404, detail="Run introuvable.")
-    return {"ok": True}
-
-
-@app.post("/api/agent/stream")
-async def agent_stream(req: AgentStreamRequest):
-    """Agentic run with typed SSE events: reasoning, tool calls, results."""
-    selected_model = _validate_model_name(req.model or settings.chat_model)
-
-    async def rag_search(query: str, top_k: int):
-        return rag_store.search_scopes(
-            [DEFAULT_PROJECT_ID], query, top_k=top_k
-        )
-
-    registry = build_agent_registry(
-        search_fn=search_web_detailed,
-        fetch_fn=fetch_url_content,
-        rag_search_fn=rag_search,
-        python_runner=python_runner,
-        file_store=project_file_store,
-        vision_client=client,
-        vision_model=settings.vision_model,
-        prebound_image=(req.image_base64 or None),
-        artifact_store=artifact_store,
-        default_project_id=req.project_id or DEFAULT_PROJECT_ID,
-    )
-    system_prompt = AGENT_SYSTEM_PROMPT
-    project = db.get_project(req.project_id or DEFAULT_PROJECT_ID)
-    if project and (project.get("instructions") or "").strip():
-        system_prompt += (
-            "\n\nInstructions du projet : "
-            + project["instructions"].strip()[:4_000]
-        )
-    if req.image_base64:
-        system_prompt += (
-            " Une image est jointe à cette mission : utilise l'outil "
-            "analyze_image avec ta question pour l'examiner."
-        )
-    config = AgentConfig(
-        model=selected_model,
-        system_prompt=system_prompt,
-        max_turns=req.max_turns,
-        temperature=(
-            get_model_profile(selected_model).temperature
-            if req.temperature is None
-            else req.temperature
-        ),
-    )
-    orchestrator = AgentOrchestrator(client, registry, config)
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def on_event(event) -> None:
-        queue.put_nowait(event)
-
-    async def run_agent() -> None:
-        try:
-            result = await orchestrator.run(
-                [message.model_dump(exclude={"images"}) for message in req.messages],
-                on_event=on_event,
-            )
-            try:
-                db.save_agent_run(
-                    model=selected_model,
-                    prompt=req.messages[-1].content if req.messages else "",
-                    final_text=result.final_text,
-                    done_reason=result.done_reason,
-                    turns=result.turns,
-                    events=result.log.to_list(),
-                    usage=result.usage,
-                )
-            except Exception:  # persistence must never break the stream
-                pass
-        except Exception as exc:  # never leave the queue waiting
-            on_event(
-                AgentEvent(
-                    type="agent_error",
-                    payload={
-                        "code": "server_error",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-            )
-        finally:
-            queue.put_nowait(None)
-
-    async def event_stream():
-        task = asyncio.create_task(run_agent())
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                yield event.to_sse()
-        finally:
-            if not task.done():
-                task.cancel()
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+app.include_router(create_agent_router(AgentDeps(
+    client=client,
+    db=db,
+    python_runner=python_runner,
+    rag_store=rag_store,
+    file_store=project_file_store,
+    artifact_store=artifact_store,
+    search_fn=search_web_detailed,
+    fetch_fn=fetch_url_content,
+    vision_model=settings.vision_model,
+    default_project_id=DEFAULT_PROJECT_ID,
+    validate_model=_validate_model_name,
+)))
 
 
 @app.post("/api/chat/stream")
