@@ -32,6 +32,9 @@ from core.inference.profiles import (
     RUNTIME_PROFILES,
     get_model_profile,
 )
+from core.agent.builtin import build_default_registry
+from core.agent.events import AgentEvent
+from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.config import settings
 from core.tools.web_search import format_search_results
 from core.tools.search_providers import detect_search_vertical
@@ -266,6 +269,22 @@ class ChatMessage(BaseModel):
 
 _memory_update_locks: Dict[str, asyncio.Lock] = {}
 _personal_memory_lock = asyncio.Lock()
+
+class AgentStreamRequest(BaseModel):
+    messages: List[ChatMessage] = Field(min_length=1, max_length=40)
+    model: Optional[str] = None
+    max_turns: int = Field(default=8, ge=1, le=16)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+
+AGENT_SYSTEM_PROMPT = (
+    "Tu es Lasme, un assistant agentique local. Tu disposes d'outils : "
+    "utilise-les quand ils apportent une réponse plus exacte ou plus "
+    "fraîche que ta mémoire. Après chaque résultat d'outil, décide : "
+    "appeler un autre outil, ou répondre. Ne répète pas un appel d'outil "
+    "identique. Quand tu réponds, sois net, structuré et honnête sur tes "
+    "incertitudes. Cite les sources quand tu en utilises."
+)
+
 
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
@@ -3052,6 +3071,62 @@ async def generate_follow_up_suggestions(req: SuggestionRequest):
         return {"suggestions": suggestions}
     except Exception:
         return {"suggestions": []}
+
+
+@app.post("/api/agent/stream")
+async def agent_stream(req: AgentStreamRequest):
+    """Agentic run with typed SSE events: reasoning, tool calls, results."""
+    selected_model = _validate_model_name(req.model or settings.chat_model)
+    registry = build_default_registry()
+    config = AgentConfig(
+        model=selected_model,
+        system_prompt=AGENT_SYSTEM_PROMPT,
+        max_turns=req.max_turns,
+        temperature=(
+            get_model_profile(selected_model).temperature
+            if req.temperature is None
+            else req.temperature
+        ),
+    )
+    orchestrator = AgentOrchestrator(client, registry, config)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_event(event) -> None:
+        queue.put_nowait(event)
+
+    async def run_agent() -> None:
+        try:
+            await orchestrator.run(
+                [message.model_dump(exclude={"images"}) for message in req.messages],
+                on_event=on_event,
+            )
+        except Exception as exc:  # never leave the queue waiting
+            on_event(
+                AgentEvent(
+                    type="agent_error",
+                    payload={
+                        "code": "server_error",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+        finally:
+            queue.put_nowait(None)
+
+    async def event_stream():
+        task = asyncio.create_task(run_agent())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event.to_sse()
+        finally:
+            if not task.done():
+                task.cancel()
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/chat/stream")
