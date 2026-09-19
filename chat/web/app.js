@@ -2204,9 +2204,14 @@ function ensureThinkingPanel(bubble) {
 
     header.addEventListener("click", () => {
         if (panel.classList.contains("streaming")) return;
+        // The user takes over: cancel any pending auto-collapse.
+        if (panel._lasmeCollapseTimer) {
+            clearTimeout(panel._lasmeCollapseTimer);
+            panel._lasmeCollapseTimer = null;
+        }
         setThinkingMode(
             panel,
-            panel.dataset.mode === "full" ? "mid" : "full"
+            panel.dataset.mode === "full" ? "closed" : "full"
         );
     });
     panel.append(header, window_);
@@ -2225,8 +2230,6 @@ function ensureThinkingPanel(bubble) {
 
 function setThinkingMode(panel, mode) {
     panel.dataset.mode = mode;
-    const window_ = panel.querySelector(".thinking-window");
-    if (window_ && mode === "mid") window_.scrollTop = 0;
 }
 
 function startThinkingPhrases(panel) {
@@ -2301,9 +2304,9 @@ function handleReasoningDone(bubble, duration) {
     }
     panel._lasmeCollapseTimer = window.setTimeout(() => {
         panel._lasmeCollapseTimer = null;
-        // Collapse to the middle window: the reasoning stays visible and
-        // scrollable, the answer takes over the conversation flow.
-        setThinkingMode(panel, "mid");
+        // Full collapse: only the header ("Réflexion · X,X s") stays visible;
+        // the answer takes over the conversation flow.
+        setThinkingMode(panel, "closed");
     }, delay);
 }
 
@@ -2327,7 +2330,6 @@ function resetStreamedAnswer(bubble, preambleText) {
     panel.classList.remove("streaming");
     const label = panel.querySelector(".thinking-label");
     if (label) label.textContent = "Réflexion";
-    setThinkingMode(panel, "mid");
     const pre = panel.querySelector(".thinking-text");
     if (pre) {
         const separator = pre.textContent ? "\n\n" : "";
@@ -2339,6 +2341,8 @@ function resetStreamedAnswer(bubble, preambleText) {
             pre.scrollHeight > pre.clientHeight + 4
         );
     }
+    // Back to the collapsed state once the preamble is archived.
+    setThinkingMode(panel, "closed");
 }
 
 // Inline SVG icons per agent tool (stroke: currentColor, round joins).

@@ -1114,7 +1114,9 @@ body.sidebar-resizing {
     80% { transform: translateX(2px); }
 }
 
-/* Streaming thinking panel ("Réflexion") — app theme, mid-height window */
+/* Streaming thinking panel ("Réflexion") — app theme.
+   Modes: stream = 140px window while reasoning, closed = header only,
+   full = 340px scrollable window (header click toggles closed/full). */
 .thinking-panel {
     margin: 0 0 0.65rem 0;
     border: 1px solid var(--border, #e5e5e5);
@@ -1197,7 +1199,8 @@ body.sidebar-resizing {
     transform: rotate(180deg);
 }
 
-/* The mid-height window: reasoning stays visible and scrolls inside */
+/* The reasoning window: visible modes scroll inside, closed shrinks to 0.
+   Background is a faint accent tint over the card color — never dark. */
 .thinking-window {
     height: 140px;
     overflow-y: auto;
@@ -1208,13 +1211,20 @@ body.sidebar-resizing {
         color-mix(in srgb, var(--accent, #10a37f) 3%, transparent),
         color-mix(in srgb, var(--accent, #10a37f) 1.5%, transparent)
     );
-    transition: height 0.42s cubic-bezier(0.4, 0, 0.2, 1);
+    transition:
+        height 0.42s cubic-bezier(0.4, 0, 0.2, 1),
+        border-top-color 0.3s ease;
     scrollbar-width: thin;
     scrollbar-color: var(--scrollbar-thumb, rgba(16, 163, 127, 0.42)) transparent;
 }
 
 .thinking-panel[data-mode="stream"] .thinking-window { height: 140px; }
-.thinking-panel[data-mode="mid"] .thinking-window { height: 92px; }
+/* Fully collapsed: header only, no residual rule or line under it. */
+.thinking-panel[data-mode="closed"] .thinking-window {
+    height: 0;
+    overflow: hidden;
+    border-top-color: transparent;
+}
 .thinking-panel[data-mode="full"] .thinking-window { height: 340px; }
 
 .thinking-text {
