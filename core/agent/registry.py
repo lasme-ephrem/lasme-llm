@@ -20,6 +20,8 @@ def build_agent_registry(
     vision_client: Optional[Any] = None,
     vision_model: str = "gemma-4-12b",
     prebound_image: Optional[str] = None,
+    artifact_store: Optional[Any] = None,
+    default_project_id: str = "default",
 ) -> ToolRegistry:
     """Builtin tools + web + platform tools, with injectable engines.
 
@@ -41,5 +43,7 @@ def build_agent_registry(
         vision_client=vision_client,
         vision_model=vision_model,
         prebound_image=prebound_image,
+        artifact_store=artifact_store,
+        default_project_id=default_project_id,
     )
     return registry

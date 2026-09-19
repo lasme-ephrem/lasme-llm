@@ -12,12 +12,19 @@ from typing import Any, Dict, List, Optional
 from core.agent.tools import (
     CATEGORY_EXEC,
     CATEGORY_READ,
+    CATEGORY_WRITE,
     ToolDefinition,
     ToolRegistry,
 )
 
 MAX_RAG_OUTPUT = 6_000
 MAX_FILE_OUTPUT = 8_000
+
+ARTIFACT_KIND_CHOICES = [
+    "document", "code", "markdown", "table", "research",
+    "html", "interactive", "diagram", "mindmap", "chart",
+    "presentation",
+]
 
 
 def _format_rag_results(chunks: List[Dict[str, Any]]) -> str:
@@ -49,6 +56,8 @@ def register_platform_tools(
     vision_client: Optional[Any] = None,
     vision_model: str = "gemma-4-12b",
     prebound_image: Optional[str] = None,
+    artifact_store: Optional[Any] = None,
+    default_project_id: str = "default",
 ) -> None:
     if rag_search_fn is not None:
         async def _rag_search(args: Dict[str, Any]) -> str:
@@ -246,5 +255,104 @@ def register_platform_tools(
                 category=CATEGORY_READ,
                 timeout_s=120.0,
                 max_output_chars=4_000,
+            )
+        )
+
+    if artifact_store is not None:
+        async def _artifact_create(args: Dict[str, Any]) -> str:
+            artifact = artifact_store.create(
+                project_id=args.get("project_id") or default_project_id,
+                title=str(args["title"]),
+                content=str(args["content"]),
+                kind=str(args.get("kind") or "document"),
+            )
+            return (
+                f"Artefact créé : « {artifact['title']} » (id={artifact['id']}, "
+                f"type={artifact['kind']}). Visible dans le Canvas du projet."
+            )
+
+        async def _artifact_update(args: Dict[str, Any]) -> str:
+            updated = artifact_store.add_version(
+                str(args["artifact_id"]),
+                str(args["content"]),
+                change_summary=str(args.get("change_summary") or "Mise à jour agent"),
+            )
+            if updated is None:
+                return "ERREUR: artefact introuvable."
+            return (
+                f"Artefact mis à jour : version {updated.get('version_number')} "
+                f"(id={updated.get('id')})."
+            )
+
+        async def _artifacts_list(args: Dict[str, Any]) -> str:
+            items = artifact_store.list(args.get("project_id") or default_project_id)
+            if not items:
+                return "Aucun artefact dans ce projet."
+            rows = [
+                f"- {a.get('id')} | {a.get('title')} | {a.get('kind')} "
+                f"| v{a.get('version', '?')}"
+                for a in items[:25]
+            ]
+            return "\n".join(rows)
+
+        registry.register(
+            ToolDefinition(
+                name="artifact_create",
+                description=(
+                    "Crée un artefact Canvas durable et exportable dans le "
+                    "projet : document markdown, code, tableau, rapport de "
+                    "recherche, diagramme, présentation… À utiliser pour "
+                    "toute production destinée à être conservée."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {
+                            "type": "string",
+                            "description": "Contenu complet (markdown selon le type)",
+                        },
+                        "kind": {"type": "string", "enum": ARTIFACT_KIND_CHOICES},
+                    },
+                    "required": ["title", "content"],
+                },
+                handler=_artifact_create,
+                category=CATEGORY_WRITE,
+                timeout_s=20.0,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="artifact_update",
+                description=(
+                    "Remplace le contenu d'un artefact existant (nouvelle "
+                    "version). Utilise artifacts_list pour les ids."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "change_summary": {"type": "string"},
+                    },
+                    "required": ["artifact_id", "content"],
+                },
+                handler=_artifact_update,
+                category=CATEGORY_WRITE,
+                timeout_s=20.0,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="artifacts_list",
+                description="Liste les artefacts Canvas du projet avec leurs ids.",
+                parameters={
+                    "type": "object",
+                    "properties": {"project_id": {"type": "string"}},
+                    "required": [],
+                },
+                handler=_artifacts_list,
+                category=CATEGORY_READ,
+                timeout_s=15.0,
             )
         )

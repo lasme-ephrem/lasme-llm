@@ -280,6 +280,7 @@ class AgentStreamRequest(BaseModel):
     max_turns: int = Field(default=8, ge=1, le=16)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     image_base64: Optional[str] = Field(default=None, max_length=8_000_000)
+    project_id: Optional[str] = Field(default=None, max_length=64)
 
 AGENT_SYSTEM_PROMPT = (
     "Tu es Lasme, un assistant agentique local. Tu disposes d'outils : "
@@ -3117,8 +3118,16 @@ async def agent_stream(req: AgentStreamRequest):
         vision_client=client,
         vision_model=settings.vision_model,
         prebound_image=(req.image_base64 or None),
+        artifact_store=artifact_store,
+        default_project_id=req.project_id or DEFAULT_PROJECT_ID,
     )
     system_prompt = AGENT_SYSTEM_PROMPT
+    project = db.get_project(req.project_id or DEFAULT_PROJECT_ID)
+    if project and (project.get("instructions") or "").strip():
+        system_prompt += (
+            "\n\nInstructions du projet : "
+            + project["instructions"].strip()[:4_000]
+        )
     if req.image_base64:
         system_prompt += (
             " Une image est jointe à cette mission : utilise l'outil "
