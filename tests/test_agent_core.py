@@ -296,6 +296,68 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.done_reason, "max_turns")
         self.assertEqual(result.turns, 4)
 
+    async def test_fetch_required_after_search_blocks_snippet_answers(self):
+        # W-strict : web_search puis réponse directe = refus du harnais ;
+        # le modèle est renvoyé lire une page avant de répondre.
+        client = ScriptedClient(
+            [
+                [
+                    tool_call_chunk(0, name="web_search", arguments='{"query": "vainqueur coupe du monde 2026"}'),
+                    final_chunk(done_reason="tool_calls"),
+                ],
+                [content_chunk("L'Espagne a gagné (extrait)."), final_chunk()],
+                [
+                    tool_call_chunk(0, name="fetch_pages", arguments='{"urls": ["https://exemple.fr/a"]}'),
+                    final_chunk(done_reason="tool_calls"),
+                ],
+                [content_chunk("L'Espagne a gagné, confirmé par la page lue."), final_chunk()],
+            ]
+        )
+        registry = build_default_registry()
+        registry.register(
+            ToolDefinition(
+                name="web_search",
+                description="recherche",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+                handler=lambda args: asyncio.sleep(0, result="[]"),
+            )
+        )
+        orchestrator = AgentOrchestrator(
+            client,
+            registry,
+            self._config(require_fetch_after_search=True),
+        )
+        result = await orchestrator.run(
+            [{"role": "user", "content": "utilise le web"}]
+        )
+        self.assertIn("confirmé par la page lue", result.final_text)
+        # La réponse basée sur les extraits seuls a été rejetée : le
+        # premier contenu n'est pas le final.
+        notes = [
+            e for e in result.log.events
+            if e.type == "tool_result" and e.payload.get("note")
+        ]
+        self.assertIn("fetch_required_before_answer", [n.payload["note"] for n in notes])
+        # Le message de nudge a bien été injecté dans la conversation.
+        third_call_messages = client.calls[2]["messages"]
+        injected = [m for m in third_call_messages if m["role"] == "user" and "n'as lu AUCUNE page" in m["content"]]
+        self.assertTrue(injected)
+
+    async def test_fetch_rule_not_applied_without_search(self):
+        client = ScriptedClient([[content_chunk("Réponse directe."), final_chunk()]])
+        orchestrator = AgentOrchestrator(
+            client,
+            build_default_registry(),
+            self._config(require_fetch_after_search=True),
+        )
+        result = await orchestrator.run([{"role": "user", "content": "bonjour"}])
+        self.assertEqual(result.final_text, "Réponse directe.")
+        self.assertEqual(result.done_reason, "stop")
+
     async def test_should_stop_interrupts(self):
         client = ScriptedClient([[content_chunk("x"), final_chunk()]])
         orchestrator = AgentOrchestrator(client, self._registry(), self._config())

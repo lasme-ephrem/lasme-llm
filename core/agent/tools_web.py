@@ -39,6 +39,57 @@ MAX_FETCH_TOTAL_CHARS = 14_000
 
 _URL_RE = re.compile(r"https?://[^\s\)>\]\"']+")
 
+# Stale-index triage: search engines mix pre-event prediction/betting
+# pages with post-event result pages. When the harness auto-fetches,
+# result-toned pages must be read first.
+_RESULT_MARKERS = (
+    "s'est terminé", "s'est imposé", "champion", "sacré", "a remporté",
+    "vainqueur", "a battu", "victoire", "classement final",
+    "a gagné", "couronné", "s'est conclu", "résultat",
+)
+_PREDICTION_MARKERS = (
+    "pronostic", "cote", "parier", "bookmaker", "favori",
+    "se déroulera", "aura lieu", "à venir", "prévu", "prédiction",
+    "sondage", "prédire",
+)
+
+
+def pick_urls_for_reading(search_output: str, max_urls: int = 2) -> List[str]:
+    """Pick the URLs most likely to carry *results*, not predictions.
+
+    Parses the numbered [title / url / snippet] blocks produced by
+    ``_format_search_results`` and ranks them: result-toned text wins,
+    prediction-toned text sinks, original order breaks ties.
+    """
+    entries: List[Dict[str, str]] = []
+    current: Dict[str, str] | None = None
+    for line in search_output.splitlines():
+        stripped = line.strip()
+        header = re.match(r"^\[\d+\]\s+(.*)$", stripped)
+        if header:
+            if current:
+                entries.append(current)
+            current = {"title": header.group(1), "url": "", "snippet": ""}
+        elif current is not None:
+            if stripped.startswith("http"):
+                current["url"] = stripped
+            elif stripped and not current["snippet"]:
+                current["snippet"] = stripped
+    if current:
+        entries.append(current)
+
+    def score(entry: Dict[str, str]) -> int:
+        text = (entry["title"] + " " + entry["snippet"]).lower()
+        value = sum(2 for marker in _RESULT_MARKERS if marker in text)
+        value -= sum(3 for marker in _PREDICTION_MARKERS if marker in text)
+        return value
+
+    ranked = sorted(
+        (entry for entry in entries if entry["url"]),
+        key=lambda entry: (-score(entry), entries.index(entry)),
+    )
+    return [entry["url"] for entry in ranked[:max_urls]]
+
 
 def collect_known_urls(events: List[Dict[str, Any]]) -> set[str]:
     """URLs legitimately seen by the agent: search results + fetched pages.
@@ -89,6 +140,10 @@ def _format_search_results(payload: Dict[str, Any]) -> str:
         if len(snippet) > 500:
             snippet = snippet[:500] + "…"
         lines.append(f"[{index}] {title}\n    {url}\n    {snippet}")
+        lines.append(
+            "⚠ Extraits insuffisants pour répondre : appelle fetch_pages "
+            "sur les URLs pertinentes avant de répondre."
+        )
     return "\n".join(lines)[:MAX_SEARCH_OUTPUT]
 
 

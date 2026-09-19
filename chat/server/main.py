@@ -3254,8 +3254,25 @@ async def chat_stream(req: ChatRequest):
     # outils. Les modes de l'UI contrôlent la DISPONIBILITÉ des outils :
     # off → pas d'outils web ; auto → disponibles, l'agent juge ;
     # always → disponibles + directive de recherche obligatoire.
-    web_tools_available = bool(user_toggle) and not has_images
-    force_web_search = web_tools_available and web_mode == "always"
+    # L'intention web EXPLICITE de l'utilisateur (« utilise le web »…)
+    # prime sur son prior d'entraînement parfois faux : recherche forcée.
+    explicit_web_intent = bool(
+        re.search(
+            r"\b(web|internet|en\s+ligne)\b"
+            r"|\bcherche[rz]?(z)?\b"
+            r"|\brecherch(e|er|ez)\b"
+            r"|\bgo{2,}gle\b"
+            r"|\bweb\s+search\b",
+            last_user_msg,
+            re.IGNORECASE,
+        )
+    )
+    web_tools_available = (
+        bool(user_toggle) or explicit_web_intent
+    ) and not has_images
+    force_web_search = web_tools_available and (
+        web_mode == "always" or explicit_web_intent
+    )
     web_search_needed = False
     strict_grounding = bool(
         user_toggle
@@ -3309,7 +3326,7 @@ async def chat_stream(req: ChatRequest):
             "la question porte sur une information actuelle, récente ou "
             "vérifiable en ligne — jamais pour un calcul, du code ou une "
             "question de connaissance générale. Après web_search, lis les "
-            "pages avec fetch_pages avant de citer quoi que ce soit."
+            "pages avec fetch_pages avant de citer quoi que ce soit. Si une page que tu as lue contredit ta mémoire d'entraînement, LA PAGE GAGNE : elle est plus récente que toi."
         )
 
     # Axe 4 : une image jointe au chat est pré-liée au run — l'agent
@@ -3840,6 +3857,8 @@ async def chat_stream(req: ChatRequest):
                 if reasoning_effort is not None
                 else model_profile.think
             ),
+            require_fetch_after_search=web_tools_available,
+            force_search_directive=force_web_search,
         )
         chat_orchestrator = AgentOrchestrator(
             client, chat_registry, agent_config
