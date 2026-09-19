@@ -35,6 +35,10 @@ from core.inference.profiles import (
 from chat.server.routers.agent import AgentDeps, create_agent_router
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.agent.registry import build_agent_registry
+from core.agent.tools_web import (
+    collect_known_urls,
+    strip_unsupported_citations,
+)
 from core.config import settings
 from core.tools.web_search import (
     fetch_url_content,
@@ -3333,18 +3337,13 @@ async def chat_stream(req: ChatRequest):
         if temporary
         else previous_verified_web_context(session_id)
     )
-    web_search_needed = (
-        should_perform_web_search(
-            last_user_msg,
-            user_toggle,
-            has_conversation_context=has_conversation_context,
-            mode=web_mode,
-            conversation_messages=req.messages,
-            has_prior_web_evidence=bool(prior_web_context),
-        )
-        if not has_images
-        else False
-    )
+    # W3 : plus de pré-recherche web — l'agent décide lui-même via ses
+    # outils. Les modes de l'UI contrôlent la DISPONIBILITÉ des outils :
+    # off → pas d'outils web ; auto → disponibles, l'agent juge ;
+    # always → disponibles + directive de recherche obligatoire.
+    web_tools_available = bool(user_toggle) and not has_images
+    force_web_search = web_tools_available and web_mode == "always"
+    web_search_needed = False
     strict_grounding = bool(
         user_toggle
         and not has_images
@@ -3384,6 +3383,21 @@ async def chat_stream(req: ChatRequest):
         "\\operatorname{VC}, \\mathbb{R}, \\mathbb{E}, etc. plutôt que "
         "\\VC, \\R ou \\E."
     )
+    if force_web_search:
+        system_instruction += (
+            "\n11. Recherche Web obligatoire : la demande nécessite des "
+            "informations actuelles. Utilise web_search, puis fetch_pages "
+            "sur les URLs pertinentes AVANT de répondre, et ne cite que ce "
+            "que tu as réellement lu dans les pages récupérées."
+        )
+    elif web_tools_available:
+        system_instruction += (
+            "\n11. Outils Web disponibles : utilise web_search UNIQUEMENT si "
+            "la question porte sur une information actuelle, récente ou "
+            "vérifiable en ligne — jamais pour un calcul, du code ou une "
+            "question de connaissance générale. Après web_search, lis les "
+            "pages avec fetch_pages avant de citer quoi que ce soit."
+        )
     system_instruction += (
         "\n10. Qualité du livrable : Vérifie silencieusement avant de répondre que "
         "tu as traité chaque partie de la demande, que les nombres et unités sont "
@@ -3489,9 +3503,7 @@ async def chat_stream(req: ChatRequest):
         answer_provider = None
         search_report: Dict[str, Any] = {}
         used_previous_web_context = False
-        web_status = "disabled" if not user_toggle else (
-            "skipped" if not web_search_needed else "pending"
-        )
+        web_status = "agent" if web_tools_available else "disabled"
 
         context_percentage = min(
             100,
@@ -3871,8 +3883,8 @@ async def chat_stream(req: ChatRequest):
             )
 
         chat_registry = build_agent_registry(
-            search_fn=search_web_detailed,
-            fetch_fn=fetch_url_content,
+            search_fn=search_web_detailed if web_tools_available else None,
+            fetch_fn=fetch_url_content if web_tools_available else None,
             rag_search_fn=chat_rag_search,
             python_runner=python_runner,
             file_store=project_file_store,
@@ -3967,6 +3979,13 @@ async def chat_stream(req: ChatRequest):
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
         if agent_result is not None:
+            if agent_tool_names:
+                # W5 : une URL citée doit avoir été vue par l'agent
+                # (résultats de recherche ou pages réellement fetchées).
+                known_urls = collect_known_urls(agent_result.log.to_list())
+                full_assistant_reply = strip_unsupported_citations(
+                    full_assistant_reply, known_urls
+                )
             elapsed = time.monotonic() - generation_started_at
             gen_seconds = (
                 (time.monotonic() - first_content_at) if first_content_at else 0.0

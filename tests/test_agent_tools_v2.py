@@ -40,7 +40,10 @@ class WebToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertIn("[1] Resultat prix rtx 5090 (dernières 24 heures)", result.output)
         self.assertIn("https://exemple.fr/a", result.output)
-        self.assertIn("Moteur : test-engine", result.output)
+        # W2 : liens bruts uniquement, plus d'en-tête moteur ni de
+        # réponse pré-rédigée d'un fournisseur.
+        self.assertNotIn("Moteur :", result.output)
+        self.assertNotIn("provider_answer", result.output)
 
     async def test_fetch_pages_batches_and_isolates_errors(self):
         output = await _run_fetch_pages(

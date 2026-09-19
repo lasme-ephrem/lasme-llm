@@ -42,23 +42,11 @@ if (-not $llamaReady) {
     }
 }
 
-$searxEnabled = $false
 $envFile = Join-Path $projectRoot ".env"
 if (Test-Path -LiteralPath $envFile) {
-    $searxEnabled = [bool](
-        Select-String `
-            -LiteralPath $envFile `
-            -Pattern "^\s*SEARXNG_ENABLED\s*=\s*(true|1|yes|on)\s*$" `
-            -Quiet
-    )
-}
-if ($searxEnabled -and $docker) {
-    & $docker compose `
-        -f (Join-Path $projectRoot "infra\searxng\compose.yaml") `
-        up -d
-}
-elseif ($searxEnabled) {
-    Write-Warning "SearXNG est active mais Docker Desktop est introuvable."
+    # SearXNG n'est plus demarre : la recherche web agentique n'utilise
+    # que des fournisseurs de liens sans Docker (DDG, specialistes,
+    # Brave, Tavily, et Monid/tinyfish si MONID_API_KEY).
 }
 
 if ($docker) {
