@@ -3761,11 +3761,14 @@ body.sidebar-resizing {
 }
 
 
-/* Inline source chips (ChatGPT-style citations) */
+/* Inline citation chips (ChatGPT-style), rendered in place of the [n]
+   markers: a compact favicon-only pill, slightly raised like a discrete
+   footnote superscript. */
 .answer-content .source-chip-group {
     display: inline-flex;
-    vertical-align: baseline;
-    margin-left: 0.4rem;
+    vertical-align: super;
+    margin-left: 2px;
+    line-height: 1;
 }
 
 .source-chip {
@@ -3773,18 +3776,17 @@ body.sidebar-resizing {
     font: inherit;
     display: inline-flex;
     align-items: center;
-    gap: 0.18rem;
-    padding: 0.14rem;
+    gap: 0.12rem;
+    padding: 0.08rem;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--bg-card);
     color: var(--text-secondary);
     font-size: 0.73rem;
     font-weight: 500;
-    line-height: 1.25;
+    line-height: 1;
     cursor: pointer;
     user-select: none;
-    vertical-align: middle;
     transition:
         border-color 0.16s ease,
         box-shadow 0.16s ease,
@@ -3801,9 +3803,9 @@ body.sidebar-resizing {
 }
 
 .source-chip-favicon {
-    width: 16px;
-    height: 16px;
-    flex: 0 0 16px;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
     border-width: 1px;
     border-color: var(--border);
 }

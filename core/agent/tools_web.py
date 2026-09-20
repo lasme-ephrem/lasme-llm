@@ -38,6 +38,42 @@ MAX_FETCH_TOTAL_CHARS = 14_000
 
 _URL_RE = re.compile(r"https?://[^\s\)>\]\"']+")
 
+
+class SearchResultNumbering:
+    """Numérotation CUMULATIVE des résultats web_search d'un même message.
+
+    Contrat interface : le modèle cite par marqueurs [n] et le frontend
+    remplace chaque [n] par la puce de ``web_results[n-1]``. Les numéros
+    ne repartent donc PAS à 1 à chaque appel web_search : 1re recherche
+    → [1..n1], 2e recherche → [n1+1..n1+n2], etc.
+
+    Une instance vive est créée PAR enregistrement des outils (donc par
+    requête de chat, ``build_agent_registry`` étant appelé dans le flux
+    SSE) : aucun compteur module-level, qui fuiterait entre messages.
+    ``seed`` aligne le départ sur les sources déjà trouvées par la
+    pré-recherche (occupant [1..N] dans le contexte) ; seuls les
+    résultats réellement formatés consomment des numéros.
+    """
+
+    def __init__(self, start: int = 0) -> None:
+        self._last = max(0, int(start))
+
+    @property
+    def last(self) -> int:
+        """Dernier numéro attribué (0 si aucun résultat encore formaté)."""
+        return self._last
+
+    def seed(self, start: int) -> None:
+        """Réserve [1..start] pour des sources déjà numérotées ailleurs."""
+        self._last = max(self._last, int(start))
+
+    def allocate(self, count: int) -> range:
+        """Attribue ``count`` numéros consécutifs et avance le compteur."""
+        count = max(0, int(count))
+        start = self._last + 1
+        self._last += count
+        return range(start, self._last + 1)
+
 # Stale-index triage: search engines mix pre-event prediction/betting
 # pages with post-event result pages. When the harness auto-fetches,
 # result-toned pages must be read first.
@@ -125,14 +161,28 @@ def strip_unsupported_citations(text: str, known_urls: set[str]) -> str:
     return _URL_RE.sub(_replace, text)
 
 
-def _format_search_results(payload: Dict[str, Any]) -> str:
+def _format_search_results(
+    payload: Dict[str, Any],
+    numbering: SearchResultNumbering | None = None,
+) -> str:
+    """Formate les liens bruts avec la numérotation cumulative en cours.
+
+    Sans ``numbering`` (compatibilité), la numérotation est locale à
+    l'appel. Avec, chaque résultat affiché consomme le numéro suivant du
+    compteur du message : les marqueurs [n] du modèle restent alignés sur
+    l'ordre des sources envoyées au frontend. « Aucun résultat. » ne
+    consomme aucun numéro.
+    """
     results = payload.get("results") or []
     if not results:
         errors = payload.get("errors") or []
         detail = f" erreurs: {'; '.join(errors[:2])}" if errors else ""
         return f"Aucun résultat.{detail}"
+    if numbering is None:
+        numbering = SearchResultNumbering()
+    numbers = numbering.allocate(len(results))
     lines = []
-    for index, result in enumerate(results, start=1):
+    for index, result in zip(numbers, results):
         title = str(result.get("title") or "Sans titre").strip()[:140]
         url = str(result.get("url") or "").strip()
         snippet = str(result.get("snippet") or "").strip()
@@ -149,6 +199,7 @@ def _format_search_results(payload: Dict[str, Any]) -> str:
 async def _run_web_search(
     search_fn: Callable[..., Dict[str, Any]],
     args: Dict[str, Any],
+    numbering: SearchResultNumbering | None = None,
 ) -> str:
     query = str(args["query"]).strip()
     recency = str(args.get("recency") or "any")
@@ -169,7 +220,7 @@ async def _run_web_search(
     )
     payload.pop("provider_answer", None)
     payload.pop("answer_mode", None)
-    return _format_search_results(payload)
+    return _format_search_results(payload, numbering)
 
 
 async def _run_fetch_pages(
@@ -204,17 +255,31 @@ def register_web_tools(
     *,
     search_fn: Callable[..., Dict[str, Any]],
     fetch_fn: Callable[[str], str],
+    numbering: SearchResultNumbering | None = None,
 ) -> None:
+    """Enregistre web_search/fetch_pages avec un compteur PAR requête.
+
+    Sans ``numbering`` fourni, un compteur frais est créé ici (une
+    instance par enregistrement, donc par message assistant : la
+    numérotation ne fuite jamais d'un message à l'autre). Il est exposé
+    comme ``registry.web_result_numbering`` pour que le serveur de chat
+    puisse l'aligner (``seed``) sur les sources de la pré-recherche.
+    """
+    numbering = numbering or SearchResultNumbering()
+    registry.web_result_numbering = numbering
     registry.register(
         ToolDefinition(
             name="web_search",
             description=(
                 "Recherche sur le Web et retourne des LIENS BRUTS "
                 "numérotés (titre, URL, extrait) — jamais de réponse "
-                "pré-rédigée. 'recency' filtre la fraîcheur (jusqu'à la "
-                "dernière heure). RÈGLE : pour toute information issue de "
-                "cette recherche, appelle ensuite fetch_pages sur les URLs "
-                "pertinentes et ne cite que ce que tu y as lu."
+                "pré-rédigée. La numérotation est CUMULATIVE d'un appel "
+                "web_search à l'autre du même message : c'est elle qui "
+                "fonde tes marqueurs de citation [n]. 'recency' filtre la "
+                "fraîcheur (jusqu'à la dernière heure). RÈGLE : pour toute "
+                "information issue de cette recherche, appelle ensuite "
+                "fetch_pages sur les URLs pertinentes et ne cite que ce "
+                "que tu y as lu."
             ),
             parameters={
                 "type": "object",
@@ -233,7 +298,7 @@ def register_web_tools(
                 },
                 "required": ["query"],
             },
-            handler=lambda args: _run_web_search(search_fn, args),
+            handler=lambda args: _run_web_search(search_fn, args, numbering),
             category=CATEGORY_NETWORK,
             timeout_s=90.0,
             max_output_chars=MAX_SEARCH_OUTPUT,

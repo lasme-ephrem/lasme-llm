@@ -79,7 +79,14 @@ class ExtractAgentSourcesTests(unittest.TestCase):
                 "url": "https://github.com/ggml-org/llama.cpp/releases",
                 "engine": "agent",
                 "snippet": "",
+                # Contrat citation : le numéro [n] de la sortie d'outil
+                # est porté par la source (marqueur [n] ⇒ web_results[n-1]).
+                "number": 1,
             },
+        )
+        self.assertEqual(
+            [source["number"] for source in sources],
+            [1, 2, 3],
         )
         # L'ordre des résultats est conservé et l'avertissement entre les
         # entrées ne casse pas le parsing.
@@ -216,6 +223,8 @@ class CompactMergedSourcesTests(unittest.TestCase):
                 "url": "https://www.Example.com/Page/",
                 "engine": "ddg",
                 "snippet": "Extrait vérifié.",
+                # Source sans numéro explicite : sa position (1-based) fait office.
+                "number": 1,
             },
         )
         self.assertEqual(rows[1]["engine"], "agent")
@@ -224,8 +233,10 @@ class CompactMergedSourcesTests(unittest.TestCase):
         self.assertEqual(rows[3]["title"], "Transformers : documentation")
         for row in rows:
             self.assertEqual(
-                set(row.keys()), {"title", "url", "engine", "snippet"}
+                set(row.keys()),
+                {"title", "url", "engine", "snippet", "number"},
             )
+            self.assertIsInstance(row["number"], int)
 
 
 if __name__ == "__main__":
