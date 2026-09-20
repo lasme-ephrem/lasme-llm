@@ -1,11 +1,11 @@
 # Lasme LLM
 
-Assistant IA local, agentique, multimodal et souverain, propulsé par
-llama.cpp et une RTX 4070 Ti SUPER 16 Go. Lasme LLM réunit conversations
-naturelles, **console agent avec outils** (web, RAG, Python sandboxé,
-fichiers, vision), recherche Web sourcée, bibliothèque documentaire,
-RAG hybride, Canvas interactif, exports bureautiques et exécution
-Python isolée.
+Plateforme de chat IA **locale et agentique**. Une seule interface
+(<http://127.0.0.1:8000>) sert à la fois de chat et d'agent : chaque message
+passe par une boucle d'orchestrateur qui raisonne, appelle des outils (recherche
+web, Python sandboxé, documents, images…), puis répond avec des citations
+vérifiables. L'inférence tourne intégralement sur votre machine via llama.cpp,
+sur une RTX 4070 Ti SUPER 16 Go.
 
 <p align="center">
   <img
@@ -15,298 +15,247 @@ Python isolée.
   >
 </p>
 
-## Points forts
+## Pourquoi ce projet
 
-- **Chat local en streaming** : conversations branchables, édition d’un ancien
-  message, régénération, réponses temporaires et métriques d’inférence.
-- **Système agentique** : boucle orchestrateur déterministe (raisonnement →
-  outils → réponse) avec registre d’outils à schémas stricts, détection de
-  boucle et budget de tours ; console dédiée sur `/agent.html`.
-- **Quatre profils Gemma 4 QAT** servis par un llama-server en mode router :
-  12B qualité (211 tok/s mesurés, 128K), E4B vitesse (129 tok/s, TTFT
-  98 ms), E2B minimal, et 12B 256K tokens — speculative decoding MTP
-  partout.
-- **Recherche Web adaptative** : Sonar, moteurs spécialisés, SearXNG, Brave,
-  Tavily et DuckDuckGo avec bascule selon la qualité, la disponibilité et les
-  quotas.
-- **RAG documentaire v2** : PDF, Word, Excel, PowerPoint, Markdown, texte et
-  images, avec citations cliquables vers le fichier et la page.
-- **Espaces de travail** : projets typés, favoris, couleurs, instructions,
-  mémoire et fichiers isolés.
-- **Canvas** : documents, code, tableaux, rapports, présentations, diagrammes
-  Mermaid, cartes mentales et mini-applications HTML/CSS/JavaScript.
-- **Exports réels** : DOCX, XLSX, PPTX, PDF, HTML, CSV, Markdown, texte et SVG.
-- **Runner Python sécurisé** : calculs, graphiques et fichiers dans un
-  conteneur Docker sans réseau, en lecture seule et avec des limites strictes.
-- **Rendu local** : Markdown, LaTeX/KaTeX, coloration de code et Mermaid sont
-  livrés avec l’application, sans CDN ni police distante.
+- **Local et souverain** : modèle, conversations, fichiers et index
+  documentaire restent sur votre disque ; la recherche web est optionnelle —
+  sans clé API, la chaîne gratuite (DuckDuckGo, GDELT, OpenAlex, Wikimedia)
+  fonctionne déjà.
+- **Agentique** : pas de « mode agent » séparé. Le chat est l'agent : chaque
+  message traverse une boucle d'orchestrateur déterministe autour du modèle.
+- **Rapide** : speculative decoding MTP et router multi-modèles llama.cpp —
+  129 à 214 tok/s mesurés selon le profil.
+
+## Fonctionnalités
+
+**Boucle d'agent**, avec garanties du harnais :
+
+- raisonnement → appels d'outils → réponse, en 6 tours maximum par message ;
+- budget de tokens par appel modèle (2 048 au départ, doublé une fois
+  jusqu'à 12 288 si la réponse est tronquée) ;
+- détection de boucle : un appel d'outil identique répété 3 fois est refusé ;
+- après un `web_search`, lire au moins une page est obligatoire : si le
+  modèle répond depuis les extraits, l'orchestrateur récupère lui-même les
+  URLs pertinentes et les injecte dans le contexte ; si la demande exige une
+  recherche, répondre de mémoire est retoqué une fois.
+
+**Recherche web agentique** :
+
+- chaîne de fournisseurs de liens : Monid (tinyfish, si `MONID_API_KEY`) en
+  source prioritaire — gratuit via tinyfish, sync/async, cache d'endpoint
+  24 h, garde-fou `MONID_MAX_PRICE_USD` — puis spécialistes (GDELT, OpenAlex,
+  Wikimedia), Brave, Tavily et DuckDuckGo en repli automatique ;
+- aucun fournisseur synthétique (Sonar/Perplexity) n'est appelé par l'agent :
+  le modèle reçoit des liens bruts numérotés et lit les pages lui-même via
+  `fetch_pages` ;
+- portail d'actualité : les questions sensibles au temps (superlatifs
+  temporels, données vivantes, années ≥ 2024) forcent la recherche web —
+  la page lue prime sur la mémoire d'entraînement ;
+- les citations vers des URLs jamais consultées sont retirées de la réponse.
+
+**Citations et lecture** :
+
+- citations par marqueurs `[n]` (numérotation cumulée par message), résolues
+  côté interface en puces favicon cliquables à l'endroit exact de la citation
+  — carte au survol (favicon, domaine, titre, pagination), tap mobile,
+  fermeture par `Échap`, proxy favicons local `/favicons/{domain}` ;
+- panneau de Réflexion : raisonnement streamé dans un panneau dédié
+  (mi-hauteur, auto-scroll), replié à la fin du calcul et ré-ouvrable au
+  clic, isolé du texte de la réponse ;
+- deux efforts de raisonnement : **Approfondi** (défaut) et **Maximum**.
+
+**Outils de l'agent** (schémas JSON stricts, sortie bornée) :
+`web_search`, `fetch_pages`, `python_run` (pool Docker chaud), `calculate`,
+`analyze_image` (vision Gemma 4 native), `artifact_create`/`artifact_update`/
+`artifacts_list`, `rag_search`, `files_list`, `files_read_text`,
+`current_time`.
+
+**Mémoire et projets** : conversations persistées en SQLite avec compaction
+du contexte ; projets isolant instructions, fichiers, artefacts et mémoire ;
+RAG sur documents (PDF, Office, Markdown, images) avec classement hybride
+lexical + vectoriel local et citations fichier/page.
+
+**Statistiques honnêtes** : le tok/s affiché agrège les temps de décodage
+réellement mesurés par tour de modèle (hors exécution des outils), avec TTFT
+et durée mur.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    UI["Interface Web responsive"] --> API["FastAPI · :8000"]
-    API --> DB["SQLite · projets, conversations, mémoire, artefacts"]
-    API --> FILES["Bibliothèque de fichiers originaux"]
-    API --> RAG["RAG hybride · lexical + vecteur + MMR"]
-    API --> SEARCH["Orchestrateur de recherche Web"]
-    API --> RUNNER["Runner Python Docker isolé"]
-    API --> AGENT["Orchestrateur agentique · outils"]
-    API --> LLAMA["llama-server (router) · :8080"]
-
-    LLAMA --> G12B["Gemma 4 12B QAT · 128K · MTP"]
-    LLAMA --> E4B["Gemma 4 E4B QAT · 64K · MTP"]
-    LLAMA --> E2B["Gemma 4 E2B QAT · 32K · MTP"]
-
-    SEARCH --> SONAR["Perplexity Sonar"]
-    SEARCH --> SPECIALISTS["GDELT · OpenAlex · Wikimedia"]
-    SEARCH --> GENERAL["SearXNG · Brave · Tavily · DuckDuckGo"]
+```
+Navigateur — chat/web (interface unique, http://127.0.0.1:8000)
+     │  SSE : reasoning_delta · content_delta · agent_tool_call/result · generation_stats
+     ▼
+FastAPI — chat/server/main.py
+     │
+     ├─► Orchestrateur agentique — core/agent/
+     │     boucle THINK → outils → FINAL, budget, anti-boucle, nudges
+     │
+     ├─► Runtime llama.cpp — core/inference/ : superviseur du llama-server
+     │     en mode router (--models-preset), profils Gemma 4 QAT, MTP,
+     │     KV quantifié, client OpenAI-compatible
+     │
+     ├─► Outils plateforme — core/runner/ (Python Docker), core/rag/,
+     │     core/files/, core/artifacts/, core/memory/
+     │
+     └─► Recherche web — core/tools/ : Monid (tinyfish) → GDELT ·
+           OpenAlex · Wikimedia → Brave → Tavily → DuckDuckGo (repli sans clé)
 ```
 
-Cloudflared, lorsqu’il est utilisé, est seulement un tunnel HTTPS vers FastAPI.
-Il ne constitue pas un serveur d’inférence.
+## Prérequis
 
-## Modèles et runtime (v2)
-
-| Profil | Identifiant | Rôle | Contexte | Mesuré |
-| --- | --- | --- | ---: | --- |
-| Qualité/Agent | `gemma-4-12b` | Défaut, vision native, agent | 128K | 211 tok/s |
-| Vitesse | `gemma-4-e4b` | Résident, réponses rapides | 64K | 129 tok/s |
-| Minimal | `gemma-4-e2b` | Configs modestes | 32K | 214 tok/s |
-| Max-contexte | `gemma-4-12b-256k` | Très longs documents | 256K | 162 tok/s |
-
-Les GGUF QAT proviennent de
-[unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF)
-(et déclinaisons E4B/E2B) : qualité quasi-fp16 à taille 4 bits, drafter
-MTP embarqué, vision mmproj incluse. Le superviseur
-(`python -m scripts.serve`) génère le preset du router, télécharge ce
-qui manque et expose `start/stop/status/metrics/info`. Les alias
-Ollama historiques (`gemma-4-chat`, `lasme-smol-fast`…) restent
-acceptés et routés vers les profils v2. Mesures complètes :
-[docs/BENCHMARKS_PHASE0.md](docs/BENCHMARKS_PHASE0.md).
+- **Python ≥ 3.11**
+- **llama.cpp compilé avec CUDA** : le superviseur cherche `llama-server.exe`
+  dans `~/llama.cpp/build/bin/Release/`, puis dans le `PATH`
+  (chemin personnalisable via `LLAMA_SERVER_PATH`)
+- **Docker Desktop** (optionnel) : uniquement pour le runner Python isolé
+- **Clés API optionnelles** : Monid, Brave, Tavily, OpenAlex — sans clé, la
+  recherche web repose sur les fournisseurs gratuits
 
 ## Installation
 
-Prérequis : Python, un build llama.cpp avec CUDA (voir
-[docs/ROADMAP_REFONTE.md](docs/ROADMAP_REFONTE.md)) et, pour le runner
-Python et SearXNG, Docker Desktop.
-
 ```powershell
 git clone https://github.com/lasme-ephrem/lasme-llm.git
-Set-Location lasme-llm
+cd lasme-llm
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
+```
+
+Renseigner dans `.env` uniquement les fournisseurs souhaités. Les modèles
+Gemma 4 QAT (`unsloth/gemma-4-*-it-qat-GGUF`, drafter MTP et projection
+vision inclus) sont téléchargés automatiquement depuis Hugging Face au
+premier démarrage du router. Pour le runner Python, construire l'image une
+fois (`scripts/start_local.ps1` le fait automatiquement) :
+
+```powershell
 docker build -t lasme-python-runner:latest .\infra\runner
 ```
 
-Renseigner uniquement les fournisseurs souhaités dans `.env`, puis démarrer
-l’ensemble :
+## Configuration
+
+Toutes les variables se lisent dans `core/config.py` (et `.env.example`) :
+
+```text
+# Runtime llama.cpp
+LLAMA_SERVER_PATH=            # vide = découverte auto (~/llama.cpp puis PATH)
+LLAMA_BASE_URL=http://127.0.0.1:8080   # (= LLAMA_HOST:LLAMA_PORT)
+LLAMA_HOST=127.0.0.1
+LLAMA_PORT=8080
+LLAMA_MODELS_MAX=2            # modèles chargés simultanément par le router
+LLAMA_STARTUP_TIMEOUT=120
+
+# Modèles = profils du router (gemma-4-12b / e4b / e2b / 12b-256k) ;
+# les alias Ollama historiques restent acceptés et routés sur ces profils
+CHAT_MODEL=gemma-4-12b
+FAST_MODEL=gemma-4-e4b
+REASONING_MODEL=gemma-4-12b
+CODING_MODEL=gemma-4-12b
+VISION_MODEL=gemma-4-12b
+# Recherche web (toutes optionnelles)
+MONID_API_KEY=                # source prioritaire (tinyfish via api.monid.ai)
+MONID_MAX_PRICE_USD=0.01      # refus des endpoints Monid au-delà de ce prix
+MONID_TIMEOUT_S=30
+BRAVE_SEARCH_API_KEY=
+TAVILY_API_KEY=
+OPENALEX_API_KEY=             # clé gratuite (openalex.org)
+SEARCH_SPECIALISTS_ENABLED=true
+PERPLEXITY_API_KEY=           # ignoré par l'agent (fournisseurs de liens only)
+
+# Sécurité / accès distant
+LASME_ACCESS_TOKEN=           # exigé pour toute API passant par un proxy
+LASME_ALLOW_REMOTE_CODING=false
+LASME_ALLOW_DESTRUCTIVE_AGENT_TOOLS=false
+LASME_ENABLE_AGENT_TERMINAL=false
+LASME_WORKSPACE_ROOT=         # confinement des outils de fichiers
+LASME_MAX_UPLOAD_BYTES=26214400
+LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=true
+# Runner Python
+LASME_RUNNER_POOL=            # 0 = force un conteneur froid par tâche
+LASME_DOCKER_BINARY=          # si Docker Desktop est absent du PATH
+```
+
+S'exposent aussi : `LASME_ALLOWED_COMMANDS`, `LASME_PUBLIC_BASE_URL`,
+`EXTRA_MODELS`, `HF_HOME`. `OLLAMA_BASE_URL` est un vestige de la v1 :
+encore déclaré dans `core/config.py` mais sans effet, le client v2 parle à
+`LLAMA_BASE_URL`.
+
+## Démarrage
+
+Le plus simple — démarre le router llama.cpp, construit l'image du runner si
+besoin, lance l'API et attend le health check :
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1
 ```
 
-Ouvrir <http://127.0.0.1:8000/>.
-
-Pour arrêter FastAPI et SearXNG sans couper Ollama :
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop_local.ps1
-```
-
-## Projets et bibliothèque de fichiers
-
-L’**Espace principal** est toujours disponible et ne peut être ni renommé ni
-supprimé. Les autres projets peuvent être classés comme général, recherche,
-apprentissage, données, développement, rédaction ou média. Chaque projet
-isole ses conversations, instructions, fichiers, artefacts et mode de mémoire.
-
-La bibliothèque accepte jusqu’à 25 Mo par fichier :
-
-| Format | Lecture et indexation |
-| --- | --- |
-| PDF | Texte avec mise en page, pages, Vision locale puis secours OCR |
-| DOCX | Titres, paragraphes et tableaux |
-| XLSX | Feuilles, cellules, valeurs et formules |
-| PPTX | Diapositives, tableaux et notes |
-| TXT / MD | Structure textuelle |
-| PNG / JPG / WEBP | Qwen3-VL, puis secours OCR |
-
-Les originaux sont conservés dans `.runtime/project_files`, dédupliqués par
-empreinte SHA-256 et téléchargeables. L’extension, la signature binaire et la
-structure interne des formats Office sont vérifiées avant stockage ; le type
-MIME déclaré par le navigateur n’est jamais considéré comme fiable. Un PDF ou
-une image peut être ouvert directement depuis la bibliothèque. Les citations
-`[Document : fichier, p. X]` ouvrent la bonne ressource et la bonne page.
-
-Les anciens index RAG dont l’original n’est plus disponible restent visibles
-comme **index historiques** : ils peuvent encore être consultés ou supprimés,
-mais doivent être réimportés pour retrouver le téléchargement. Un bouton
-**Réindexer** permet aussi de relancer proprement l’analyse d’un original
-conservé après une interruption.
-
-Le classement RAG combine recherche lexicale, représentation vectorielle
-locale, nom de fichier, section, correspondances exactes et diversification
-MMR. Les relances utilisent le sujet récent de la conversation. Une recherche
-approfondie peut fusionner les preuves des documents avec celles du Web.
-
-## Canvas et artefacts
-
-Canvas est un espace de travail à deux volets : source éditable à gauche et
-aperçu à droite. Un artefact n’est pas une simple détection du contenu de la
-réponse ; c’est un document durable, versionné et exportable.
-
-| Modalité | Usage |
-| --- | --- |
-| Document mixte / Markdown | Cours, rapports, formules, code et tableaux |
-| Code | Édition et exécution Python isolée |
-| Tableau | Données structurées et export CSV/XLSX |
-| Dossier de recherche | Rapport documenté avec résultats et sources |
-| Présentation | Contenu structuré et export PPTX |
-| Diagramme / carte mentale / graphique | Rendu Mermaid et export SVG |
-| HTML / interactif | Mini-application autonome HTML/CSS/JavaScript |
-
-Les aperçus HTML sont servis par une URL éphémère et affichés dans un iframe
-sandboxé. Ils peuvent exécuter leur JavaScript, mais ne disposent ni du réseau,
-ni des API de l’application, ni des formulaires, ni des permissions du
-navigateur.
-
-## Runner Python
-
-Le bouton **Exécuter** de Canvas apparaît pour le code Python. Chaque tâche est
-lancée dans l’image `lasme-python-runner:latest` avec :
-
-- réseau désactivé ;
-- système de fichiers racine en lecture seule ;
-- capacités Linux supprimées et `no-new-privileges` ;
-- utilisateur non privilégié dédié (UID 10001) ;
-- mémoire, CPU, processus et durée limités ;
-- dossier de sortie temporaire dédié ;
-- au plus 32 fichiers, 20 Mo par fichier et 64 Mo au total ;
-- suppression automatique des anciennes tâches.
-
-Le résultat peut contenir la sortie standard, les erreurs, des graphiques PNG
-et des fichiers CSV, JSON ou texte. Les routes du runner restent locales,
-sauf activation explicite du codage distant — déconseillée sur un tunnel
-public.
-
-## Recherche Web
-
-`Web auto` décide si une information actuelle ou une vérification est
-nécessaire. `Web` force la recherche, `Recherche` lance une étude approfondie
-et `Web off` garde la réponse entièrement locale.
-
-```mermaid
-flowchart LR
-    Q["Question + contexte"] --> S{"Donnée structurée ?"}
-    S -->|"météo, finance, crypto"| API["API spécialisée"]
-    S -->|"non"| P["Perplexity Sonar"]
-    P -->|"réponse solide sans document local"| DIRECT["Réponse sourcée"]
-    P -->|"quota, panne ou RAG actif"| ROUTE["Fusion de preuves"]
-    ROUTE --> SPEC["GDELT · OpenAlex · Wikimedia"]
-    SPEC --> SCORE{"Preuves suffisantes ?"}
-    SCORE -->|"non"| SX["SearXNG"]
-    SX --> BRAVE["Brave Search"]
-    BRAVE --> TAVILY["Tavily"]
-    TAVILY --> DDG["DuckDuckGo"]
-    API --> FINAL["Réponse finale vérifiable"]
-    DIRECT --> FINAL
-    SCORE -->|"oui"| FINAL
-    DDG --> FINAL
-```
-
-Le nombre de sources est adaptatif. Les candidats sont dédupliqués et classés
-selon pertinence, autorité, fraîcheur, contenu de preuve et diversité des
-domaines. Les pages retenues sont extraites dans un délai borné et leur contenu
-réel est vérifié une seconde fois. Si les extraits se révèlent insuffisants,
-l’orchestrateur élargit automatiquement la chaîne de fournisseurs sans
-facturer une seconde requête Sonar. Lorsqu’un
-document local participe à la réponse, même une bonne réponse Sonar est
-fusionnée avec les extraits RAG afin de conserver les deux familles de
-citations et de signaler les divergences.
-
-Variables principales :
-
-```text
-PERPLEXITY_API_KEY=
-BRAVE_SEARCH_API_KEY=
-SEARXNG_ENABLED=false
-SEARXNG_BASE_URL=http://127.0.0.1:8080
-TAVILY_API_KEY=
-OPENALEX_API_KEY=
-```
-
-SearXNG est un service séparé sous AGPL-3.0, appelé par HTTP. Aucun de son code
-source n’est inclus dans ce dépôt.
-
-## Mémoire, continuité et qualité des réponses
-
-Le contexte envoyé au modèle combine les tours récents, des messages anciens
-réellement pertinents, un résumé progressif et, selon le projet, une mémoire
-personnelle contrôlable. Les anciennes pages Web ou documents bruts ne sont
-jamais recopiés aveuglément dans la mémoire.
-
-La présentation s’adapte à l’intention : réponse directe, explication, cours,
-tutoriel, comparaison, rapport, analyse de données ou artefact. Les cours
-utilisent une introduction, une progression numérotée, des exemples puis une
-conclusion. Les demandes factuelles récentes privilégient les preuves et
-doivent exprimer l’incertitude plutôt qu’inventer.
-
-Sous chaque réponse, Lasme affiche le débit de génération, le nombre de tokens,
-la durée totale, le délai du premier token et la taille du contexte d’entrée.
-
-Les migrations SQLite sont versionnées. Avant toute migration d’une base de
-production existante, une sauvegarde cohérente est créée automatiquement dans
-`.runtime/db_backups`.
-
-## Accès distant
-
-Toute API reçue via un proxy exige `LASME_ACCESS_TOKEN`. Après lancement de
-Cloudflared, ouvrir une fois :
-
-```text
-https://votre-tunnel.trycloudflare.com/?token=VOTRE_JETON
-```
-
-Le jeton est retiré de l’URL puis conservé dans un cookie de session sécurisé.
-Ne jamais activer `LASME_ALLOW_REMOTE_CODING` sur un tunnel public. Voir
-[docs/SECURITY.md](docs/SECURITY.md).
-
-## Vie privée
-
-L’inférence, les conversations, les fichiers, le RAG, Canvas et le runner sont
-locaux. Selon la configuration, une requête de recherche peut être envoyée à
-un fournisseur Web. La génération d’images externe peut envoyer un prompt à
-Pollinations et se désactive avec
-`LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false`.
-
-## Validation
+Ou manuellement (le superviseur génère `.runtime/llama/router_models.ini`
+puis lance llama-server, de façon idempotente) :
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
-.\.venv\Scripts\python.exe -m compileall -q chat core coding scripts tests
-node --check chat\web\app.js
-node --check chat\web\workspace.js
-node --check chat\web\agent.js
-node --test tests\js\math-renderer.test.cjs
-.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m scripts.serve start
+.\.venv\Scripts\python.exe -m uvicorn chat.server.main:app --host 127.0.0.1 --port 8000
+```
 
-# Runtime llama.cpp v2 (nécessite le router démarré) :
-.\.venv\Scripts\python.exe -m scripts.serve info
-.\.venv\Scripts\python.exe -m scripts.eval_agents --model gemma-4-e4b
+soit, équivalent direct : `llama-server --models-preset
+.runtime/llama/router_models.ini --models-max 2 --jinja --host 127.0.0.1
+--port 8080`.
+
+Arrêt : `python -m scripts.serve stop` (router) et `.\scripts\stop_local.ps1`
+(API). Pilotage : `status`, `metrics --model <profil>`, `info`.
+Ouvrir ensuite <http://127.0.0.1:8000/>.
+
+## Modèles et performances
+
+Quatre profils Gemma 4 QAT servis par un seul llama-server en mode router
+(E4B et E2B préchargés, 12B chargé à la demande, `LLAMA_MODELS_MAX`
+instances simultanées). Mesures Phase 0 sur RTX 4070 Ti SUPER 16 Go :
+
+| Profil | Contexte | Rôle | Débit mesuré |
+| --- | --- | --- | ---: |
+| `gemma-4-12b` (défaut) | 128K | qualité/agent, vision native | 211 tok/s |
+| `gemma-4-e4b` | 64K | rapide, résident | 129 tok/s |
+| `gemma-4-e2b` | 32K | minimal, résident | 214 tok/s |
+| `gemma-4-12b-256k` | 256K | très longs documents, KV q8_0 | 162 tok/s |
+
+- **Speculative decoding MTP** (`draft-mtp`, n=4) sur tous les profils
+  (×3,4 sur le 12B vs sans MTP) ; **KV cache quantifié** q8_0 sur le profil
+  256K — le q4_0 est écarté (dégradation documentée du tool calling).
+- Budgets de non-régression dans `.models/logs/perf_baseline.json`
+  (193 tok/s 12B, 136 tok/s E4B, 214 tok/s E2B), appliqués par
+  `scripts/check_perf`.
+
+## Tests et validation
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
+node --test tests\js\math-renderer.test.cjs tests\js\progressive-renderer.test.cjs
+
+# Tout en une commande — statique + tests ; --live ajoute les évals agent
+# et les budgets perf (router démarré requis) :
+.\.venv\Scripts\python.exe -m scripts.validate_all [--live]
+
+# Budgets de performance et évals agentiques ciblées :
 .\.venv\Scripts\python.exe -m scripts.check_perf --model gemma-4-12b
-
-# Tout en une commande (statique ; --live ajoute évals + budgets perf) :
-.\.venv\Scripts\python.exe -m scripts.validate_all
+.\.venv\Scripts\python.exe -m scripts.eval_agents --model gemma-4-e4b
 ```
 
-Les ressources tierces livrées dans `chat/web/vendor` conservent leurs fichiers
-de licence. Les prototypes historiques ignorés par Git ne font pas partie de
-l’application de production.
+## Sécurité
+
+- clé API jamais journalisée ni commitée (redaction dans les logs, `.env`
+  gitignoré) ;
+- exécution Python durcie : conteneur Docker sans réseau, racine en lecture
+  seule, utilisateur non privilégié, limites mémoire/CPU/processus/durée ;
+  pool chaud (`docker exec`) avec balayage des processus errants ;
+- arguments d'outils validés contre un sous-ensemble JSON strict
+  (`core/agent/tools.py`) ;
+- routes de codage et outils destructifs désactivés par défaut ; toute API
+  reçue via un proxy exige `LASME_ACCESS_TOKEN`.
+
+Détails : [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Licence
 
 Lasme LLM est distribué sous [Apache License 2.0](LICENSE). Voir
-[NOTICE](NOTICE) pour les attributions et la déclaration d’implémentation
-indépendante.
+[NOTICE](NOTICE) pour les attributions des ressources navigateur redistribuées
+(DOMPurify, highlight.js, KaTeX, marked, Mermaid) et la déclaration
+d'implémentation indépendante.

@@ -11,7 +11,7 @@ Two concerns live here:
   aliases — onto the v2 profiles so the existing server keeps working.
 
 All numbers come from Phase 0 measurements on the RTX 4070 Ti SUPER
-(16 GiB): see docs/BENCHMARKS_PHASE0.md.
+(16 GiB).
 """
 
 from __future__ import annotations

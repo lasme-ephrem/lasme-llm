@@ -1,26 +1,26 @@
 {
   "model": "gemma-4-e4b",
-  "ts": "2026-09-19T23:58:19",
+  "ts": "2026-09-20T03:25:44",
   "rows": [
     {
       "scenario": "calc_direct",
       "ok": true,
-      "final_excerpt": "Le résultat de (17*23)+100 est 491.",
+      "final_excerpt": "Le résultat de (17*23)+100 est **491**.",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 3.5
+      "seconds": 1.9
     },
     {
       "scenario": "calc_puissance",
       "ok": true,
-      "final_excerpt": "Le résultat de 2**10 + 24 est 1048.",
+      "final_excerpt": "Le résultat de 2**10 + 24 est **1048**.",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.7
+      "seconds": 0.6
     },
     {
       "scenario": "somme_gauss",
@@ -30,17 +30,17 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.2
+      "seconds": 1.3
     },
     {
       "scenario": "heure",
       "ok": true,
-      "final_excerpt": "Nous sommes le **samedi 19 septembre 2026** à **23:58:14** (heure de Paris/Madrid, heure d'été).",
+      "final_excerpt": "Nous sommes **dimanche 20 septembre 2026** et il est actuellement **03:25:40** (heure de Paris/Madrid, heure d'été).",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.3
+      "seconds": 1.2
     },
     {
       "scenario": "sans_outil",
@@ -50,27 +50,27 @@
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.0
+      "seconds": 0.5
     },
     {
       "scenario": "multi_outils",
       "ok": true,
-      "final_excerpt": "Le résultat de (12*12) est **144**.\n\nLe jour de la semaine actuel est **samedi**.",
+      "final_excerpt": "Le résultat de (12 * 12) est **144**.\n\nLe jour de la semaine actuel est **dimanche**.",
       "turns": 2,
       "tool_calls": 2,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.5
+      "seconds": 1.0
     },
     {
       "scenario": "outil_inexistant",
       "ok": true,
-      "final_excerpt": "Bonjour se traduit par \"Hello\" ou \"Good morning\" en anglais.",
+      "final_excerpt": "Bonjour se traduit par **Hello** ou **Good morning** en anglais.",
       "turns": 1,
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.7
+      "seconds": 0.6
     },
     {
       "scenario": "echo_determinisme",
@@ -80,7 +80,7 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.8
+      "seconds": 0.9
     }
   ],
   "success_rate": 1.0
