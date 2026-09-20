@@ -3757,7 +3757,11 @@ async def chat_stream(req: ChatRequest):
             "\n11. Recherche Web obligatoire : la demande nécessite des "
             "informations actuelles. Utilise web_search, puis fetch_pages "
             "sur les URLs pertinentes AVANT de répondre, et ne cite que ce "
-            "que tu as réellement lu dans les pages récupérées."
+            "que tu as réellement lu dans les pages récupérées. Si un "
+            "résultat ou une page lue mentionne une édition, une version ou "
+            "une donnée PLUS RÉCENTE que ta mémoire d'entraînement, c'est "
+            "elle qui est correcte : réponds toujours avec la donnée la "
+            "plus récente trouvée, jamais avec ta mémoire."
         )
     elif web_tools_available:
         system_instruction += (
@@ -4221,6 +4225,12 @@ async def chat_stream(req: ChatRequest):
                 )
         if web_runtime_instruction:
             stream_messages[-1]["content"] += web_runtime_instruction
+        # Chemin agent : la pré-recherche est morte (web_context vide), donc
+        # le bloc ci-dessus n'injecte jamais context_instruction. La directive
+        # de citation [n] DOIT atteindre l'agent, sinon il écrit des sections
+        # « Sources : » et aucun marqueur.
+        if web_tools_available:
+            stream_messages[-1]["content"] += context_instruction
 
         # Use each model's measured maximum-quality profile. Ollama exposes
         # thinking separately, so internal reasoning never pollutes chat memory.
