@@ -2,6 +2,7 @@ import base64
 import json
 import datetime
 import asyncio
+import logging
 import mimetypes
 import re
 import secrets
@@ -24,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional, Literal, Iterator
+from typing import List, Dict, Any, Match, Optional, Literal, Iterator
 
 from core.inference.client import LasmeLLMClient
 from core.inference.profiles import (
@@ -609,15 +610,17 @@ def iter_stream_text_chunks(
         start = end
 
 
+_WEB_CODE_BLOCK_RE = re.compile(
+    r"(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]*`)"
+)
+
+
 def strip_web_citation_markers(value: str) -> str:
     """Remove numeric Web citations from prose while preserving code."""
     text = str(value or "")
     if not text:
         return ""
-    protected_pattern = re.compile(
-        r"(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]*`)"
-    )
-    parts = protected_pattern.split(text)
+    parts = _WEB_CODE_BLOCK_RE.split(text)
     citation_pattern = re.compile(
         r"[ \t]*(?:"
         r"\[(?:source\s*:?\s*)?\d+(?:\s*[,–-]\s*\d+)*\]"
@@ -722,20 +725,109 @@ def compact_web_source_metadata(
 ) -> Dict[str, Any]:
     """Persist only the fields needed to restore the compact source drawer."""
     sources = []
-    for item in (results or [])[:20]:
+    for index, item in enumerate((results or [])[:20]):
         title = str(item.get("title") or "").strip()
         url = str(item.get("url") or "").strip()
         if not title or not url:
             continue
+        try:
+            number = int(item.get("number") or index + 1)
+        except (TypeError, ValueError):
+            number = index + 1
         sources.append(
             {
                 "title": title[:300],
                 "url": url[:2_000],
                 "engine": str(item.get("engine") or "")[:80],
                 "snippet": str(item.get("snippet") or "")[:1_200],
+                # Contrat citation : la puce [n] du frontend pointe sur
+                # web_results[n-1] ; le numéro explicite suit la source
+                # (défaut : sa position, alignée sur format_search_results).
+                "number": max(1, number),
             }
         )
     return {"web_results": sources} if sources else {}
+
+
+_SANITIZE_MARKER_RE = re.compile(
+    r"\[(?:source\s*:?\s*)?(\d+(?:\s*[,–-]\s*\d+)*)\]"
+    r"|\((?:source\s*:?\s*)?(\d+(?:\s*[,–-]\s*\d+)*)\)",
+    flags=re.IGNORECASE,
+)
+_SOURCES_HEADING_RE = re.compile(
+    r"^\s{0,3}(?:#{1,3}\s*)?(?:\*\*)?\s*(?:sources?|références?)"
+    r"\s*(?::\s*(?:\*\*)?|\*\*)?\s*[:.]?\s*$",
+    flags=re.IGNORECASE,
+)
+_SOURCES_LIST_LINE_RE = re.compile(
+    r"^(?:[-*•>]\s+|\d+[.)]\s+|(?:https?://|www\.)\S+)"
+)
+
+
+def _strip_final_sources_section(text: str) -> str:
+    """Retire une section « Sources »/« Références » TERMINALE.
+
+    Prudent : la section n'est supprimée que si elle est en fin de texte
+    (titre + lignes de liste / URLs brutes / lignes vides jusqu'au bout).
+    Une section suivie d'autre prose est conservée telle quelle.
+    """
+    lines = text.splitlines()
+    boundary = len(lines)
+    while boundary > 0:
+        line = lines[boundary - 1].strip()
+        if not line or _SOURCES_LIST_LINE_RE.match(line):
+            boundary -= 1
+            continue
+        break
+    if boundary > 0 and _SOURCES_HEADING_RE.match(lines[boundary - 1]):
+        start = boundary - 1
+        while start > 0 and not lines[start - 1].strip():
+            start -= 1
+        return "\n".join(lines[:start]).rstrip()
+    return text
+
+
+def sanitize_citation_markers(text: str, source_count: int) -> str:
+    """Contrat de citation côté serveur : garder les [n] valides.
+
+    Le frontend remplace chaque marqueur [n] du texte final par la puce
+    de ``web_results[n-1]``. Donc : (a) tout marqueur hors plage
+    (n < 1 ou n > source_count) est retiré — et si source_count vaut 0,
+    TOUS les marqueurs partent, aucun numéro ne pouvant pointer sur une
+    source ; (b) une éventuelle section « Sources » finale que le modèle
+    écrirait malgré la directive est supprimée ; (c) le contenu des blocs
+    de code (fenced/inline) n'est jamais touché. Contrairement à
+    ``strip_web_citation_markers`` (réservé aux réponses de fournisseurs
+    et aux messages historiques), les marqueurs valides SURVICVENT : ils
+    sont le mécanisme de citation, pas un résidu.
+    """
+    text = str(text or "")
+    if not text:
+        return ""
+    try:
+        count = max(0, int(source_count))
+    except (TypeError, ValueError):
+        count = 0
+    parts = _WEB_CODE_BLOCK_RE.split(text)
+
+    def _filter(match: Match[str]) -> str:
+        raw = match.group(1) or match.group(2) or ""
+        numbers = [int(value) for value in re.findall(r"\d+", raw)]
+        if count > 0 and numbers and all(
+            1 <= value <= count for value in numbers
+        ):
+            return match.group(0)
+        return ""
+
+    for index in range(0, len(parts), 2):
+        cleaned = _SANITIZE_MARKER_RE.sub(_filter, parts[index])
+        if cleaned != parts[index]:
+            cleaned = re.sub(r"[ \t]+([,.;:!?])", r"\1", cleaned)
+            cleaned = re.sub(r"(?<=\S)[ \t]{2,}(?=\S)", " ", cleaned)
+        parts[index] = cleaned
+    if parts:
+        parts[-1] = _strip_final_sources_section(parts[-1])
+    return "".join(parts)
 
 
 # --- Sources découvertes par l'agent lui-même (web_search / fetch_pages) ---
@@ -788,8 +880,10 @@ def _title_from_url(url: str) -> str:
 
 
 def _iter_search_output_entries(output: str):
-    """Paires (titre, url) d'un output web_search : ligne « [n] titre »
-    suivie de la ligne indentée « url » (format _format_search_results)."""
+    """Triplets (numéro, titre, url) d'un output web_search : ligne
+    « [n] titre » suivie de la ligne indentée « url » (format
+    _format_search_results). Le numéro [n] est la position citable de la
+    source dans la réponse du modèle (marqueur [n] ⇒ web_results[n-1])."""
     lines = str(output or "").splitlines()
     for index, line in enumerate(lines):
         header = _AGENT_SEARCH_TITLE_RE.match(line)
@@ -798,7 +892,11 @@ def _iter_search_output_entries(output: str):
         if index + 1 < len(lines):
             url_match = _AGENT_SEARCH_URL_RE.match(lines[index + 1])
             if url_match:
-                yield header.group(2).strip(), url_match.group(1)
+                try:
+                    number = int(header.group(1))
+                except ValueError:
+                    number = 0
+                yield number, header.group(2).strip(), url_match.group(1)
 
 
 def _iter_fetch_output_urls(output: str):
@@ -819,50 +917,86 @@ def _iter_fetch_output_urls(output: str):
 
 def extract_agent_sources(
     events: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> List[Optional[Dict[str, Any]]]:
     """Sources Web que l'agent a trouvées via ses propres outils.
 
     Parcourt les tool_result du journal de run et parse les outputs de
     web_search (liens numérotés) et fetch_pages (« ## url (n caractères) »).
-    Retourne des dicts au même format que web_results_data : une URL déjà
-    vue ne duplique pas d'entrée — un titre réel de web_search prime sur
-    un titre déduit de l'URL par fetch_pages.
+
+    Contrat interface : le modèle cite par marqueur [n] et le frontend
+    affiche web_results[n-1]. Chaque résultat de web_search est donc
+    placé à l'INDEX n-1 du numéro [n] affiché dans la sortie d'outil ;
+    les positions non attribuées (trou de numérotation) sont rendues
+    comme None — merge_dedup_sources les ignore. Une URL déjà vue ne
+    duplique pas d'entrée : la première occurrence, à la plus petite
+    position, gagne. Un titre réel de web_search prime sur un titre
+    déduit de l'URL par fetch_pages — et fait alors passer la source
+    sans numéro (non citable) à sa position citable [n]. Les pages
+    fetchées restées sans numéro sont ajoutées en fin de liste : elles
+    n'ont jamais de marqueur, leur décalage n'affecte aucun [n].
     """
-    found: Dict[str, Dict[str, Any]] = {}
-    titled_by_search: Dict[str, bool] = {}
+    numbered: Dict[int, Dict[str, Any]] = {}
+    by_key: Dict[str, Dict[str, Any]] = {}
+    unnumbered: List[Dict[str, Any]] = []
+
+    def _register_search(number: int, title: str, url: str) -> None:
+        key = normalize_source_url(url)
+        if not key:
+            return
+        entry = by_key.get(key)
+        if entry is None:
+            entry = {
+                "title": title[:300],
+                "url": url[:2_000],
+                "engine": "agent",
+                "snippet": "",
+            }
+            by_key[key] = entry
+            if number > 0:
+                entry["number"] = number
+                numbered[number] = entry
+            else:
+                unnumbered.append(entry)
+        elif number > 0 and "number" not in entry:
+            # URL d'abord vue via fetch_pages (sans numéro) : le vrai
+            # titre de la recherche et sa position citable sont adoptés.
+            entry["title"] = title[:300]
+            entry["number"] = number
+            numbered[number] = entry
+            unnumbered.remove(entry)
+        # Sinon : premier numéro (plus petite position) conservé.
+
+    def _register_fetch(url: str) -> None:
+        key = normalize_source_url(url)
+        if not key or key in by_key:
+            return
+        entry = {
+            "title": _title_from_url(url)[:300],
+            "url": url[:2_000],
+            "engine": "agent",
+            "snippet": "",
+        }
+        by_key[key] = entry
+        unnumbered.append(entry)
+
     for event in events or []:
         if not isinstance(event, dict) or event.get("type") != "tool_result":
             continue
         name = str(event.get("name") or "")
         output = str(event.get("output") or "")
         if name == "web_search":
-            entries = list(_iter_search_output_entries(output))
+            for number, title, url in _iter_search_output_entries(output):
+                _register_search(number, title, url)
         elif name == "fetch_pages":
-            entries = [
-                (_title_from_url(url), url)
-                for url in _iter_fetch_output_urls(output)
-            ]
-        else:
-            continue
-        for title, url in entries:
-            key = normalize_source_url(url)
-            if not key:
-                continue
-            entry = found.get(key)
-            if entry is None:
-                found[key] = {
-                    "title": title[:300],
-                    "url": url[:2_000],
-                    "engine": "agent",
-                    "snippet": "",
-                }
-                titled_by_search[key] = name == "web_search"
-            elif name == "web_search" and not titled_by_search.get(key):
-                # URL d'abord vue via fetch_pages : le vrai titre de la
-                # recherche remplace le titre déduit de l'URL.
-                entry["title"] = title[:300]
-                titled_by_search[key] = True
-    return list(found.values())
+            for url in _iter_fetch_output_urls(output):
+                _register_fetch(url)
+
+    if not numbered and not unnumbered:
+        return []
+    ordered: List[Optional[Dict[str, Any]]] = [None] * max(numbered, default=0)
+    for number, entry in numbered.items():
+        ordered[number - 1] = entry
+    return ordered + unnumbered
 
 
 def merge_dedup_sources(
@@ -3142,6 +3276,147 @@ app.include_router(create_agent_router(AgentDeps(
 )))
 
 
+_recency_logger = logging.getLogger("uvicorn.error")
+
+
+def _normalize_recency_text(query: str) -> str:
+    """Minuscule, sans accents (NFD), ponctuation -> espaces compactes."""
+    text = unicodedata.normalize("NFD", query or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# Détection déterministe de sensibilité temporelle : les motifs sont
+# appliqués au texte normalisé (minuscule, sans accents, ponctuation
+# remplacée par des espaces) afin que « dernier », « dernière »,
+# « aujourd'hui » ou « président » matchent même mal accentués ou avec
+# une apostrophe typographique. Une seule correspondance suffit.
+_RECENCY_RULES = [
+    # 1. Superlatifs temporels : « le dernier… », « en ce moment »…
+    (
+        "superlatif_temporel",
+        re.compile(
+            r"\b(?:derniers?|dernieres?|plus recents?|plus nouveaux?|"
+            r"actualites?|actuellement|actuels?|actuelles?|"
+            r"en ce moment|aujourd hui|ce matin|cette annee|"
+            r"cette semaine|ce mois ci|ces derniers|recemment|"
+            r"a l heure actuelle|a jour|mise a jour|mises a jour|"
+            r"live|en direct|breaking)\b"
+        ),
+    ),
+    # 2. Questions volatiles : vainqueurs, dirigeants, records, classements
+    (
+        "question_volatile",
+        re.compile(
+            r"\bqui a (?:remporte|gagne|battu)\b"
+            r"|\b(?:vainqueur|gagnant|gagnante) (?:de|du|des)\b"
+            r"|\bqui est (?:le |la |l )?"
+            r"(?:presidente?|premier ministre|pdg|directeur|directrice)\b"
+            r"|\bqui dirige\b"
+            r"|\b(?:detenteur|detentrice) du record\b"
+            r"|\brecord (?:de|du)\b"
+            r"|\bclassements?\b"
+            r"|\btop\s*\d+\b"
+            r"|\bmeilleures?\b.{0,60}?\bde l annee\b"
+        ),
+    ),
+    # 3. Événements récurrents, distincts à chaque édition / année
+    (
+        "evenement_recurrent",
+        re.compile(
+            r"\bballon d or\b"
+            r"|\bnobel\b"
+            r"|\boscars?\b"
+            r"|\bcesar\b"
+            r"|\bgrands? prix\b"
+            r"|\bcoupe du monde\b"
+            r"|\bchampionnats?\b"
+            r"|\bligue des champions\b"
+            r"|\bmondial\b"
+            r"|\b(?:jeux )?olympiques?\b"
+            r"|\belections?\b"
+            r"|\blegislatives\b"
+            r"|\bpresidentielles?\b"
+        ),
+    ),
+    # 4. Données vivantes : marchés, météo, sport en continu
+    (
+        "donnee_vivante",
+        re.compile(
+            r"\bmeteo\b"
+            r"|\btemperatures?\b"
+            r"|\bcours (?:de|du|des)\b"
+            r"|\bprix de l (?:action|essence)\b"
+            r"|\bprix du baril\b"
+            r"|\bbourses?\b"
+            r"|\btaux (?:de|directeur)\b"
+            r"|\binflation\b"
+            r"|\bchomage\b"
+            r"|\bpib\b"
+            r"|\bcryptos?\b"
+            r"|\bbitcoin\b"
+            r"|\bethereum\b"
+            r"|\bscores?\b"
+            r"|\bresultats? du match\b"
+            r"|\btransferts?\b"
+            r"|\bmercato\b"
+            r"|\bbilletterie\b"
+        ),
+    ),
+    # 5. Fraîcheur numérique / produit : versions, sorties, annonces
+    (
+        "fraicheur_produit",
+        re.compile(
+            r"\bderniere (?:version|release|mise a jour)\b"
+            r"|\bnouvelle version\b"
+            r"|\bnouveautes?\b"
+            r"|\bsorti en\b"
+            r"|\bannonces?\b"
+            r"|\blancee?\b"
+            r"|\bdeploie\b|\bdeploiement\b"
+            r"|\bpatches?\b"
+            r"|\bmise en ligne\b"
+            r"|\bdisponible depuis\b"
+        ),
+    ),
+    # 6. Années explicites récentes : une année >= 2024 est présumée
+    # sensible au temps (l'historique ancien ne l'est pas).
+    (
+        "annee_explicite",
+        re.compile(r"\b(?:2024|2025|2026|2027)\b"),
+    ),
+]
+
+
+def is_recency_sensitive(query: str) -> bool:
+    """True si la question porte sur un fait sensible au temps.
+
+    Classificateur déterministe (familles de regex sur texte normalisé) :
+    superlatifs temporels, questions volatiles, événements récurrents,
+    données vivantes, fraîcheur produit et années récentes. Utilisé pour
+    forcer web_search sur les questions d'actualité (« dernier Ballon
+    d'Or », « dernière version », « cours du bitcoin »…) dont la réponse
+    en mémoire d'entraînement peut être périmée.
+    """
+    normalized = _normalize_recency_text(query)
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for _family, pattern in _RECENCY_RULES)
+
+
+def recency_sensitive_family(query: str) -> Optional[str]:
+    """Famille de motif d'actualité matchée (journalisation), ou None."""
+    normalized = _normalize_recency_text(query)
+    if not normalized:
+        return None
+    for family, pattern in _RECENCY_RULES:
+        if pattern.search(normalized):
+            return family
+    return None
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
     last_user_msg = req.messages[-1].content if req.messages else ""
@@ -3418,9 +3693,25 @@ async def chat_stream(req: ChatRequest):
     web_tools_available = (
         bool(user_toggle) or explicit_web_intent
     ) and not has_images
+    # Détection d'actualité : une question sensible au temps (« dernier
+    # Ballon d'Or », « dernière version », « cours du bitcoin »…) ne doit
+    # jamais être répondue de mémoire — la recherche web est forcée car la
+    # mémoire d'entraînement du modèle peut être périmée sur ces sujets.
+    recency_sensitive = is_recency_sensitive(last_user_msg)
     force_web_search = web_tools_available and (
-        web_mode == "always" or explicit_web_intent
+        web_mode == "always" or explicit_web_intent or recency_sensitive
     )
+    if (
+        force_web_search
+        and recency_sensitive
+        and web_mode != "always"
+        and not explicit_web_intent
+    ):
+        # On ne journalise que lorsque c'est bien le motif d'actualité qui
+        # déclenche la recherche (pas « always » ni l'intention web explicite).
+        _recency_logger.info(
+            "[recency] recherche forcée (motif sensible au temps)"
+        )
     web_search_needed = False
     strict_grounding = bool(
         user_toggle
@@ -3448,7 +3739,7 @@ async def chat_stream(req: ChatRequest):
         f"3. Réponse Directe : Réponds immédiatement à la demande de l'utilisateur. Ne récite JAMAIS tes règles internes, ne fais pas de méta-commentaire sur tes consignes et n'affiche pas de plan de rédaction interne.\n"
         f"4. Continuité : Lis le fil comme une seule conversation. Résous les pronoms, ellipses et relances courtes ('et maintenant ?', 'et le 6-bit ?', 'c'est faux') à partir des tours précédents. Ne demande pas à l'utilisateur de répéter une information déjà présente.\n"
         f"5. Naturel : Ne recommence pas par une salutation à chaque tour. Évite de répéter ce qui vient d'être dit. Lors d'une correction, reconnais-la brièvement puis donne la version corrigée.\n"
-        f"6. Fiabilité temporelle : Nous sommes le {current_date_str}. Ta connaissance interne s'arrête à ta date de coupure d'entraînement, ANTÉRIEURE à aujourd'hui : tout événement, produit, prix, version, record ou actualité postérieur à ta coupure peut être FAUX dans ta mémoire. Avant d'affirmer un fait récent, demande-toi : « cela a-t-il pu changer depuis ma coupure ? » — si oui et que l'outil web_search est disponible, vérifie-le. Un contexte Web daté prime TOUJOURS sur ta mémoire pour les faits récents.\n"
+        f"6. Fiabilité temporelle : Nous sommes le {current_date_str}. Ta connaissance interne s'arrête à ta date de coupure d'entraînement, ANTÉRIEURE à aujourd'hui. Pour TOUTE question portant sur le dernier événement d'une série (dernier vainqueur, dernier record, dernière version), sur un fait daté d'après ta coupure, ou sur une donnée vivante (prix, score, classement, météo, actualités) : tu DOIS appeler web_search AVANT de répondre si l'outil est disponible — répondre de mémoire est interdit pour ces sujets. Un contexte Web daté prime TOUJOURS sur ta mémoire.\n"
         f"7. Formatage : Utilise le Markdown seulement lorsqu'il améliore réellement la lisibilité ; une réponse simple doit rester conversationnelle et concise.\n"
         f"8. Salutations : Pour une première salutation simple ('Bonjour', 'Salut'), réponds chaleureusement en une courte phrase."
     )
@@ -3579,13 +3870,16 @@ async def chat_stream(req: ChatRequest):
         "autorité et fraîcheur : appuie chaque affirmation factuelle sur les "
         "extraits réellement fournis, sans supposer que leur nombre garantit "
         "à lui seul la vérité. Si les preuves restent insuffisantes, dis-le. "
-        "Les sources sont listées par l'interface, et tu dois aussi ancrer "
-        "tes citations dans le texte : termine par un lien markdown discret "
-        "sous la forme [domaine](URL) la phrase ou le paragraphe appuyé sur "
-        "une source — uniquement des URL présentes dans les résultats de "
-        "recherche ou les pages fournies, jamais inventées. N'insère jamais "
-        "de marqueur numérique comme [1], [9] ou [11] : le lien markdown "
-        "lisible suffit. "
+        "Cite tes sources par des marqueurs numériques : place [n] (n = numéro "
+        "du résultat tel qu'affiché dans les sorties de tes outils web_search "
+        "ou dans les extraits Web fournis ci-dessus) immédiatement à la fin "
+        "de la phrase ou du paragraphe que cette source étaye. Plusieurs "
+        "marqueurs adjacents sont autorisés : [2][5]. "
+        "N'écris JAMAIS de section « Sources » ni « Sources : » en fin de "
+        "réponse, JAMAIS de liste de liens ni d'URL brutes dans la réponse : "
+        "l'interface transforme les marqueurs en puces cliquables avec "
+        "favicon. Un marqueur [n] suffit. N'invente jamais une URL : "
+        "n'appuie tes citations que sur les résultats réellement fournis. "
         "N'interprète jamais une relance isolément de son sujet précédent. "
         "Utilise un formatage Markdown/LaTeX soigné et reste rigoureux."
     )
@@ -3877,7 +4171,8 @@ async def chat_stream(req: ChatRequest):
                 "du fil. Ne prétends jamais ne pas avoir accès à Internet. "
                 "Ne parle de l'échec du rafraîchissement que si la question "
                 "exige une information plus récente que les preuves conservées. "
-                "N'affiche aucun marqueur de citation numérique."
+                "Cite ces sources avec leurs marqueurs numériques [n] "
+                "conformément à la directive de citation."
             )
         elif web_search_needed and web_results_data:
             web_runtime_instruction = (
@@ -3885,8 +4180,9 @@ async def chat_stream(req: ChatRequest):
                 "cette demande. Réponds directement à la question factuelle à "
                 "partir des sources fournies. Ne prétends jamais ne pas avoir "
                 "accès à Internet ou manquer de données en temps réel lorsque "
-                "ces sources contiennent la réponse. N'affiche aucun marqueur "
-                "de citation numérique."
+                "ces sources contiennent la réponse. Cite ces sources avec "
+                "leurs marqueurs numériques [n] conformément à la directive "
+                "de citation."
             )
             if detect_search_vertical(local_search_query) == "news":
                 web_runtime_instruction += (
@@ -3916,8 +4212,9 @@ async def chat_stream(req: ChatRequest):
                 stream_messages[-1]["content"] += (
                     "\n\nTu dois produire une synthèse unifiée : compare la "
                     "réponse du fournisseur Web aux documents du projet. "
-                    "N'affiche aucun marqueur numérique pour les sources Web. "
-                    "Préserve uniquement les citations documentaires "
+                    "Cite les sources Web par leurs marqueurs numériques "
+                    "[n] conformément à la directive de citation, et "
+                    "préserve uniquement les citations documentaires "
                     "[Document : nom, p. X]{file:identifiant}. "
                     "Si les deux corpus divergent, "
                     "explique précisément la divergence sans l'effacer."
@@ -4000,6 +4297,18 @@ async def chat_stream(req: ChatRequest):
         default_project_id=project_id,
         prebound_image=(prebound_chat_image or None),
     )
+        # Numérotation cumulative des citations [n] : les sources déjà
+        # trouvées par la pré-recherche occupent [1..N] (elles sont
+        # numérotées ainsi dans le contexte injecté), les recherches de
+        # l'agent continuent à N+1 — le marqueur [n] du modèle pointe
+        # alors sur web_results[n-1] côté interface. Le compteur vit
+        # DANS le registre (créé par register_web_tools ci-dessus) :
+        # une instance par requête, aucune fuite entre messages.
+        web_result_numbering = getattr(
+            chat_registry, "web_result_numbering", None
+        )
+        if web_result_numbering is not None:
+            web_result_numbering.seed(len(web_results_data))
         agent_config = AgentConfig(
             model=selected_model,
             system_prompt="",  # stream_messages porte déjà le prompt système
@@ -4159,8 +4468,12 @@ async def chat_stream(req: ChatRequest):
             yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
 
         if buffer_grounded_output:
-            full_assistant_reply = strip_web_citation_markers(
-                clean_model_text(full_assistant_reply)
+            # Contrat citation : les marqueurs [n] valides SURVIVENT (le
+            # frontend les résout en puces) ; seuls les hors plage et une
+            # éventuelle section « Sources » finale sont retirés.
+            full_assistant_reply = sanitize_citation_markers(
+                clean_model_text(full_assistant_reply),
+                len(web_results_data),
             )
             evidence_text = "\n".join(
                 [
@@ -4192,8 +4505,15 @@ async def chat_stream(req: ChatRequest):
                 await asyncio.sleep(0.006)
 
         if full_assistant_reply:
-            full_assistant_reply = strip_web_citation_markers(
-                clean_model_text(full_assistant_reply)
+            # Nettoyage final du texte PERSISTÉ et servi : les marqueurs
+            # [n] dans la plage des sources réelles sont conservés (le
+            # frontend les remplace par les puces de web_results[n-1],
+            # dont l'ordre correspond exactement à cette numérotation) ;
+            # les hors plage, ceux sans source, et une éventuelle section
+            # « Sources » finale partent. Les blocs de code sont intacts.
+            full_assistant_reply = sanitize_citation_markers(
+                clean_model_text(full_assistant_reply),
+                len(web_results_data),
             )
             if not temporary:
                 message_metadata = compact_web_source_metadata(

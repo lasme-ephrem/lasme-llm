@@ -1937,10 +1937,9 @@ async function sendChatMessage(options = {}) {
                 }
             );
         }
-        if (window.LasmeProgressiveRenderer?.stripNumericCitations) {
-            fullResponse = window.LasmeProgressiveRenderer
-                .stripNumericCitations(fullResponse);
-        }
+        // The [n] citation markers are intentionally KEPT in the persisted
+        // content: together with the message's web_results metadata they
+        // allow the marker-based chips to be re-rendered on history load.
         streamConversationHistory.push({ role: "assistant", content: fullResponse });
         if (
             requestIsTemporary
@@ -2146,26 +2145,6 @@ function buildSourceMeta(result) {
             initial: (faviconDomain[0] || "S").toUpperCase()
         };
     } catch (error) {
-        return null;
-    }
-}
-
-// Normalize a URL for chip↔paragraph association: drop protocol, www and
-// trailing slash; comparison happens per host + path prefix (see
-// sourceKeysMatch) so /article and /article/section associate.
-function normalizeSourceUrlKey(value) {
-    const raw = String(value || "").trim();
-    if (!raw) return null;
-    try {
-        const parsed = new URL(raw, window.location.origin);
-        if (!["http:", "https:"].includes(parsed.protocol)) return null;
-        const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
-        if (!host) return null;
-        const port = parsed.port ? `:${parsed.port}` : "";
-        const pathAndQuery = `${parsed.pathname}${parsed.search}`
-            .replace(/\/+$/, "");
-        return `${host}${port}${pathAndQuery}`;
-    } catch (_) {
         return null;
     }
 }
@@ -2809,9 +2788,6 @@ function renderGenerationPerformance(container, rawStats) {
 // the UI receives structured activity events and a short process summary.
 function renderFullAssistantMessage(container, rawText, webResults, thinkingDuration = null) {
     rawText = cleanModelText(rawText);
-    rawText = window.LasmeProgressiveRenderer?.stripNumericCitations
-        ? window.LasmeProgressiveRenderer.stripNumericCitations(rawText)
-        : rawText;
     container._lasmeRawContent = rawText;
     let thinkingContent = "";
     let mainAnswer = (rawText || "")
@@ -2911,11 +2887,12 @@ function renderFullAssistantMessage(container, rawText, webResults, thinkingDura
         }
         renderRichContent(answerDiv, mainAnswer, webResults);
 
-        // ChatGPT-style inline source chips (idempotent pass, safe to run on
-        // every render: streaming paints and history loads share this path).
-        // The sources live ONLY here, attached to each cited paragraph —
-        // there is deliberately no bottom sources drawer.
-        attachInlineSourceChips(answerDiv, webResults);
+        // ChatGPT-style inline citation chips (idempotent pass, safe to run
+        // on every render: streaming paints and history loads share this
+        // path). The [n] markers written by the model are replaced in place
+        // by favicon chips bound to webResults[n - 1] — the sources live
+        // ONLY here, there is deliberately no bottom sources drawer.
+        renderCitationMarkerChips(answerDiv, webResults);
     }
 }
 
@@ -2926,22 +2903,9 @@ function renderRichContent(container, text, webResults) {
         return;
     }
 
-    // Keep valid Web citations in the expandable source drawer. Numeric
-    // arrays such as Python/JSON "[1]" must remain untouched when no matching
-    // Web source exists.
-    const sourceCount = Array.isArray(webResults) ? webResults.length : 0;
-    if (sourceCount > 0) {
-        text = text.replace(
-            /\s*\[(\d+(?:\s*[,–-]\s*\d+)*)\]/g,
-            (fullMatch, body) => {
-                const numbers = String(body).match(/\d+/g)?.map(Number) || [];
-                const valid = numbers.length > 0 && numbers.every(
-                    number => number >= 1 && number <= sourceCount
-                );
-                return valid ? "" : fullMatch;
-            }
-        );
-    }
+    // The [n] citation markers are NOT stripped here: they must survive the
+    // markdown pass so renderCitationMarkerChips can replace them in the
+    // rendered DOM (markers sitting in code/pre/links stay untouched there).
     text = text.replace(/[ \t]+([,.;:!?])/g, "$1");
 
     const preparedMath = window.LasmeMath
@@ -3074,74 +3038,126 @@ function renderRichContent(container, text, webResults) {
     replaceFlagsWithSvg(container);
 }
 
-// ── Inline source chips (ChatGPT-style citations) ─────────────────────────
+// ── Inline citation chips rendered from the [n] markers (ChatGPT-style) ────
 //
-// After the markdown answer is rendered, each `p`/`li` that cites one of the
-// webResults gets a compact pill appended: [favicon] domain +N ›. Hovering
-// (desktop) or tapping (touch) the pill opens a single reusable preview
-// popover per message, anchored above the chip (flipped below when clipped).
+// The model cites its web sources with bracket markers ([1], [2][5], …)
+// placed at the end of the cited sentence/paragraph, and webResults[i - 1]
+// is source number i (position in the array is the source of truth). After
+// the markdown answer is rendered, every marker found in the text nodes of
+// .answer-content is replaced IN PLACE by a compact favicon chip:
+//   - one marker            → a single-source chip (favicon only),
+//   - a run of adjacent     → ONE multi-source group (first favicon
+//     markers [2][5]          + "+N" badge) at that same spot,
+//   - an out-of-range/      → the marker is removed silently,
+//     unknown number
+//   - no web results at all → every marker is removed silently.
+// Hovering (desktop) or tapping (touch) a chip opens the shared preview
+// popover, anchored above the chip (flipped below when clipped).
+//
+// Idempotence: the pass snapshots the matching text nodes BEFORE mutating
+// anything, so one call can never re-enter or double-render; and since the
+// replacements contain no markers, re-running it on the same DOM is a
+// no-op. During streaming, renderRichContent rebuilds the subtree on every
+// paint, so each paint re-runs the pass on fresh markers — no duplication.
 
 const SOURCE_CHIP_OPEN_DELAY_MS = 120;
 const SOURCE_CHIP_CLOSE_DELAY_MS = 200;
-const SOURCE_CHIP_DOMAIN_MAX_CHARS = 16;
 const FINE_POINTER_QUERY = typeof window.matchMedia === "function"
     ? window.matchMedia("(hover: hover) and (pointer: fine)")
     : null;
 let activeSourceChipPopover = null;
 
+// One citation token: [7], or a compact list/range the model sometimes
+// emits instead of adjacent markers ([2,5], [2-5]); every captured number
+// maps to webResults[number - 1].
+const CITATION_TOKEN_PATTERN = /\[([0-9]{1,2}(?:\s*[,–-]\s*[0-9]{1,2})*)\]/g;
+
+// Text inside these elements keeps its literal [n] characters: code samples,
+// maths, mermaid sources, document-citation buttons, generated-image cards
+// and existing links (if the model still emits a markdown link, it stays).
+const CITATION_SKIP_SELECTOR = [
+    "code", "pre", "a", ".katex", ".mermaid",
+    ".document-citation", ".source-chip-group",
+    ".generated-image-card", "script", "style", "textarea"
+].join(", ");
+
+// Punctuation glued right after a run of markers moves BEFORE the chip, so
+// "étude[1]." renders as "étude.◉" (ChatGPT typography).
+const CITATION_TRAILING_PUNCTUATION = /[.,;:!?…]/;
+
 function sourceChipHoverCapable() {
     return FINE_POINTER_QUERY ? FINE_POINTER_QUERY.matches : true;
 }
 
-function sourceKeysMatch(firstKey, secondKey) {
-    if (!firstKey || !secondKey) return false;
-    if (firstKey === secondKey) return true;
-    const [shorter, longer] = firstKey.length <= secondKey.length
-        ? [firstKey, secondKey]
-        : [secondKey, firstKey];
-    if (!longer.startsWith(shorter)) return false;
-    const boundary = longer.charAt(shorter.length);
-    return boundary === "/" || boundary === "?" || boundary === "&";
-}
+// Replace the citation markers of one text node by text + chip groups.
+// `sourceSlots[i]` is the meta of source number i + 1 (possibly null when
+// that result has no usable URL — its marker then behaves as invalid).
+function replaceCitationTokensInTextNode(textNode, sourceSlots) {
+    const value = textNode.nodeValue;
+    if (!value || !value.includes("[")) return;
 
-const SOURCE_BARE_URL_PATTERN = /https?:\/\/[^\s<>"'`)\]}]+/gi;
+    const tokens = Array.from(value.matchAll(CITATION_TOKEN_PATTERN));
+    if (!tokens.length) return;
 
-function collectBlockUrlKeys(block) {
-    const keys = new Set();
-    if (!block || block.nodeType !== 1) return keys;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let runStart = -1;        // index of the first marker of the current run
+    let runEnd = -1;          // index just past the last marker of the run
+    let runMetas = [];        // deduplicated source metas of the run
+    let runNumbers = [];      // valid marker numbers, kept for data-lasme-cited
+    let runSeen = new Set();  // numbers already taken in the run
 
-    const belongsToNestedListItem = node => {
-        const ownerItem = node.parentElement?.closest("li");
-        return Boolean(ownerItem && ownerItem !== block);
+    const flushRun = () => {
+        if (runStart < 0) return;
+        let lead = value.slice(cursor, runStart);
+        // Absorb a single space glued before the markers: the chip carries
+        // its own 2px margin, "mot ●" reads better than "mot  ●".
+        if (/[ \t]$/.test(lead)) lead = lead.slice(0, -1);
+        if (lead) fragment.appendChild(document.createTextNode(lead));
+
+        let tail = "";
+        if (runEnd < value.length && CITATION_TRAILING_PUNCTUATION.test(value[runEnd])) {
+            tail = value[runEnd];
+        }
+        if (tail) fragment.appendChild(document.createTextNode(tail));
+        if (runMetas.length) {
+            const group = createSourceChipGroup(runMetas);
+            group.dataset.lasmeCited = runNumbers.join(",");
+            fragment.appendChild(group);
+        }
+
+        cursor = runEnd + (tail ? 1 : 0);
+        runStart = -1;
+        runEnd = -1;
+        runMetas = [];
+        runNumbers = [];
+        runSeen = new Set();
     };
 
-    block.querySelectorAll("a[href]").forEach(anchor => {
-        if (anchor.closest("code, pre")) return;
-        if (belongsToNestedListItem(anchor)) return;
-        const key = normalizeSourceUrlKey(anchor.getAttribute("href"));
-        if (key) keys.add(key);
-    });
+    for (const token of tokens) {
+        if (runStart >= 0 && token.index !== runEnd) flushRun();
 
-    // Bare URLs typed in the paragraph text (outside code and links).
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-        if (!node.nodeValue) continue;
-        if (node.parentElement?.closest("code, pre, a")) continue;
-        if (belongsToNestedListItem(node)) continue;
-        const matches = node.nodeValue.match(SOURCE_BARE_URL_PATTERN);
-        if (!matches) continue;
-        matches.forEach(match => {
-            const key = normalizeSourceUrlKey(
-                match.replace(/[.,;:!?'"\u2019\u201d]+$/, "")
-            );
-            if (key) keys.add(key);
+        const numbers = (token[1].match(/[0-9]+/g) || []).map(Number);
+        if (runStart < 0) runStart = token.index;
+        runEnd = token.index + token[0].length;
+        numbers.forEach(number => {
+            if (number < 1 || number > sourceSlots.length) return;
+            if (runSeen.has(number)) return;
+            const meta = sourceSlots[number - 1];
+            if (!meta) return;
+            runSeen.add(number);
+            runMetas.push(meta);
+            runNumbers.push(number);
         });
     }
-    return keys;
+    flushRun();
+
+    const rest = value.slice(cursor);
+    if (rest) fragment.appendChild(document.createTextNode(rest));
+    textNode.replaceWith(fragment);
 }
 
-function attachInlineSourceChips(answerDiv, webResults) {
+function renderCitationMarkerChips(answerDiv, webResults) {
     if (!answerDiv) return;
 
     // Close a stale popover whose anchor chip was wiped by a re-render.
@@ -3155,40 +3171,28 @@ function attachInlineSourceChips(answerDiv, webResults) {
         hideSourceChipPopover(existingPopover);
     }
 
-    const sourceMetas = (Array.isArray(webResults) ? webResults : [])
-        .map(result => buildSourceMeta(result))
-        .filter(Boolean);
-    if (!sourceMetas.length) return;
+    // Slot array keeps positions intact: webResults[i] is ALWAYS source
+    // number i + 1, even when a result must be skipped for a bad URL.
+    const sourceSlots = (Array.isArray(webResults) ? webResults : [])
+        .map(result => buildSourceMeta(result));
 
-    sourceMetas.forEach(meta => {
-        meta.matchKey = normalizeSourceUrlKey(meta.safeUrl);
-    });
-
-    answerDiv.querySelectorAll("p, li").forEach(block => {
-        if (block.closest("blockquote")) return;
-        // Loose markdown lists wrap content in li > p; the chip lives on the li.
-        if (block.tagName === "P" && block.closest("li")) return;
-        // Idempotency guard: skip blocks that already carry their chip group.
-        if (block.querySelector(".source-chip-group")) return;
-
-        const blockKeys = collectBlockUrlKeys(block);
-        if (!blockKeys.size) return;
-
-        const matched = sourceMetas.filter(meta => {
-            if (!meta.matchKey) return false;
-            for (const blockKey of blockKeys) {
-                if (sourceKeysMatch(blockKey, meta.matchKey)) return true;
-            }
-            return false;
-        });
-        if (!matched.length) return;
-
-        const group = createSourceChipGroup(matched);
-        const nestedList = block.tagName === "LI"
-            ? block.querySelector("ul, ol")
-            : null;
-        if (nestedList) block.insertBefore(group, nestedList);
-        else block.appendChild(group);
+    // Snapshot first, mutate after: the walker is closed before any
+    // replacement, so a single pass cannot re-enter or double-render.
+    const walker = document.createTreeWalker(answerDiv, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+        if (
+            node.nodeValue
+            && node.nodeValue.includes("[")
+            && !node.parentElement?.closest(CITATION_SKIP_SELECTOR)
+        ) {
+            textNodes.push(node);
+        }
+    }
+    if (!textNodes.length) return;
+    textNodes.forEach(textNode => {
+        replaceCitationTokensInTextNode(textNode, sourceSlots);
     });
 }
 
