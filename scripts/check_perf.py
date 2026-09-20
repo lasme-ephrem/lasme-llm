@@ -3,7 +3,7 @@
 Measures generation throughput on the live router for one profile and
 fails when the best of N runs drops more than 10% below the stored
 baseline. Baselines live in .models/logs/perf_baseline.json and were
-seeded from Phase 0 measurements (docs/BENCHMARKS_PHASE0.md).
+seeded from Phase 0 measurements on the reference RTX 4070 Ti SUPER.
 
 Usage:
   python -m scripts.check_perf --model gemma-4-e4b
@@ -53,6 +53,19 @@ def measure_tok_s(base_url: str, model: str, runs: int) -> float:
     """
     values = []
     with httpx.Client(base_url=base_url, timeout=300) as client:
+        # Échauffement non chronométré : après une bascule de modèle du
+        # routeur, le premier prompt paie le chargement des poids et le
+        # réchauffage du draft MTP, ce qui empoisonnait la médiane.
+        client.post(
+            "/completion",
+            json={
+                "model": model,
+                "prompt": GEN_PROMPT,
+                "n_predict": 8,
+                "temperature": 0.0,
+                "cache_prompt": True,
+            },
+        )
         for _ in range(runs):
             response = client.post(
                 "/completion",

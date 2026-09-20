@@ -45,7 +45,7 @@ class ModelProfileTests(unittest.TestCase):
 
     def test_quality_profile_uses_measured_phase0_settings(self):
         # Context 128K and history budget sized from Phase 0 measurements
-        # (docs/BENCHMARKS_PHASE0.md): 128K fits in 12.9 GiB with MTP n=4.
+        # Measured on the reference 16 GiB GPU: 128K fits with MTP n=4.
         self.assertEqual(GEMMA4_CHAT_PROFILE.num_ctx, 131_072)
         self.assertEqual(GEMMA4_CHAT_PROFILE.num_predict, 8_192)
         self.assertEqual(GEMMA4_CHAT_PROFILE.history_tokens, 60_000)
