@@ -81,7 +81,7 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
             hf_repo="unsloth/gemma-4-12B-it-qat-GGUF:UD-Q4_K_XL",
             context=131_072,
             vram_budget_mib=13_100,
-            resident=False,  # loaded on demand (~27 s), E-models stay resident
+            resident=False,  # loaded on demand (~27 s)
             description="12B QAT — qualité/agent, 211 tok/s mesurés",
         ),
         RuntimeProfile(
@@ -89,7 +89,7 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
             hf_repo="unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL",
             context=65_536,
             vram_budget_mib=8_200,
-            resident=True,
+            resident=False,  # pas résident : 12B (12,9 GiB) + E4B > 16 Go
             description="E4B QAT — vitesse, 129 tok/s mesurés",
         ),
         RuntimeProfile(
@@ -97,7 +97,7 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
             hf_repo="unsloth/gemma-4-E2B-it-qat-GGUF:UD-Q4_K_XL",
             context=32_768,
             vram_budget_mib=4_800,
-            resident=True,
+            resident=False,  # idem : chargé à la demande
             description="E2B QAT — minimal viable, 214 tok/s mesurés",
         ),
         RuntimeProfile(
@@ -131,13 +131,16 @@ def resolve_runtime_profile(model: str | None) -> RuntimeProfile:
 
 
 def resident_profiles(vram_total_mib: int | None = None) -> list[RuntimeProfile]:
-    """Profiles to preload, adapted to the detected GPU budget."""
-    if vram_total_mib is None or vram_total_mib >= 14_000:
-        return [RUNTIME_PROFILES[FAST_MODEL], RUNTIME_PROFILES[MINIMAL_MODEL]]
-    if vram_total_mib >= 7_000:
-        return [RUNTIME_PROFILES[MINIMAL_MODEL]]
-    # Very small GPUs: serve only the minimal profile, reduced context.
-    return [RUNTIME_PROFILES[MINIMAL_MODEL]]
+    """Profiles to preload at router startup.
+
+    Always empty: on a 16 GiB GPU the quality 12B alone needs 12.9 GiB
+    (weights + MTP draft + 128K f16 KV). Any resident E-model leaves too
+    little headroom, and llama.cpp's speculative-draft memory fitting
+    crashes with "invalid vector subscript" instead of a clean OOM —
+    which surfaces to users as an interrupted generation. Every profile
+    loads on demand; E-models load in well under 30 s.
+    """
+    return []
 
 
 @dataclass(frozen=True)
