@@ -19,7 +19,7 @@
     <link rel="stylesheet" href="vendor/highlight/tokyo-night-dark.min.css?v=11.9.0">
     
     <!-- App Custom CSS -->
-    <link rel="stylesheet" href="style.css?v=20260921-citations-v7">
+    <link rel="stylesheet" href="style.css?v=20260923-effort-v9">
     
     <!-- Local pinned renderers keep chat and Canvas functional offline. -->
     <script src="vendor/dompurify/purify.min.js?v=3.2.6"></script>
@@ -436,40 +436,26 @@
                                     aria-label="Niveau de raisonnement"
                                     style="display:none;"
                                 >
-                                    <option value="high" selected>Approfondi</option>
-                                    <option value="max">Maximum</option>
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high" selected>High</option>
                                 </select>
 
                                 <div class="intelligence-picker reasoning-picker" id="reasoningPickerContainer">
                                     <button type="button" class="intelligence-trigger" id="reasoningPickerTrigger" aria-expanded="false">
                                         <span class="intel-trigger-icon">✦</span>
-                                        <span class="intel-label" id="selectedReasoningName">Approfondi</span>
+                                        <span class="intel-label" id="selectedReasoningName">High</span>
                                         <svg class="intel-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                                     </button>
                                     <div class="intelligence-dropdown reasoning-dropdown" id="reasoningPickerDropdown">
                                         <div class="intel-header">Niveau de raisonnement</div>
-
-                                        <button type="button" class="intel-option intel-active" data-level="high" data-label="Approfondi">
-                                            <div class="intel-option-left">
-                                                <div class="intel-option-icon-wrap intel-icon-high">◆</div>
-                                                <div class="intel-option-text">
-                                                    <div class="intel-option-name">Approfondi</div>
-                                                    <div class="intel-option-desc">Analyse détaillée pour les demandes complexes</div>
-                                                </div>
-                                            </div>
-                                            <svg class="intel-check-icon active" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                        </button>
-
-                                        <button type="button" class="intel-option" data-level="max" data-label="Maximum">
-                                            <div class="intel-option-left">
-                                                <div class="intel-option-icon-wrap intel-icon-max">✹</div>
-                                                <div class="intel-option-text">
-                                                    <div class="intel-option-name">Maximum</div>
-                                                    <div class="intel-option-desc">Qualité maximale · latence plus élevée</div>
-                                                </div>
-                                            </div>
-                                            <svg class="intel-check-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                                        </button>
+                                        <div class="effort-slider" id="effortSlider" role="radiogroup" aria-label="Niveau de raisonnement" data-value="high" tabindex="0">
+                                            <div class="effort-slider-thumb" aria-hidden="true"></div>
+                                            <button type="button" class="effort-seg" data-level="low" role="radio" aria-checked="false">Low</button>
+                                            <button type="button" class="effort-seg" data-level="medium" role="radio" aria-checked="false">Medium</button>
+                                            <button type="button" class="effort-seg effort-seg-active" data-level="high" role="radio" aria-checked="true">High</button>
+                                        </div>
+                                        <div class="effort-slider-desc" id="effortSliderDesc">Analyse approfondie pour les demandes complexes</div>
                                     </div>
                                 </div>
 
@@ -842,7 +828,7 @@
 
     <script src="math-renderer.js?v=20260729-currency"></script>
     <script src="progressive-renderer.js?v=20260730-citation-cleanup"></script>
-    <script src="app.js?v=20260923-parallel-v8"></script>
+    <script src="app.js?v=20260923-effort-v9"></script>
     <script src="workspace.js?v=20260923-parallel-v8"></script>
 </body>
 </html>

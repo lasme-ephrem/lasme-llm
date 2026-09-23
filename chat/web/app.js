@@ -239,25 +239,53 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
         reasoningPickerDropdown.classList.remove("open");
         reasoningPickerTrigger.setAttribute("aria-expanded", "false");
     });
-    document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            reasoningLevelSelect.value = btn.dataset.level || "high";
-            if (selectedReasoningName) {
-                selectedReasoningName.textContent = btn.dataset.label || "Approfondi";
-            }
-            document.querySelectorAll("#reasoningPickerDropdown .intel-option").forEach(option => {
-                option.classList.remove("intel-active");
-                const check = option.querySelector(".intel-check-icon");
-                if (check) check.classList.remove("active");
+    const effortSlider = document.getElementById("effortSlider");
+    const effortSliderDesc = document.getElementById("effortSliderDesc");
+    const EFFORT_LEVELS = ["low", "medium", "high"];
+    const EFFORT_DESCRIPTIONS = {
+        low: "Réponses rapides, réflexion légère — idéal pour les échanges simples",
+        medium: "Équilibre entre vitesse et profondeur d'analyse",
+        high: "Analyse approfondie pour les demandes complexes",
+    };
+
+    window.setEffortLevel = function setEffortLevel(level) {
+        const safe = EFFORT_LEVELS.includes(level) ? level : "high";
+        reasoningLevelSelect.value = safe;
+        if (selectedReasoningName) {
+            selectedReasoningName.textContent = safe.charAt(0).toUpperCase() + safe.slice(1);
+        }
+        if (effortSlider) {
+            effortSlider.dataset.value = safe;
+            effortSlider.querySelectorAll(".effort-seg").forEach(seg => {
+                const active = seg.dataset.level === safe;
+                seg.classList.toggle("effort-seg-active", active);
+                seg.setAttribute("aria-checked", active ? "true" : "false");
             });
-            btn.classList.add("intel-active");
-            const activeCheck = btn.querySelector(".intel-check-icon");
-            if (activeCheck) activeCheck.classList.add("active");
-            reasoningPickerDropdown.classList.remove("open");
-            reasoningPickerTrigger.setAttribute("aria-expanded", "false");
+        }
+        if (effortSliderDesc) {
+            effortSliderDesc.textContent = EFFORT_DESCRIPTIONS[safe];
+        }
+    };
+
+    if (effortSlider) {
+        effortSlider.querySelectorAll(".effort-seg").forEach(seg => {
+            seg.addEventListener("click", e => {
+                e.stopPropagation();
+                setEffortLevel(seg.dataset.level);
+            });
         });
-    });
+        effortSlider.addEventListener("keydown", e => {
+            const index = EFFORT_LEVELS.indexOf(effortSlider.dataset.value);
+            if (e.key === "ArrowRight" && index < EFFORT_LEVELS.length - 1) {
+                e.preventDefault();
+                setEffortLevel(EFFORT_LEVELS[index + 1]);
+            } else if (e.key === "ArrowLeft" && index > 0) {
+                e.preventDefault();
+                setEffortLevel(EFFORT_LEVELS[index - 1]);
+            }
+        });
+        setEffortLevel("high");
+    }
 }
 
 if (webSearchBtn && webSearchToggle) {

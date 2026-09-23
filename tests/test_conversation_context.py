@@ -167,6 +167,33 @@ class ConversationContextTests(unittest.TestCase):
             )
         )
 
+    def test_standard_effort_levels_pass_through(self):
+        # Le niveau explicite de l'utilisateur est toujours respecté.
+        for level, expected in (("low", "low"), ("medium", "medium"), ("high", "high")):
+            self.assertEqual(
+                should_enable_reasoning(
+                    "Analyse cette architecture",
+                    model="gemma-4-chat",
+                    requested_level=level,
+                ),
+                expected,
+            )
+        # Même sur un tour trivial, un niveau explicite n'est pas abaissé.
+        self.assertEqual(
+            should_enable_reasoning("Bonjour", model="gemma-4-chat", requested_level="low"),
+            "low",
+        )
+
+    def test_legacy_effort_labels_collapse_onto_high(self):
+        self.assertEqual(
+            should_enable_reasoning("Analyse", model="gemma-4-chat", requested_level="max"),
+            "high",
+        )
+        self.assertEqual(
+            should_enable_reasoning("Analyse", model="gemma-4-chat", requested_level="deep"),
+            "high",
+        )
+
     def test_reasoning_is_hidden_for_greeting_and_enabled_for_complex_task(self):
         self.assertFalse(
             should_enable_reasoning(
@@ -222,14 +249,8 @@ class ConversationContextTests(unittest.TestCase):
             ),
             "high",
         )
-        self.assertEqual(
-            should_enable_reasoning(
-                "Analyse cette architecture",
-                model="gemma-4-fable",
-                requested_level="max",
-            ),
-            "max",
-        )
+        # "max" est un héritage : il se replie sur "high" (échelle standard
+        # low/medium/high) — voir test_legacy_effort_labels_collapse_onto_high.
 
     def test_auto_web_search_skips_stable_question(self):
         self.assertFalse(

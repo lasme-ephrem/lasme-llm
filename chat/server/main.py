@@ -1578,16 +1578,21 @@ def response_depth_instruction(
 def should_enable_reasoning(
     query: str,
     model: str,
-    requested_level: Optional[str] = "balanced",
+    requested_level: Optional[str] = "high",
     has_external_context: bool = False,
 ) -> bool | str:
-    """Select reasoning effort without wasting latency on trivial turns."""
-    level = (requested_level or "balanced").strip().lower()
+    """Select reasoning effort without wasting latency on trivial turns.
+
+    Standard scale: low / medium / high, passed through as chosen — the
+    user's explicit level is always respected. Legacy labels (max, deep)
+    collapse onto high; "balanced" keeps its adaptive heuristics.
+    """
+    level = (requested_level or "high").strip().lower()
     if level in {"none", "off", "fast", "minimal"}:
         return False
-    if level == "max":
-        return "max"
-    if level in {"high", "deep"}:
+    if level in {"low", "medium", "high"}:
+        return level
+    if level in {"max", "deep"}:
         return "high"
 
     clean = re.sub(r"[^\w\s]", "", (query or "").lower()).strip()
@@ -4284,9 +4289,9 @@ async def chat_stream(req: ChatRequest):
         )
         output_budget = {
             "off": 2_048,
-            "medium": 4_096,
-            "high": 6_144,
-            "max": model_profile.num_predict,
+            "low": 4_096,
+            "medium": 6_144,
+            "high": model_profile.num_predict,
         }.get(effort_name, 4_096)
         if simple_factual_lookup and not reasoning_effort:
             # A grounded fact lookup should answer in a few sentences. This

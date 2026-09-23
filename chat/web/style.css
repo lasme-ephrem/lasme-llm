@@ -3999,7 +3999,9 @@ body.sidebar-resizing {
     .source-chip,
     .source-chip-popover-link,
     .source-chip-popover-arrow,
-    .source-chip-popover-dot {
+    .source-chip-popover-dot,
+    .effort-slider-thumb,
+    .effort-seg {
         transition: none;
     }
 
@@ -4305,6 +4307,72 @@ body.sidebar-resizing {
 
 .reasoning-dropdown {
     width: 310px;
+}
+
+/* ── Effort slider (Low / Medium / High) — curseur segmenté coulissant ── */
+.effort-slider {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    margin: 10px 14px 4px;
+    padding: 3px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--text-primary, #0d0d0d) 5%, transparent);
+    border: 1px solid var(--border, #e5e5e5);
+}
+
+.effort-slider-thumb {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 3px;
+    width: calc((100% - 6px) / 3);
+    border-radius: 8px;
+    background: var(--bg-card, #ffffff);
+    border: 1px solid color-mix(in srgb, var(--accent, #10a37f) 35%, var(--border, #e5e5e5));
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.10);
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+}
+
+.effort-slider[data-value="low"] .effort-slider-thumb { transform: translateX(0); }
+.effort-slider[data-value="medium"] .effort-slider-thumb { transform: translateX(100%); }
+.effort-slider[data-value="high"] .effort-slider-thumb { transform: translateX(200%); }
+
+.effort-seg {
+    position: relative;
+    z-index: 1;
+    appearance: none;
+    background: none;
+    border: 0;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 0 5px;
+    border-radius: 8px;
+    color: var(--text-secondary, #6b6b6b);
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.effort-seg:hover {
+    color: var(--text-primary, #0d0d0d);
+}
+
+.effort-seg.effort-seg-active {
+    color: var(--accent, #10a37f);
+}
+
+.effort-slider:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent, #10a37f) 55%, transparent);
+    outline-offset: 2px;
+}
+
+.effort-slider-desc {
+    margin: 0 14px 12px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-secondary, #6b6b6b);
 }
 
 /* ── Intelligence Picker ─────────────────────────────────────────── */
