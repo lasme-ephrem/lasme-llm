@@ -1126,20 +1126,27 @@ function renderCanvasDocumentPreview(source) {
     });
     if (typeof renderMathInElement !== "undefined") {
         try {
-            renderMathInElement(canvasPreview, {
-                delimiters: [
-                    { left: "\\[", right: "\\]", display: true },
-                    { left: "$$", right: "$$", display: true },
-                    { left: "\\(", right: "\\)", display: false },
-                    { left: "$", right: "$", display: false }
-                ],
-                throwOnError: false,
-                errorColor: "#6B7280",
-                strict: false,
-                trust: false,
-                macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
-                ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
-            });
+            const mathDelimiters = [
+                { left: "\\[", right: "\\]", display: true },
+                { left: "$$", right: "$$", display: true },
+                { left: "\\(", right: "\\)", display: false },
+                { left: "$", right: "$", display: false }
+            ];
+            // Boucle jusqu'à stabilité : le premier pass peut laisser des
+            // fragments de formules (même raison que dans app.js).
+            for (let mathPass = 0; mathPass < 3; mathPass++) {
+                const before = canvasPreview.querySelectorAll(".katex").length;
+                renderMathInElement(canvasPreview, {
+                    delimiters: mathDelimiters,
+                    throwOnError: false,
+                    errorColor: "#6B7280",
+                    strict: false,
+                    trust: false,
+                    macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
+                    ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+                });
+                if (canvasPreview.querySelectorAll(".katex").length === before) break;
+            }
         } catch (error) {
             console.warn("Impossible d’afficher une formule du Canvas :", error);
         }
