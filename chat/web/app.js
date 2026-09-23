@@ -2300,6 +2300,13 @@ async function sendChatMessage(options = {}) {
             sseBuffer += remaining;
         }
 
+        // Le titre est généré en parallèle côté serveur dès le début du
+        // flux : on rafraîchit la sidebar à la fin pour l'afficher live,
+        // avec deux reprises si la génération du titre déborde un peu.
+        void loadSessions();
+        window.setTimeout(() => void loadSessions(), 2000);
+        window.setTimeout(() => void loadSessions(), 5000);
+
         if (isStreamVisible()) {
             renderAssistantProgressively(
                 assistantBubble,
