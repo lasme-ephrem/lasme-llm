@@ -5163,7 +5163,7 @@ async function loadStudioFileTree(folderPath) {
     if (!agStudioFileTree) return;
     agStudioFileTree.innerHTML = `<div style="color:#64748b; font-size:0.78rem;">Chargement des fichiers...</div>`;
     try {
-        const resp = await fetch(`${API_BASE}/coding/file-tree?path=${encodeURIComponent(folderPath || '')}`);
+        const resp = await fetch(`${API_BASE}/coding/tree?path=${encodeURIComponent(folderPath || '')}`);
         if (resp.ok) {
             const data = await resp.json();
             if (data.tree && data.tree.length > 0) {
@@ -5261,7 +5261,7 @@ async function openStudioFile(filename) {
     appendTerminalLine(`> Ouverture du fichier : ${filename}`);
 
     try {
-        const resp = await fetch(`${API_BASE}/coding/file-content?file=${encodeURIComponent(filename)}`);
+        const resp = await fetch(`${API_BASE}/coding/file?file=${encodeURIComponent(filename)}`);
         if (resp.ok) {
             const data = await resp.json();
             if (agStudioCodeTextarea) agStudioCodeTextarea.value = data.content || "";
@@ -5281,7 +5281,7 @@ if (agSaveCodeBtn) {
         appendTerminalLine(`> Enregistrement de ${filename}...`);
 
         try {
-            const resp = await fetch(`${API_BASE}/coding/save-file`, {
+            const resp = await fetch(`${API_BASE}/coding/file`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ file: filename, content: content })
