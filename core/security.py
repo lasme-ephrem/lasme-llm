@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import ipaddress
 import secrets
-import socket
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urlparse
 
 from fastapi import Request
 
@@ -91,46 +87,3 @@ def resolve_workspace_path(path: str | Path = ".") -> Path:
             f"Path outside the configured workspace is not allowed: {path}"
         ) from exc
     return resolved
-
-
-def _validate_ip_addresses(addresses: Iterable[str]) -> None:
-    for raw in addresses:
-        ip = ipaddress.ip_address(raw)
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            raise SecurityError(f"Private or reserved network address blocked: {ip}")
-
-
-def validate_public_http_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise SecurityError("Only http:// and https:// URLs are allowed.")
-    if not parsed.hostname:
-        raise SecurityError("URL hostname is missing.")
-    if parsed.username or parsed.password:
-        raise SecurityError("URLs containing credentials are not allowed.")
-
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in LOCAL_HOSTS or hostname.endswith(".local"):
-        raise SecurityError("Local network URLs are not allowed.")
-
-    try:
-        _validate_ip_addresses([hostname])
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(
-                hostname,
-                parsed.port or (443 if parsed.scheme == "https" else 80),
-                type=socket.SOCK_STREAM,
-            )
-        except socket.gaierror as exc:
-            raise SecurityError(f"Unable to resolve URL hostname: {hostname}") from exc
-        _validate_ip_addresses({info[4][0] for info in infos})
-
-    return url

@@ -1,56 +1,94 @@
 import asyncio
+import json
 import unittest
 
 from core.agent.registry import build_agent_registry
-from core.agent.tools_web import _format_search_results, _run_fetch_pages
+from core.agent.tools_web import _format_search_results
+from core.mcp.types import (
+    SERVER_BRAVE,
+    SERVER_EXA,
+    SERVER_TAVILY,
+    TOOL_BRAVE_WEB,
+    TOOL_EXA_FETCH,
+    TOOL_TAVILY_EXTRACT,
+    McpCallResult,
+    ScriptedMcpClient,
+)
 
 
-def _fake_search_fn(query, max_results=None, messages=None, **kwargs):
-    return {
-        "status": "ok",
-        "engine": "test-engine",
-        "results": [
-            {
-                "title": f"Resultat {query}",
-                "url": "https://exemple.fr/a",
-                "snippet": "Un extrait de preuve.",
-            }
-        ],
-        "errors": [],
+def _registry(**kwargs):
+    kwargs.setdefault("mcp_client", ScriptedMcpClient())
+    kwargs.setdefault("web_enabled", True)
+    return build_agent_registry(**kwargs)
+
+
+def _search_payload(title: str, url: str, snippet: str) -> str:
+    hit = {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "description": snippet,
     }
-
-
-def _fake_fetch_fn(url: str) -> str:
-    if "404" in url:
-        raise RuntimeError("page introuvable")
-    return f"# Titre de {url}\nContenu markdown."
+    return json.dumps({"results": [hit]}, ensure_ascii=False)
 
 
 class WebToolsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_web_search_applies_recency_and_formats(self):
-        registry = build_agent_registry(
-            search_fn=_fake_search_fn, fetch_fn=_fake_fetch_fn
+    async def test_web_research_formats_links(self):
+        client = ScriptedMcpClient(
+            {
+                (SERVER_BRAVE, TOOL_BRAVE_WEB): _search_payload(
+                    "Resultat prix rtx 5090",
+                    "https://exemple.fr/a",
+                    "Un extrait de preuve.",
+                )
+            },
+            available_servers=(SERVER_BRAVE,),
         )
-        self.assertIn("web_search", registry.names())
+        registry = _registry(mcp_client=client)
+        self.assertIn("web_research", registry.names())
+        self.assertIn("web_read", registry.names())
         result = await registry.execute(
-            "web_search", '{"query": "prix rtx 5090", "recency": "day"}'
+            "web_research",
+            '{"query": "prix rtx 5090", "recency": "day"}',
         )
         self.assertTrue(result.ok)
-        self.assertIn("[1] Resultat prix rtx 5090 (dernières 24 heures)", result.output)
+        self.assertIn("[1] Resultat prix rtx 5090", result.output)
         self.assertIn("https://exemple.fr/a", result.output)
-        # W2 : liens bruts uniquement, plus d'en-tête moteur ni de
-        # réponse pré-rédigée d'un fournisseur.
-        self.assertNotIn("Moteur :", result.output)
+        self.assertIn("Un extrait de preuve.", result.output)
+        self.assertTrue(
+            any("Moteurs:" in line for line in result.output.splitlines())
+        )
+        self.assertEqual(
+            sum(1 for line in result.output.splitlines() if "web_read" in line),
+            1,
+        )
+        self.assertNotIn("fetch_pages", result.output)
         self.assertNotIn("provider_answer", result.output)
 
-    async def test_fetch_pages_batches_and_isolates_errors(self):
-        output = await _run_fetch_pages(
-            _fake_fetch_fn,
-            {"urls": ["https://a.fr", "https://b.fr/404"]},
+    async def test_web_read_falls_back_to_tavily_when_exa_fails(self):
+        page = "Contenu markdown de la page exemple. " * 10
+        self.assertGreater(len(page), 200)
+        client = ScriptedMcpClient(
+            {
+                (SERVER_EXA, TOOL_EXA_FETCH): McpCallResult(
+                    ok=False,
+                    server=SERVER_EXA,
+                    tool=TOOL_EXA_FETCH,
+                    error="timeout exa",
+                ),
+                (SERVER_TAVILY, TOOL_TAVILY_EXTRACT): page,
+            },
+            available_servers=(SERVER_EXA, SERVER_TAVILY),
         )
-        self.assertIn("# Titre de https://a.fr", output)
-        self.assertIn("ERREUR: RuntimeError", output)
-        self.assertIn("https://b.fr/404", output)
+        registry = _registry(mcp_client=client)
+        result = await registry.execute(
+            "web_read",
+            json.dumps({"urls": ["https://exemple.fr"]}),
+        )
+        self.assertTrue(result.ok)
+        self.assertIn("## https://exemple.fr", result.output)
+        self.assertRegex(result.output, r"\(\d+ caractères\)")
+        self.assertNotIn("ERREUR", result.output)
 
     async def test_search_empty_results_message(self):
         text = _format_search_results({"results": [], "errors": ["quota"]})
@@ -100,9 +138,7 @@ class FakeFileStore:
 
 class PlatformToolsTests(unittest.IsolatedAsyncioTestCase):
     def _registry(self):
-        return build_agent_registry(
-            search_fn=_fake_search_fn,
-            fetch_fn=_fake_fetch_fn,
+        return _registry(
             rag_search_fn=lambda query, top_k: asyncio.sleep(
                 0, result=FakeRagStore().search_scopes(["default"], query, top_k)
             ),
@@ -146,9 +182,7 @@ class PlatformToolsTests(unittest.IsolatedAsyncioTestCase):
                 return {"message": {"content": "un carré rouge"}}
 
         vision = FakeVisionClient()
-        registry = build_agent_registry(
-            search_fn=_fake_search_fn,
-            fetch_fn=_fake_fetch_fn,
+        registry = _registry(
             vision_client=vision,
             prebound_image="QUJD",  # "ABC" en base64
         )
@@ -168,11 +202,7 @@ class PlatformToolsTests(unittest.IsolatedAsyncioTestCase):
             async def chat(self, model, messages, **kwargs):
                 return {"message": {"content": "ok"}}
 
-        registry = build_agent_registry(
-            search_fn=_fake_search_fn,
-            fetch_fn=_fake_fetch_fn,
-            vision_client=FakeVisionClient(),
-        )
+        registry = _registry(vision_client=FakeVisionClient())
         missing = await registry.execute(
             "analyze_image", '{"question": "Que vois-tu ?"}'
         )
@@ -208,9 +238,7 @@ class FakeArtifactStore:
 
 class ArtifactToolsTests(unittest.IsolatedAsyncioTestCase):
     def _registry(self, store):
-        return build_agent_registry(
-            search_fn=_fake_search_fn,
-            fetch_fn=_fake_fetch_fn,
+        return _registry(
             artifact_store=store,
             default_project_id="projet-test",
         )
@@ -245,26 +273,20 @@ class ArtifactToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("introuvable", missing.output)
 
     async def test_artifact_tools_absent_without_store(self):
-        registry = build_agent_registry(
-            search_fn=_fake_search_fn, fetch_fn=_fake_fetch_fn
-        )
+        registry = _registry()
         for name in ("artifact_create", "artifact_update", "artifacts_list"):
             self.assertNotIn(name, registry.names())
 
 
 class UnknownToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_tool_lists_available(self):
-        registry = build_agent_registry(
-            search_fn=_fake_search_fn,
-            fetch_fn=_fake_fetch_fn,
-            artifact_store=FakeArtifactStore(),
-        )
+        registry = _registry(artifact_store=FakeArtifactStore())
         result = await registry.execute("nope", "{}")
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "unknown_tool")
         self.assertIn("available", result.error)
         self.assertIn("artifact_create", result.error)
-        self.assertIn("web_search", result.error)
+        self.assertIn("web_research", result.error)
 
 
 if __name__ == "__main__":

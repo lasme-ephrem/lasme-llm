@@ -12,10 +12,10 @@
         "use strict";
 
         const states = new WeakMap();
-        const MIN_FRAME_MS = 34;
+        const MIN_FRAME_MS = 16;
         const MIN_CHARS_PER_FRAME = 6;
-        const MAX_CHARS_PER_FRAME = 96;
-        const TARGET_CATCH_UP_FRAMES = 22;
+        const MAX_CHARS_PER_FRAME = 280;
+        const TARGET_CATCH_UP_FRAMES = 10;
 
         function nextVisibleLength(currentLength, targetLength) {
             const remaining = Math.max(0, targetLength - currentLength);

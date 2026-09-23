@@ -12,13 +12,14 @@ vérifiables. L'inférence tourne intégralement en local via llama.cpp
 ## Pourquoi ce projet
 
 - **Local et souverain** : modèle, conversations, fichiers et index
-  documentaire restent sur votre disque ; la recherche web est optionnelle —
-  sans clé API, la chaîne gratuite (DuckDuckGo, GDELT, OpenAlex, Wikimedia)
-  fonctionne déjà.
+  documentaire restent sur votre disque. La recherche web est optionnelle
+  et passe par des serveurs MCP (Exa, Brave, Tavily). La fraîcheur sport,
+  météo, actu tech et Wikipédia vient d'un serveur MCP local.
 - **Agentique** : pas de « mode agent » séparé — le chat est l'agent, chaque
   message traverse une boucle d'orchestrateur déterministe.
-- **Rapide** : speculative decoding MTP et router multi-profils llama.cpp —
-  129 à 214 tok/s mesurés selon le profil.
+- **Rapide** : speculative decoding MTP, router multi-profils llama.cpp
+  (129 à 214 tok/s mesurés), et un affichage qui ne retient pas le texte
+  déjà produit.
 
 ## Fonctionnalités
 
@@ -26,10 +27,10 @@ vérifiables. L'inférence tourne intégralement en local via llama.cpp
 d'outils → réponse, en 6 tours maximum ; budget de tokens par appel modèle
 calé sur l'effort choisi, doublé une fois — plafonné à 12 288 — si la
 réponse est tronquée ; un appel d'outil identique répété 3 fois est refusé ;
-après un `web_search`, lire au moins une page est obligatoire — si le modèle
-répond depuis les extraits, l'orchestrateur récupère lui-même les URLs
-pertinentes, et répondre de mémoire alors que la demande exige une recherche
-est retoqué une fois.
+après un `web_research`, lire au moins une page (`web_read`) est obligatoire —
+si le modèle répond depuis les extraits, l'orchestrateur récupère lui-même
+les URLs pertinentes, et répondre de mémoire alors que la demande exige une
+recherche est retoqué une fois.
 
 **Effort de raisonnement** : sélecteur standard **Low / Medium / High**
 (échelle `reasoning_effort`, passée telle quelle au modèle) sous forme de
@@ -37,23 +38,19 @@ slider segmenté — navigation clavier aux flèches, **défaut Medium** au
 lancement. Budgets de réponse : Low 4 096 tokens, Medium 6 144, High le
 budget complet du profil (8 192 sur le 12B).
 
-**Recherche web agentique** :
+**Recherche web** :
 
-- **Monid (tinyfish) en source prioritaire** (`MONID_API_KEY`) : gratuit,
-  sync/polling, cache d'endpoints 24 h, garde-fou `MONID_MAX_PRICE_USD` ;
-- **recherche croisée** `search_links_cross` : tinyfish + un moteur
-  secondaire abordable (context.dev ≈ 0,0009 $ la recherche, sinon octen,
-  exa) lancés **en parallèle**, fusion dédupliquée par URL normalisée ;
-- sans clé Monid, chaîne locale gratuite : GDELT, OpenAlex, Wikimedia, puis
-  Brave, Tavily et DuckDuckGo en repli automatique ;
-- paramètres riches passés au moteur : `recency` (hour/day/week/month/year),
-  `domain_type=news`, `include_domains` officiels, `purpose` ;
+- MCP **Exa**, **Brave** et **Tavily** combinés ; sans clé, le serveur
+  correspondant ne démarre pas ;
+- fraîcheur sport, météo, actu tech et Wikipédia via le serveur MCP local ;
+- autres MCP selon le modèle (e2b minimal, e4b intermédiaire, 12b complet) :
+  Context7, GitHub, Git, filesystem sandbox, SQLite, graphiques AntV,
+  fuseaux horaires ;
+- l'agent appelle `web_research`, puis lit les pages avec `web_read` ;
+  les citations d'URLs jamais consultées sont retirées ;
 - portail d'actualité : les questions sensibles au temps (superlatifs
-  temporels, données vivantes, années ≥ 2024) forcent la recherche web —
-  la page lue prime sur la mémoire d'entraînement ;
-- aucun fournisseur synthétique (Sonar/Perplexity) n'est appelé par l'agent :
-  le modèle reçoit des liens bruts numérotés et les lit lui-même via
-  `fetch_pages` ; les citations d'URLs jamais consultées sont retirées.
+  temporels, données vivantes, années ≥ 2024) forcent la recherche —
+  la page lue prime sur la mémoire d'entraînement.
 
 **Interface** :
 
@@ -73,8 +70,11 @@ budget complet du profil (8 192 sur le 12B).
 - **titres de conversations générés par le modèle** : produits en parallèle
   du premier flux, 3-6 mots dans la langue de l'utilisateur, première lettre
   majuscule, apostrophes françaises préservées (budget 512 + retry) ;
-- **panneau de Réflexion** : raisonnement streamé dans un panneau dédié,
-  replié à la fin du calcul et ré-ouvrable au clic, isolé de la réponse ;
+- **réflexion** : une ligne « Réflexion… », puis « A réfléchi pendant N s ».
+  Le texte s'ouvre au clic, sans cadre. La réponse n'apparaît qu'une fois
+  les outils et la réflexion terminés ;
+- **outils** : un seul bloc, une ligne par appel, icônes dans le vert du
+  thème ;
 - **rendu mathématique complet** : KaTeX avec `$...$`, `$$...$$`, `\(...\)`
   et `\[...\]`, matrices `pmatrix` incluses — macros passées en copie
   mutable (l'objet gelé faisait échouer le rendu) et boucle auto-render
@@ -82,11 +82,10 @@ budget complet du profil (8 192 sur le 12B).
 - **statistiques honnêtes** : tok/s = décodage réellement mesuré par tour
   de modèle (hors outils), avec TTFT et durée mur.
 
-**Outils de l'agent** : 13 outils à schémas JSON stricts et sortie bornée —
-`web_search`, `fetch_pages`, `python_run` (pool Docker chaud), `calculate`,
-`analyze_image` (vision Gemma 4 native), `artifact_create`/`artifact_update`/
-`artifacts_list`, `rag_search`, `files_list`, `files_read_text`,
-`current_time`, `echo`. **Mémoire et projets** : conversations persistées en
+**Outils natifs** : `calculate`, `current_time`, `python_run` (pool Docker
+chaud), RAG, fichiers projet, artefacts, `analyze_image` (vision Gemma 4).
+La recherche est `web_research` / `web_read` (MCP). Les autres MCP suivent
+le modèle, comme ci-dessus. **Mémoire et projets** : conversations persistées en
 SQLite avec compaction du contexte ; projets isolant instructions, fichiers,
 artefacts et mémoire ; RAG sur documents (PDF, Office, Markdown, images)
 avec classement hybride lexical + vectoriel local et citations fichier/page.
@@ -106,9 +105,8 @@ FastAPI — chat/server/main.py
      │     la demande, MTP, KV quantifié, client OpenAI-compatible
      ├─► Outils plateforme — core/runner/ (Python Docker), core/rag/,
      │     core/files/, core/artifacts/, core/memory/
-     └─► Recherche web — core/tools/ : Monid search_links_cross
-           (tinyfish + moteur secondaire en parallèle) → GDELT · OpenAlex ·
-           Wikimedia → Brave → Tavily → DuckDuckGo (repli sans clé)
+     └─► Recherche — MCP Exa + Brave + Tavily ; fraîcheur locale
+           (sport, météo, actu tech, Wikipédia) ; autres MCP selon le modèle
 ```
 
 ## Prérequis
@@ -117,8 +115,12 @@ FastAPI — chat/server/main.py
 - **llama.cpp compilé avec CUDA** : le superviseur cherche `llama-server.exe`
   dans `~/llama.cpp/build/bin/Release/` puis le `PATH` (`LLAMA_SERVER_PATH`)
 - **Docker Desktop** (optionnel) : uniquement pour le runner Python isolé
-- **Clés API optionnelles** : Monid, Brave, Tavily, OpenAlex — sans clé, la
-  recherche web repose sur les fournisseurs gratuits
+- **Node.js** (`npx`) : Exa, Brave, Tavily, Context7, GitHub, fichiers
+  sandbox et graphiques. **uv** (`uvx`) : arXiv, lecture de pages de
+  repli, Git, SQLite et fuseaux. La fraîcheur locale (sport, météo, actu
+  tech, Wikipédia) est un serveur Python du dépôt, sans clé.
+- **Clés API optionnelles** : Exa, Brave, Tavily ; Context7 et GitHub si
+  ces MCP sont utilisés. Sans clé, le moteur correspondant ne démarre pas.
 
 ## Installation
 
@@ -139,7 +141,9 @@ fois (`scripts/start_local.ps1` le fait automatiquement) :
 
 ## Configuration
 
-Toutes les variables se lisent dans `core/config.py` (et `.env.example`) :
+`core/config.py` charge `.env` au démarrage. Le catalogue MCP lit ensuite
+les clés dans l'environnement, sans les journaliser. Le modèle des variables
+est `.env.example` ; la copie locale, avec les vraies clés, est `.env`.
 
 ```text
 # Runtime llama.cpp
@@ -153,14 +157,17 @@ FAST_MODEL=gemma-4-e4b
 REASONING_MODEL=gemma-4-12b
 CODING_MODEL=gemma-4-12b
 VISION_MODEL=gemma-4-12b
-# Recherche web (toutes optionnelles)
-MONID_API_KEY=                # source prioritaire (tinyfish via api.monid.ai)
-MONID_MAX_PRICE_USD=0.01      # refus des endpoints Monid au-delà de ce prix
-BRAVE_SEARCH_API_KEY=
+# Recherche web MCP (toutes optionnelles)
+EXA_API_KEY=
+BRAVE_SEARCH_API_KEY=         # Brave MCP
 TAVILY_API_KEY=
-OPENALEX_API_KEY=             # clé gratuite (openalex.org)
-SEARCH_SPECIALISTS_ENABLED=true
-PERPLEXITY_API_KEY=           # ignoré par l'agent (fournisseurs de liens only)
+CONTEXT7_API_KEY=             # optionnel
+GITHUB_PERSONAL_ACCESS_TOKEN= # optionnel ; GITHUB_TOKEN accepté en secours
+LASME_MCP_ENABLED=            # vide = activé ; 0/false/off/no coupe tout
+LASME_MCP_DISABLED=           # ids à omettre, séparés par des virgules
+LASME_MCP_FS_ROOT=            # sandbox filesystem, pas la racine du dépôt
+LASME_MCP_SQLITE_PATH=
+LASME_MCP_GIT_REPO=
 # Sécurité / accès distant
 LASME_ACCESS_TOKEN=           # exigé pour toute API passant par un proxy
 LASME_ALLOW_REMOTE_CODING=false
@@ -248,12 +255,6 @@ node --test tests\js\math-renderer.test.cjs tests\js\progressive-renderer.test.c
   `LASME_ACCESS_TOKEN`.
 
 Détails : [docs/SECURITY.md](docs/SECURITY.md).
-
-## Roadmap
-
-- **Intégration MCP (Model Context Protocol)** — en cours sur la branche
-  `feat/mcp-integration` : brancher des serveurs MCP d'outils externes sur
-  le `ToolRegistry` existant, au-delà des 13 outils natifs.
 
 ## Licence
 

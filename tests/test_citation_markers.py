@@ -3,17 +3,18 @@
 Couvre les trois pièces du contrat « le modèle cite par [n], le frontend
 affiche web_results[n-1] » :
 1. numérotation CUMULATIVE de _format_search_results sur plusieurs
-   appels web_search d'un même message (compteur SearchResultNumbering) ;
+   appels web_research d'un même message (compteur SearchResultNumbering) ;
 2. positionnement par numéro dans extract_agent_sources (doublon d'URL
    gardé à la plus petite position) ;
 3. nettoyage du texte final par sanitize_citation_markers (marqueurs
    valides conservés, hors plage retirés, section « Sources » finale
    supprimée, blocs de code intacts).
 
-Zéro réseau : search_fn mocké, outputs d'outils figés.
+Zéro réseau : client MCP scripté, outputs d'outils figés.
 """
 
 import asyncio
+import json
 import unittest
 
 from chat.server.main import (
@@ -25,10 +26,15 @@ from chat.server.main import (
 from core.agent.tools_web import (
     SearchResultNumbering,
     _format_search_results,
-    _run_web_search,
     register_web_tools,
 )
 from core.agent.tools import ToolRegistry
+from core.mcp.types import (
+    SERVER_BRAVE,
+    TOOL_BRAVE_WEB,
+    McpCallResult,
+    ScriptedMcpClient,
+)
 
 
 def _result(title: str, url: str, snippet: str = "Extrait.") -> dict:
@@ -40,7 +46,7 @@ def search_event(output: str) -> dict:
         "type": "tool_result",
         "ts": 1.0,
         "id": "c1",
-        "name": "web_search",
+        "name": "web_research",
         "ok": True,
         "output": output,
     }
@@ -57,13 +63,49 @@ def fetch_event(output: str) -> dict:
     }
 
 
-def fake_search(payloads: list):
-    """search_fn mocké : un payload par appel, dans l'ordre."""
+def _engine_payload(hits: list) -> str:
+    rows = [
+        {
+            "title": hit["title"],
+            "url": hit["url"],
+            "snippet": hit["snippet"],
+            "description": hit["snippet"],
+        }
+        for hit in hits
+    ]
+    return json.dumps({"results": rows}, ensure_ascii=False)
 
-    def _search(query, max_results, *args, **kwargs):
-        return dict(payloads.pop(0)) if payloads else {"results": []}
 
-    return _search
+class _QueryClient(ScriptedMcpClient):
+    """Texte selon la requête, pour brave_web_search uniquement."""
+
+    def __init__(self, by_query: dict):
+        super().__init__(
+            {(SERVER_BRAVE, TOOL_BRAVE_WEB): ""},
+            available_servers=(SERVER_BRAVE,),
+        )
+        self._by_query = dict(by_query)
+
+    async def call(self, server_id, tool, arguments, *, timeout_s=45.0):
+        del timeout_s
+        self.calls.append((server_id, tool, dict(arguments)))
+        if server_id == SERVER_BRAVE and tool == TOOL_BRAVE_WEB:
+            blob = " ".join(
+                str(value)
+                for value in arguments.values()
+                if isinstance(value, str)
+            ).casefold()
+            for key, text in self._by_query.items():
+                if key.casefold() in blob:
+                    return McpCallResult(
+                        ok=True, text=text, server=server_id, tool=tool
+                    )
+        return McpCallResult(
+            ok=False,
+            server=server_id,
+            tool=tool,
+            error="non scripté",
+        )
 
 
 class CumulativeNumberingTests(unittest.TestCase):
@@ -111,31 +153,27 @@ class CumulativeNumberingTests(unittest.TestCase):
         )
         self.assertIn("[1] Seul", after)
 
-    def test_run_web_search_cumulative_via_mocked_search_fn(self):
-        search_fn = fake_search(
-            [
-                {
-                    "results": [
+    def test_web_research_cumulative_via_scripted_client(self):
+        client = _QueryClient(
+            {
+                "alpha-query": _engine_payload(
+                    [
                         _result("Alpha", "https://a.example.com/a"),
                         _result("Beta", "https://b.example.com/b"),
                     ]
-                },
-                {
-                    "results": [
-                        _result("Gamma", "https://c.example.com/c"),
-                    ]
-                },
-            ]
+                ),
+                "beta-query": _engine_payload(
+                    [_result("Gamma", "https://c.example.com/c")]
+                ),
+            }
         )
-        numbering = SearchResultNumbering()
+        registry = ToolRegistry()
+        register_web_tools(registry, mcp_client=client)
 
         async def scenario():
-            first = await _run_web_search(
-                search_fn, {"query": "première", "max_results": 2}, numbering
-            )
-            second = await _run_web_search(
-                search_fn, {"query": "seconde", "max_results": 1}, numbering
-            )
+            tool = registry.get("web_research")
+            first = await tool.handler({"query": "alpha-query"})
+            second = await tool.handler({"query": "beta-query"})
             return first, second
 
         first, second = asyncio.run(scenario())
@@ -145,30 +183,30 @@ class CumulativeNumberingTests(unittest.TestCase):
 
     def test_register_web_tools_uses_per_registry_counter(self):
         registry = ToolRegistry()
-        search_fn = fake_search(
-            [
-                {"results": [_result("Un", "https://a.example.com/1")]},
-                {"results": [_result("Deux", "https://b.example.com/2")]},
-            ]
+        client = _QueryClient(
+            {
+                "alpha-query": _engine_payload(
+                    [_result("Un", "https://a.example.com/1")]
+                ),
+                "beta-query": _engine_payload(
+                    [_result("Deux", "https://b.example.com/2")]
+                ),
+            }
         )
-        register_web_tools(
-            registry, search_fn=search_fn, fetch_fn=lambda url: ""
-        )
+        register_web_tools(registry, mcp_client=client)
         # Le compteur vit DANS le registre : une instance par enregistrement
         # (donc par requête de chat), pas de compteur module-level.
         numbering = getattr(registry, "web_result_numbering", None)
         self.assertIsInstance(numbering, SearchResultNumbering)
-        tool = registry.get("web_search")
-        first = asyncio.run(tool.handler({"query": "a"}))
-        second = asyncio.run(tool.handler({"query": "b"}))
+        tool = registry.get("web_research")
+        first = asyncio.run(tool.handler({"query": "alpha-query"}))
+        second = asyncio.run(tool.handler({"query": "beta-query"}))
         self.assertIn("[1] Un", first)
         self.assertIn("[2] Deux", second)
         # Chaque registre fraîchement construit repart de zéro : aucune
         # fuite de numérotation d'un message assistant à l'autre.
         other = ToolRegistry()
-        register_web_tools(
-            other, search_fn=search_fn, fetch_fn=lambda url: ""
-        )
+        register_web_tools(other, mcp_client=ScriptedMcpClient())
         self.assertEqual(other.web_result_numbering.last, 0)
 
     def test_seed_aligns_with_pre_search_sources(self):

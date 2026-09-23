@@ -947,20 +947,37 @@ body.sidebar-resizing {
     width: 100%;
 }
 
-/* Agent tool cards rendered in the conversation thread */
+/* Un seul rail d'outils, pas une pile de cartes identiques. */
 .agent-tools-group {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
-    margin: 0 0 0.6rem 0;
+    gap: 0;
+    margin: 0 0 0.85rem 0;
+    padding: 0.2rem 0.35rem 0.3rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-card, #fff));
+}
+
+.agent-tools-label {
+    padding: 0.4rem 0.55rem 0.15rem;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
 }
 
 .agent-tool-card {
-    border: 1px solid var(--border, #e5e5e5);
+    border: none;
     border-radius: 10px;
-    background: var(--bg-card, #fff);
+    background: transparent;
     font-size: 12.5px;
-    padding: 0.35rem 0.6rem;
+    padding: 0.2rem 0.4rem 0.28rem;
+}
+
+.agent-tool-card + .agent-tool-card {
+    border-top: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .agent-tool-card summary {
@@ -971,7 +988,9 @@ body.sidebar-resizing {
     list-style: none;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.4rem;
+    row-gap: 0.25rem;
 }
 
 .agent-tool-card summary::before {
@@ -985,9 +1004,8 @@ body.sidebar-resizing {
     transform: rotate(90deg);
 }
 
-.agent-tool-card.ok summary { color: var(--accent, #10a37f); }
+.agent-tool-card.ok summary { color: var(--text, inherit); }
 .agent-tool-card.ko {
-    border-color: rgba(248, 113, 113, 0.5);
     background: rgba(248, 113, 113, 0.08);
 }
 .agent-tool-card.ko summary { color: #f87171; }
@@ -1011,11 +1029,10 @@ body.sidebar-resizing {
 
 /* Live agent tool card: pending state while the tool runs */
 .agent-tool-card.pending {
-    border-color: rgba(124, 92, 231, 0.5);
-    background: rgba(124, 92, 231, 0.1);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
-.agent-tool-card.pending summary { color: var(--accent, #10a37f); }
+.agent-tool-card.pending summary { color: var(--accent); }
 
 .agent-tool-card .agent-tool-meta {
     opacity: 0.75;
@@ -1032,18 +1049,128 @@ body.sidebar-resizing {
     animation: activitySpin 0.8s linear infinite;
 }
 
-/* Per-tool icon shown at the left of the card summary (stroke: currentColor) */
+/* Pastille d'icône dans le vert du thème. */
 .agent-tool-icon {
     flex: none;
     display: inline-flex;
-    width: 15px;
-    height: 15px;
-    opacity: 0.9;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .agent-tool-icon svg {
-    width: 100%;
-    height: 100%;
+    display: block;
+    width: 16px;
+    height: 16px;
+}
+
+.agent-tool-card[data-category] .agent-tool-icon,
+.agent-tool-icon[data-category] {
+    color: var(--accent);
+}
+
+.agent-tool-heading {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.4rem;
+    row-gap: 0.05rem;
+    min-width: 0;
+}
+
+.agent-tool-id {
+    color: var(--text-secondary, #b4b4b4);
+    font-family: var(--font-code);
+    font-size: 10.5px;
+    font-weight: 500;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.agent-tool-chips {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    flex: 0 1 auto;
+    margin: 0;
+}
+
+.tool-engine,
+.tool-intent {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.1rem 0.48rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.35;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+}
+
+.tool-engine,
+.tool-intent {
+    color: var(--accent-hover);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+    white-space: nowrap;
+}
+
+[data-theme="dark"] .tool-engine,
+[data-theme="dark"] .tool-intent {
+    color: #d1fae5;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+img.agent-tool-chart {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    max-height: 220px;
+    height: auto;
+    margin-top: 0.45rem;
+    border-radius: 8px;
+    object-fit: contain;
+    cursor: default;
+}
+
+/* Le cap global des images assistant (320px, cover) ne doit pas rogner le graphique. */
+.message.assistant .bubble .agent-tool-card img.agent-tool-chart {
+    max-width: 100% !important;
+    max-height: 220px !important;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 8px;
+    cursor: default;
+}
+
+@media (max-width: 768px) {
+    .agent-tool-card summary {
+        flex-wrap: wrap;
+        align-items: flex-start;
+        row-gap: 0.2rem;
+    }
+
+    .agent-tool-card summary::before,
+    .agent-tool-icon,
+    .agent-tool-card summary .tool-spinner {
+        margin-top: 0.05rem;
+    }
+
+    .agent-tool-heading {
+        flex: 0 1 auto;
+        flex-direction: column;
+        align-items: flex-start;
+        max-width: 100%;
+        min-width: 0;
+    }
 }
 
 /* Card animations: slide-in on creation, shimmer while pending,
@@ -1059,9 +1186,8 @@ body.sidebar-resizing {
 }
 
 .agent-tool-card.ok {
-    border-color: rgba(52, 211, 153, 0.4);
-    background: rgba(52, 211, 153, 0.06);
-    transition: border-color 0.4s ease, background 0.4s ease;
+    background: transparent;
+    transition: background 0.4s ease;
 }
 
 .agent-tool-card.pending {
@@ -1114,145 +1240,120 @@ body.sidebar-resizing {
     80% { transform: translateX(2px); }
 }
 
-/* Streaming thinking panel ("Réflexion") — app theme.
-   Modes: stream = 140px window while reasoning, closed = header only,
-   full = 340px scrollable window (header click toggles closed/full). */
+/* Réflexion : une ligne discrète, le texte en dessous, sans cadre. */
 .thinking-panel {
-    margin: 0 0 0.65rem 0;
-    border: 1px solid var(--border, #e5e5e5);
-    border-radius: 14px;
-    background: var(--bg-card, #fff);
+    margin: 0.1rem 0 0.7rem;
+    border: none;
+    background: transparent;
+    box-shadow: none;
     overflow: hidden;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-    transition: border-color 0.3s ease;
-}
-
-.thinking-panel.streaming {
-    border-color: color-mix(in srgb, var(--accent, #10a37f) 45%, var(--border, #e5e5e5));
 }
 
 .thinking-header {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    width: 100%;
-    padding: 0.5rem 0.85rem;
+    gap: 0.28rem;
+    width: auto;
+    max-width: 100%;
+    padding: 0.1rem 0.15rem;
     border: none;
+    border-radius: 8px;
     background: transparent;
     cursor: pointer;
     font: inherit;
-    color: var(--text-secondary, #676767);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.2px;
+    color: var(--text-secondary, #6b6b6b);
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: 0;
     user-select: none;
     text-align: left;
 }
 
+.thinking-header:hover {
+    color: var(--text-primary, #0d0d0d);
+}
+
 .thinking-header:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent, #10a37f) 55%, transparent);
-    outline-offset: -2px;
-    border-radius: 14px;
-}
-
-.thinking-icon {
-    display: inline-flex;
-    color: var(--accent, #10a37f);
-    flex: none;
-}
-
-.thinking-icon svg {
-    width: 15px;
-    height: 15px;
-}
-
-.thinking-panel.streaming .thinking-icon svg {
-    animation: thinkingSparkle 2.4s ease-in-out infinite;
-}
-
-.thinking-label {
-    transition: opacity 0.18s ease;
-}
-
-.thinking-label.phrase-fade {
-    opacity: 0;
-}
-
-.thinking-duration {
-    color: color-mix(in srgb, var(--text-secondary, #676767) 75%, transparent);
-    font-weight: 500;
+    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 2px;
 }
 
 .thinking-chevron {
-    margin-left: auto;
     display: inline-flex;
-    color: color-mix(in srgb, var(--text-secondary, #676767) 60%, transparent);
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    flex: none;
+    color: currentColor;
+    opacity: 0.7;
+    transition: transform 0.2s ease;
 }
 
 .thinking-chevron svg {
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
 }
 
-.thinking-panel[data-mode="full"] .thinking-chevron {
-    transform: rotate(180deg);
+.thinking-panel[data-mode="full"] .thinking-chevron,
+.thinking-panel[data-mode="stream"] .thinking-chevron {
+    transform: rotate(90deg);
 }
 
-/* The reasoning window: visible modes scroll inside, closed shrinks to 0.
-   Background is a faint accent tint over the card color — never dark. */
-.thinking-window {
-    height: 140px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    border-top: 1px solid color-mix(in srgb, var(--border, #e5e5e5) 70%, transparent);
+.thinking-label,
+.thinking-duration {
+    font-weight: 500;
+}
+
+.thinking-panel.streaming .thinking-label {
     background: linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--accent, #10a37f) 3%, transparent),
-        color-mix(in srgb, var(--accent, #10a37f) 1.5%, transparent)
+        90deg,
+        color-mix(in srgb, var(--text-secondary, #6b6b6b) 55%, transparent) 0%,
+        var(--text-primary, #0d0d0d) 45%,
+        color-mix(in srgb, var(--text-secondary, #6b6b6b) 55%, transparent) 90%
     );
-    transition:
-        height 0.42s cubic-bezier(0.4, 0, 0.2, 1),
-        border-top-color 0.3s ease;
-    scrollbar-width: thin;
-    scrollbar-color: var(--scrollbar-thumb, rgba(16, 163, 127, 0.42)) transparent;
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: thinkingShimmer 1.6s linear infinite;
 }
 
-.thinking-panel[data-mode="stream"] .thinking-window { height: 140px; }
-/* Fully collapsed: header only, no residual rule or line under it. */
-.thinking-panel[data-mode="closed"] .thinking-window {
-    height: 0;
+.thinking-window {
+    height: auto;
+    max-height: 0;
     overflow: hidden;
-    border-top-color: transparent;
+    border: none;
+    background: transparent;
+    transition: max-height 0.25s ease;
+    scrollbar-width: thin;
 }
-.thinking-panel[data-mode="full"] .thinking-window { height: 340px; }
+
+.thinking-panel[data-mode="stream"] .thinking-window,
+.thinking-panel[data-mode="full"] .thinking-window {
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.thinking-panel[data-mode="closed"] .thinking-window {
+    max-height: 0;
+    overflow: hidden;
+}
 
 .thinking-text {
     margin: 0;
-    padding: 0.7rem 0.95rem 0.8rem;
+    padding: 0.35rem 0 0.15rem 1.25rem;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: var(--font-main);
-    font-size: 12px;
-    line-height: 1.6;
-    color: color-mix(in srgb, var(--text-primary, #0d0d0d) 72%, transparent);
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-secondary, #6b6b6b);
 }
 
-/* Le texte de raisonnement est un <pre> : sans cette surcharge, la règle
-   ".bubble pre { background: var(--code-bg) !important }" le peint en sombre. */
 .bubble .thinking-panel .thinking-text {
     background: transparent !important;
-    color: color-mix(in srgb, var(--text-primary, #0d0d0d) 72%, transparent) !important;
-    padding: 0.7rem 0.95rem 0.8rem !important;
+    color: var(--text-secondary, #6b6b6b) !important;
+    padding: 0.35rem 0 0.15rem 1.25rem !important;
     overflow-x: hidden !important;
     font-family: var(--font-main) !important;
-    font-size: 12px !important;
-}
-
-/* Fade-out gradient at the bottom while streaming and scrollable */
-.thinking-panel.streaming .thinking-text.is-scrollable {
-    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 78%, transparent 100%);
-    mask-image: linear-gradient(180deg, #000 0%, #000 78%, transparent 100%);
+    font-size: 13px !important;
 }
 
 .thinking-window::-webkit-scrollbar {
@@ -1260,13 +1361,13 @@ body.sidebar-resizing {
 }
 
 .thinking-window::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb, rgba(16, 163, 127, 0.42));
+    background: var(--scrollbar-thumb, rgba(0, 0, 0, 0.18));
     border-radius: 999px;
 }
 
-@keyframes thinkingSparkle {
-    0%, 100% { transform: scale(1) rotate(0deg); opacity: 0.85; }
-    50% { transform: scale(1.18) rotate(18deg); opacity: 1; }
+@keyframes thinkingShimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
 }
 
 
@@ -1280,7 +1381,8 @@ body.sidebar-resizing {
         animation: none !important;
     }
 
-    .thinking-pulse {
+    .thinking-pulse,
+    .thinking-panel.streaming .thinking-label {
         animation: none !important;
     }
 }

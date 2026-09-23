@@ -294,17 +294,17 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.turns, 4)
 
     async def test_fetch_required_after_search_blocks_snippet_answers(self):
-        # W-strict : web_search puis réponse directe = refus du harnais ;
+        # W-strict : web_research puis réponse directe = refus du harnais ;
         # le modèle est renvoyé lire une page avant de répondre.
         client = ScriptedClient(
             [
                 [
-                    tool_call_chunk(0, name="web_search", arguments='{"query": "vainqueur coupe du monde 2026"}'),
+                    tool_call_chunk(0, name="web_research", arguments='{"query": "vainqueur coupe du monde 2026"}'),
                     final_chunk(done_reason="tool_calls"),
                 ],
                 [content_chunk("L'Espagne a gagné (extrait)."), final_chunk()],
                 [
-                    tool_call_chunk(0, name="fetch_pages", arguments='{"urls": ["https://exemple.fr/a"]}'),
+                    tool_call_chunk(0, name="web_read", arguments='{"urls": ["https://exemple.fr/a"]}'),
                     final_chunk(done_reason="tool_calls"),
                 ],
                 [content_chunk("L'Espagne a gagné, confirmé par la page lue."), final_chunk()],
@@ -313,7 +313,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         registry = build_default_registry()
         registry.register(
             ToolDefinition(
-                name="web_search",
+                name="web_research",
                 description="recherche",
                 parameters={
                     "type": "object",

@@ -2,8 +2,9 @@
 
 Couvre extract_agent_sources / merge_dedup_sources / normalize_source_url
 et la persistance compact_web_source_metadata du résultat fusionné.
-Aucun réseau : les outputs d'outils sont des échantillons figés observés
-en production (formats de _format_search_results et _run_fetch_pages).
+Aucun réseau : les outputs d'outils sont des échantillons figés.
+Les événements utilisent web_research / web_read ; le parseur accepte
+aussi les anciens noms web_search / fetch_pages.
 """
 
 import unittest
@@ -15,23 +16,23 @@ from chat.server.main import (
     normalize_source_url,
 )
 
-# Format réel d'un output web_search (liens numérotés de
-# _format_search_results, ligne d'avertissement entre les entrées).
+# Format réel d'un output web_research (liens numérotés, ligne
+# d'avertissement entre les entrées).
 SEARCH_OUTPUT = """[1] Releases · ggml-org/llama.cpp · GitHub
     https://github.com/ggml-org/llama.cpp/releases
     Téléchargez les dernières versions de llama.cpp…
-⚠ Extraits insuffisants pour répondre : appelle fetch_pages sur les URLs pertinentes avant de répondre.
+⚠ Extraits insuffisants pour répondre : appelle web_read sur les URLs pertinentes avant de répondre.
 [2] Home · ggml-org/llama.cpp
     https://github.com/ggml-org/llama.cpp/
     Inférence de modèles LLaMA en C/C++ pur.
-⚠ Extraits insuffisants pour répondre : appelle fetch_pages sur les URLs pertinentes avant de répondre.
+⚠ Extraits insuffisants pour répondre : appelle web_read sur les URLs pertinentes avant de répondre.
 [3] Transformers : documentation
     https://hf.co/docs
     La bibliothèque Transformers, documentation officielle.
 """
 
-# Format réel d'un output fetch_pages (« ## url (n caractères) ») : la
-# première URL enrichit l'entrée web_search existante, la deuxième est une
+# Format réel d'un output web_read (« ## url (n caractères) ») : la
+# première URL enrichit l'entrée web_research existante, la deuxième est une
 # page lue sans recherche préalable, la troisième a échoué (non lue).
 FETCH_OUTPUT = """## https://github.com/ggml-org/llama.cpp/releases (11746 caractères)
 ## Navigation Menu
@@ -51,7 +52,7 @@ def search_event(output: str) -> dict:
         "type": "tool_result",
         "ts": 1.0,
         "id": "c1",
-        "name": "web_search",
+        "name": "web_research",
         "ok": True,
         "output": output,
     }
@@ -62,7 +63,7 @@ def fetch_event(output: str) -> dict:
         "type": "tool_result",
         "ts": 2.0,
         "id": "c2",
-        "name": "fetch_pages",
+        "name": "web_read",
         "ok": True,
         "output": output,
     }
@@ -101,7 +102,7 @@ class ExtractAgentSourcesTests(unittest.TestCase):
             [search_event(SEARCH_OUTPUT), fetch_event(FETCH_OUTPUT)]
         )
         urls = [source["url"] for source in sources]
-        # Pas de doublon : l'URL fetchée déjà présente dans web_search ne
+        # Pas de doublon : l'URL lue déjà présente dans web_research ne
         # crée pas une seconde entrée.
         self.assertEqual(len(urls), len(set(urls)))
         self.assertEqual(
@@ -113,7 +114,7 @@ class ExtractAgentSourcesTests(unittest.TestCase):
             ],
         )
         github = sources[0]
-        # Le titre réel du web_search est conservé face au titre déduit
+        # Le titre réel du web_research est conservé face au titre déduit
         # de l'URL (« Releases »).
         self.assertEqual(github["title"], "Releases · ggml-org/llama.cpp · GitHub")
         # La page fetchée en plus reçoit son titre ; la section ERREUR
@@ -129,6 +130,33 @@ class ExtractAgentSourcesTests(unittest.TestCase):
         sources = extract_agent_sources([fetch_first, search_after])
         self.assertEqual(len(sources), 1)
         self.assertEqual(sources[0]["title"], "Transformers : documentation")
+
+    def test_legacy_tool_names_still_parse(self):
+        sources = extract_agent_sources(
+            [
+                {
+                    "type": "tool_result",
+                    "name": "web_search",
+                    "ok": True,
+                    "output": (
+                        "[1] Ancien\n    https://ancien.example/a\n    x\n"
+                    ),
+                },
+                {
+                    "type": "tool_result",
+                    "name": "fetch_pages",
+                    "ok": True,
+                    "output": (
+                        "## https://ancien.example/b (12 caractères)\n"
+                        "contenu lu\n"
+                    ),
+                },
+            ]
+        )
+        self.assertEqual(
+            [source["url"] for source in sources],
+            ["https://ancien.example/a", "https://ancien.example/b"],
+        )
 
     def test_ignores_other_events_and_empty_outputs(self):
         events = [
@@ -228,8 +256,8 @@ class CompactMergedSourcesTests(unittest.TestCase):
             },
         )
         self.assertEqual(rows[1]["engine"], "agent")
-        # hf.co/docs : vu par le web_search de l'agent, son vrai titre
-        # prime sur le titre déduit de l'URL par fetch_pages.
+        # hf.co/docs : vu par le web_research de l'agent, son vrai titre
+        # prime sur le titre déduit de l'URL par web_read.
         self.assertEqual(rows[3]["title"], "Transformers : documentation")
         for row in rows:
             self.assertEqual(
