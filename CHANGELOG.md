@@ -1,5 +1,36 @@
 # Changelog
 
+## Audit complet — corrections (2026-09-24)
+
+- **Streaming réel de la réponse** : les `content_delta` partent au fil de la
+  génération, au lieu d'être accumulés puis rejoués à la fin du run. Le texte
+  d'un tour suivi d'outils (narration) ou écarté par le harnais n'est plus
+  jeté : il est archivé dans le panneau de réflexion comme « préambule »
+  (`content_reset`). En fin de run, `content_replace` sert la version assainie
+  (citations `[n]` vérifiées, section « Sources » retirée) : le texte visible
+  est exactement celui qui est persisté. Le TTFT est mesuré au premier delta
+  réellement diffusé.
+- **Génération d'images** : `LASME_ENABLE_EXTERNAL_IMAGE_GENERATION` est
+  désormais **désactivée par défaut** — l'outil Pollinations envoie le prompt
+  à un service externe, contraire à la promesse « 100 % local ». Opt-in
+  explicite dans `.env`.
+- **Garde-fou numérique rétabli** : le contrôle `unsupported_grounded_numbers`
+  vivait dans un bloc mort (`buffer_grounded_output` était toujours faux) —
+  il s'applique maintenant réellement aux demandes à grounding strict avec
+  sources, avant publication de la réponse.
+- **Arrêt propre SQLite** : `PRAGMA wal_checkpoint(TRUNCATE)` à la fermeture
+  de l'application + `wal_autocheckpoint = 64` par connexion. Avertissement
+  `-wal`/`-shm` ajouté au `.gitignore`.
+- **CLI coding réparée** : le callback accepte les 3 arguments réellement
+  envoyés par `coding/agent.py` (un `TypeError` était garanti au premier
+  événement de `python -m coding.cli run`). Nouveaux tests
+  `tests/test_coding_agent.py` (callback, confinement fs, listes blanches
+  des sous-agents) et `tests/test_db_checkpoint.py`.
+- **Nettoyage** : `scripts/install_fast_models.ps1` supprimé (ère Ollama),
+  alias de routes `/api/coding/file-tree|file-content|save-file` retirés,
+  libellés « Ollama » fantômes remplacés (health `checks.llama`, description
+  du paquet, messages UI, aide de la CLI).
+
 ## MCP — recherche web (2026-09-23)
 
 La recherche web native (DuckDuckGo, Monid/tinyfish, GDELT, OpenAlex,

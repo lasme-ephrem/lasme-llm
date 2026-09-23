@@ -26,7 +26,7 @@ def create_meta_router(deps: MetaDeps) -> APIRouter:
     async def health_check():
         checks: dict = {
             "database": {"status": "ok", "required": True},
-            "ollama": {
+            "llama": {
                 "status": "unknown",
                 "models": [],
                 "required": True,
@@ -64,7 +64,7 @@ def create_meta_router(deps: MetaDeps) -> APIRouter:
                 for model in required_models
                 if model.removesuffix(":latest") not in normalized
             ]
-            checks["ollama"] = {
+            checks["llama"] = {
                 "status": "ok" if not missing_models else "error",
                 "models": model_names,
                 "required_models": required_models,
@@ -72,7 +72,7 @@ def create_meta_router(deps: MetaDeps) -> APIRouter:
                 "required": True,
             }
         except Exception as exc:
-            checks["ollama"] = {
+            checks["llama"] = {
                 "status": "error",
                 "error": type(exc).__name__,
                 "required": True,

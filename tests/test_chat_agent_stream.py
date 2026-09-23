@@ -55,6 +55,12 @@ FINAL_TURN = [
     },
 ]
 
+NARRATION_TURN = [
+    {"message": {"content": "Je vérifie le calcul "}},
+    {"message": {"content": "avant de répondre."}},
+    *TOOL_TURN,
+]
+
 
 class AgenticChatStreamTests(unittest.TestCase):
     def setUp(self):
@@ -165,6 +171,44 @@ class AgenticChatStreamTests(unittest.TestCase):
             # Les autres outils restent disponibles.
             self.assertIn("calculate", tool_names)
             self.assertIn("rag_search", tool_names)
+        finally:
+            self.db.delete_session(session_id)
+
+    def test_narration_before_tool_call_is_kept_as_preamble(self):
+        scripted = ScriptedChatClient([list(NARRATION_TURN), list(FINAL_TURN)])
+        session_id, events = self._run_chat(scripted)
+        try:
+            types = [event.get("type") for event in events]
+            self.assertIn("content_reset", types)
+            self.assertIn("content_replace", types)
+
+            # Streaming réel : la narration part AVANT l'appel d'outil.
+            self.assertLess(
+                types.index("content_delta"),
+                types.index("agent_tool_call"),
+            )
+            reset = next(e for e in events if e["type"] == "content_reset")
+            self.assertIn("avant de répondre", reset["text"])
+
+            # La narration est archivée, jamais collée à la réponse.
+            replace = next(e for e in events if e["type"] == "content_replace")
+            self.assertIn("42", replace["text"])
+            self.assertNotIn("avant de répondre", replace["text"])
+            messages = self.db.get_session_messages(session_id)
+            assistant = [m for m in messages if m["role"] == "assistant"][-1]
+            self.assertEqual(assistant["content"], replace["text"])
+            self.assertNotIn("avant de répondre", assistant["content"])
+        finally:
+            self.db.delete_session(session_id)
+
+    def test_content_replace_matches_persisted_message(self):
+        scripted = ScriptedChatClient([list(FINAL_TURN)])
+        session_id, events = self._run_chat(scripted)
+        try:
+            replace = next(e for e in events if e["type"] == "content_replace")
+            messages = self.db.get_session_messages(session_id)
+            assistant = [m for m in messages if m["role"] == "assistant"][-1]
+            self.assertEqual(replace["text"], assistant["content"])
         finally:
             self.db.delete_session(session_id)
 

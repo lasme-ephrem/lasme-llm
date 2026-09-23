@@ -175,7 +175,7 @@ LASME_ALLOW_DESTRUCTIVE_AGENT_TOOLS=false
 LASME_ENABLE_AGENT_TERMINAL=false
 LASME_WORKSPACE_ROOT=         # confinement des outils de fichiers
 LASME_MAX_UPLOAD_BYTES=26214400
-LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=true
+LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false # Pollinations (externe) : opt-in
 # Runner Python
 LASME_RUNNER_POOL=            # 0 = force un conteneur froid par tâche
 LASME_DOCKER_BINARY=          # si Docker Desktop est absent du PATH

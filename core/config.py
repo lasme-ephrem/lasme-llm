@@ -82,7 +82,7 @@ class Settings(BaseModel):
     )
     external_image_generation_enabled: bool = _env_bool(
         "LASME_ENABLE_EXTERNAL_IMAGE_GENERATION",
-        True,
+        False,
     )
     public_base_url: str = os.getenv("LASME_PUBLIC_BASE_URL", "").rstrip("/")
 

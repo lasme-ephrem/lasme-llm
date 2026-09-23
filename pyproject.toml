@@ -1,7 +1,7 @@
 [project]
 name = "lasme-llm"
 version = "1.0.0"
-description = "Local multimodal AI workspace powered by Ollama"
+description = "Local multimodal AI workspace powered by llama.cpp"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 

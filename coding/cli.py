@@ -9,7 +9,9 @@ from core.config import settings
 app = typer.Typer(help="LasmeLLMCoding - Autonomous Local Coding Agent")
 console = Console(force_terminal=True, soft_wrap=True)
 
-def agent_callback(event_type: str, payload: str):
+def agent_callback(event_type: str, payload: str, meta: dict = None):
+    # coding/agent.py appelle callback(type, payload, meta) : le callback de
+    # la CLI accepte les trois arguments (le 3e porte le contexte d'étape).
     try:
         if event_type == "status":
             console.print(f"[bold blue][INFO] {payload}[/bold blue]")
@@ -19,14 +21,14 @@ def agent_callback(event_type: str, payload: str):
             console.print(f"[bold yellow][TOOL] {payload}[/bold yellow]")
         elif event_type == "tool_result":
             console.print(Panel(payload, title="[dim]Tool Result[/dim]", border_style="dim"))
-    except Exception as e:
+    except Exception:
         print(f"[{event_type}] {payload}")
 
 
 @app.command()
 def run(
     prompt: str = typer.Argument(..., help="Task prompt for the coding agent"),
-    model: str = typer.Option(settings.coding_model, "--model", "-m", help="Ollama model to use")
+    model: str = typer.Option(settings.coding_model, "--model", "-m", help="Model profile to use (llama.cpp router)")
 ):
     """Run LasmeLLMCoding agent on a task prompt."""
     console.print(Panel(f"[bold magenta]LasmeLLMCoding Agent[/bold magenta]\nModel: [cyan]{model}[/cyan]\nTask: {prompt}", border_style="magenta"))
