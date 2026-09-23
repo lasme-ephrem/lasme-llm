@@ -50,17 +50,15 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(section["c"], 262_144)
         self.assertNotIn("load-on-startup", section)
 
-        resident = RUNTIME_PROFILES[FAST_MODEL].preset_section()
-        self.assertTrue(resident["load-on-startup"])
-        self.assertNotIn("cache-type-k", resident)
+        fast = RUNTIME_PROFILES[FAST_MODEL].preset_section()
+        # Aucun profil n'est plus préchargé : un E-modèle résident empêche
+        # le 12B (12,9 GiB) de charger sur 16 Go (crash du draft MTP).
+        self.assertNotIn("load-on-startup", fast)
+        self.assertNotIn("cache-type-k", fast)
 
-    def test_resident_profiles_follow_vram_budget(self):
-        big = resident_profiles(16_000)
-        self.assertEqual([p.id for p in big], [FAST_MODEL, MINIMAL_MODEL])
-        small = resident_profiles(8_000)
-        self.assertEqual([p.id for p in small], [MINIMAL_MODEL])
-        tiny = resident_profiles(4_000)
-        self.assertEqual([p.id for p in tiny], [MINIMAL_MODEL])
+    def test_no_profile_preloads_on_any_gpu(self):
+        for vram in (16_000, 8_000, 4_000, None):
+            self.assertEqual(resident_profiles(vram), [])
 
     def test_legacy_model_profile_keeps_chat_tuning_shape(self):
         profile = get_model_profile("gemma-4-chat")
