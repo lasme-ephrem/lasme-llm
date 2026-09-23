@@ -284,7 +284,8 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
                 setEffortLevel(EFFORT_LEVELS[index - 1]);
             }
         });
-        setEffortLevel("high");
+        // Défaut au lancement : Medium (standard mondial).
+        setEffortLevel("medium");
     }
 }
 
@@ -3393,7 +3394,10 @@ function renderRichContent(container, text, webResults) {
                     errorColor: "#6B7280",
                     strict: false,
                     trust: false,
-                    macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
+                    // Copie mutable OBLIGATOIRE : KaTeX ajoute des macros internes (\cr pour
+        // les \ des matrices) ; l'objet gelé de math-renderer ferait throw
+        // « Cannot add property » et avorterait tout le pass de rendu.
+                macros: { ...(window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {}) },
                     ignoredTags: mathIgnoredTags
                 });
                 if (container.querySelectorAll(".katex").length === before) break;

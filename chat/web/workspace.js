@@ -1142,7 +1142,10 @@ function renderCanvasDocumentPreview(source) {
                     errorColor: "#6B7280",
                     strict: false,
                     trust: false,
-                    macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
+                    // Copie mutable OBLIGATOIRE : KaTeX ajoute des macros internes (\cr pour
+        // les \ des matrices) ; l'objet gelé de math-renderer ferait throw
+        // « Cannot add property » et avorterait tout le pass de rendu.
+                macros: { ...(window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {}) },
                     ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
                 });
                 if (canvasPreview.querySelectorAll(".katex").length === before) break;
