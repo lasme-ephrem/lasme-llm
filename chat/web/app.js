@@ -3374,20 +3374,30 @@ function renderRichContent(container, text, webResults) {
     // ── STEP 8: KaTeX render on DOM ───────────────────────────────────────
     if (typeof renderMathInElement !== "undefined") {
         try {
-            renderMathInElement(container, {
-                delimiters: [
-                    { left: "\\[", right: "\\]", display: true },
-                    { left: "$$", right: "$$", display: true },
-                    { left: "\\(", right: "\\)", display: false },
-                    { left: "$", right: "$", display: false }
-                ],
-                throwOnError: false,
-                errorColor: "#6B7280",
-                strict: false,
-                trust: false,
-                macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
-                ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
-            });
+            const mathDelimiters = [
+                { left: "\\[", right: "\\]", display: true },
+                { left: "$$", right: "$$", display: true },
+                { left: "\\(", right: "\\)", display: false },
+                { left: "$", right: "$", display: false }
+            ];
+            const mathIgnoredTags = ["script", "noscript", "style", "textarea", "pre", "code"];
+            // Le passage markdown peut fragmenter une formule (italique dans
+            // un \(...\), placeholders restaurés à cheval sur des nœuds) : le
+            // premier auto-render en traite une partie, le second rattrape
+            // les fragments devenus accessibles. Boucle jusqu'à stabilité.
+            for (let mathPass = 0; mathPass < 3; mathPass++) {
+                const before = container.querySelectorAll(".katex").length;
+                renderMathInElement(container, {
+                    delimiters: mathDelimiters,
+                    throwOnError: false,
+                    errorColor: "#6B7280",
+                    strict: false,
+                    trust: false,
+                    macros: window.LasmeMath ? window.LasmeMath.KATEX_MACROS : {},
+                    ignoredTags: mathIgnoredTags
+                });
+                if (container.querySelectorAll(".katex").length === before) break;
+            }
         } catch (error) {
             console.warn("Unable to render a LaTeX fragment:", error);
         }
