@@ -1,4 +1,4 @@
-r"""Reproducible Ollama benchmark for the Lasme model roster.
+r"""Reproducible llama.cpp benchmark for the Lasme model roster.
 
 Examples:
     .\.venv\Scripts\python.exe -m scripts.evaluate_models
@@ -228,7 +228,7 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         default=default_models(),
-        help="Ollama model names to benchmark.",
+        help="Model profile names to benchmark.",
     )
     parser.add_argument(
         "--num-predict",

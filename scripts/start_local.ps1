@@ -109,7 +109,7 @@ if (-not $health) {
     throw "Le serveur Lasme LLM n'a pas repondu dans le delai prevu."
 }
 if ($health.status -ne "ok") {
-    $missingModels = @($health.checks.ollama.missing_models) -join ", "
+    $missingModels = @($health.checks.llama.missing_models) -join ", "
     $details = if ($missingModels) {
         " Modeles manquants : $missingModels."
     }
@@ -123,7 +123,7 @@ if ($health.status -ne "ok") {
 }
 
 Write-Host "OK - Lasme LLM est pret : http://127.0.0.1:8000/"
-Write-Host "  API : $($health.status) - llama.cpp : $($health.checks.ollama.status)"
+Write-Host "  API : $($health.status) - llama.cpp : $($health.checks.llama.status)"
 Write-Host "  Runner Python : $($health.checks.runner.status)"
 if ($health.checks.ocr.status -ne "ok") {
     Write-Warning (

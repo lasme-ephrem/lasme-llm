@@ -91,6 +91,14 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        # Arrêt propre : rapatrier le journal WAL dans le fichier principal
+        # avant fermeture. Les écritures récentes vivent dans
+        # lasme_llm.db-wal et seraient perdues s'il était supprimé avant un
+        # checkpoint (jamais supprimer -wal/-shm à la main).
+        try:
+            db.checkpoint()
+        except Exception:
+            pass
         await client.aclose()
 
 
@@ -3226,7 +3234,7 @@ async def chat_stream(req: ChatRequest):
             status_code=400,
             detail=(
                 "Image analysis is not configured. Set VISION_MODEL to an "
-                "installed Ollama vision model or remove the attachment."
+                "installed vision model or remove the attachment."
             ),
         )
 
@@ -3739,8 +3747,9 @@ async def chat_stream(req: ChatRequest):
         if web_tools_available:
             stream_messages[-1]["content"] += context_instruction
 
-        # Use each model's measured maximum-quality profile. Ollama exposes
-        # thinking separately, so internal reasoning never pollutes chat memory.
+        # Use each model's measured maximum-quality profile. The runtime
+        # exposes thinking separately, so internal reasoning never pollutes
+        # chat memory.
         final_temperature = (
             req.temperature
             if req.temperature is not None
@@ -3781,9 +3790,6 @@ async def chat_stream(req: ChatRequest):
         generation_stats: Dict[str, Any] = {}
         generation_started_at = time.monotonic()
         first_content_at: Optional[float] = None
-        buffer_grounded_output = bool(
-            strict_grounding and web_results_data
-        )
 
         # --- Boucle agentique ------------------------------------------------
         # Le chat passe par l’orchestrateur : même contrat SSE que avant
@@ -3881,13 +3887,22 @@ async def chat_stream(req: ChatRequest):
                         yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
                     yield f"data: {json.dumps({'type': 'reasoning_delta', 'text': payload.get('text') or ''})}\n\n"
                 elif event.type == "content_delta":
-                    # Le texte d'un tour n'est pas encore la réponse : il
-                    # peut être suivi d'outils ou écarté par le harnais.
-                    # On le garde et on ne l'affiche qu'à la fin du run.
+                    # Streaming réel : chaque delta part immédiatement au
+                    # navigateur. Un tour suivi d'outils n'est qu'une
+                    # narration : elle sera archivée en « préambule » par
+                    # content_reset, et la version finalement servie
+                    # (citations assainies) est réémise par content_replace
+                    # en fin de run.
                     delta = payload.get("text") or ""
                     if not delta:
                         continue
-                    full_assistant_reply += clean_model_text(delta)
+                    cleaned = clean_model_text(delta)
+                    if not cleaned:
+                        continue
+                    full_assistant_reply += cleaned
+                    if first_content_at is None:
+                        first_content_at = time.monotonic()
+                    yield f"data: {json.dumps({'type': 'content_delta', 'content': cleaned})}\n\n"
                 elif event.type == "tool_call":
                     if reasoning_started and not reasoning_finished:
                         reasoning_finished = True
@@ -3895,6 +3910,11 @@ async def chat_stream(req: ChatRequest):
                             time.monotonic() - reasoning_started_at, 1
                         )
                         yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
+                    if full_assistant_reply:
+                        # Narration de tour (texte produit avant l'appel
+                        # d'outil) : conservée dans le panneau de réflexion
+                        # comme « préambule », jamais dans la réponse.
+                        yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply})}\n\n"
                     full_assistant_reply = ""
                     first_content_at = None
                     yield f"data: {json.dumps({'type': 'agent_tool_call', 'id': payload.get('id'), 'name': payload.get('name'), 'arguments': str(payload.get('arguments') or '')[:2_000]})}\n\n"
@@ -3904,6 +3924,10 @@ async def chat_stream(req: ChatRequest):
                         "fetch_required_before_answer",
                         "search_required_by_request",
                     ):
+                        # Réponse écartée par le harnais : même sort que la
+                        # narration — conservée en préambule, pas en réponse.
+                        if full_assistant_reply:
+                            yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply})}\n\n"
                         full_assistant_reply = ""
                         first_content_at = None
                     if payload.get("name"):
@@ -3962,43 +3986,6 @@ async def chat_stream(req: ChatRequest):
             duration = round(time.monotonic() - reasoning_started_at, 1)
             yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
 
-        if buffer_grounded_output:
-            # Contrat citation : les marqueurs [n] valides SURVIVENT (le
-            # frontend les résout en puces) ; seuls les hors plage et une
-            # éventuelle section « Sources » finale sont retirés.
-            full_assistant_reply = sanitize_citation_markers(
-                clean_model_text(full_assistant_reply),
-                len(web_results_data),
-            )
-            evidence_text = "\n".join(
-                [
-                    *[
-                        " ".join(
-                            [
-                                str(item.get("title") or ""),
-                                str(item.get("snippet") or ""),
-                            ]
-                        )
-                        for item in web_results_data
-                    ],
-                ]
-            )
-            unsupported_numbers = unsupported_grounded_numbers(
-                full_assistant_reply,
-                evidence_text,
-            )
-            if unsupported_numbers:
-                full_assistant_reply = (
-                    "Les sources trouvées ne permettent pas de confirmer toutes "
-                    "les valeurs numériques de la réponse générée. Je préfère "
-                    "retirer cette synthèse plutôt que d’afficher des prix ou "
-                    "des scores non étayés. Relance la recherche pour obtenir "
-                    "un nouveau jeu de sources vérifiées."
-                )
-            for delta in iter_stream_text_chunks(full_assistant_reply):
-                yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
-
-
         if full_assistant_reply:
             # Nettoyage final du texte PERSISTÉ et servi : les marqueurs
             # [n] dans la plage des sources réelles sont conservés (le
@@ -4010,9 +3997,35 @@ async def chat_stream(req: ChatRequest):
                 clean_model_text(full_assistant_reply),
                 len(web_results_data),
             )
-            if not buffer_grounded_output:
-                for delta in iter_stream_text_chunks(full_assistant_reply):
-                    yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
+            if strict_grounding and web_results_data:
+                # Preuve d'abord : sur une demande à grounding strict, une
+                # valeur numérique non étayée par les sources réellement
+                # lues fait remplacer la synthèse par un refus honnête.
+                evidence_text = "\n".join(
+                    " ".join(
+                        [
+                            str(item.get("title") or ""),
+                            str(item.get("snippet") or ""),
+                        ]
+                    )
+                    for item in web_results_data
+                )
+                unsupported_numbers = unsupported_grounded_numbers(
+                    full_assistant_reply,
+                    evidence_text,
+                )
+                if unsupported_numbers:
+                    full_assistant_reply = (
+                        "Les sources trouvées ne permettent pas de confirmer toutes "
+                        "les valeurs numériques de la réponse générée. Je préfère "
+                        "retirer cette synthèse plutôt que d’afficher des prix ou "
+                        "des scores non étayés. Relance la recherche pour obtenir "
+                        "un nouveau jeu de sources vérifiées."
+                    )
+            # Le flux brut a été diffusé en direct ; content_replace sert ici
+            # la version assainie pour que le texte visible soit exactement
+            # celui qui est persisté (idem après un refus).
+            yield f"data: {json.dumps({'type': 'content_replace', 'text': full_assistant_reply})}\n\n"
     
             if not temporary:
                 message_metadata = compact_web_source_metadata(
@@ -4116,7 +4129,6 @@ class TerminalExecuteRequest(BaseModel):
     command: str = Field(min_length=1, max_length=2_000)
 
 @app.get("/api/coding/tree")
-@app.get("/api/coding/file-tree")
 async def get_coding_tree(path: str = ".", max_depth: int = 4):
     try:
         target_path = resolve_workspace_path(path or ".")
@@ -4140,7 +4152,6 @@ async def get_coding_tree(path: str = ".", max_depth: int = 4):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/coding/file")
-@app.get("/api/coding/file-content")
 async def get_coding_file(path: str = None, file: str = None):
     try:
         target = path or file or "README.md"
@@ -4155,7 +4166,6 @@ async def get_coding_file(path: str = None, file: str = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/coding/file")
-@app.post("/api/coding/save-file")
 async def save_coding_file(req: FileSaveRequest):
     try:
         target = req.path or getattr(req, 'file', None)

@@ -72,6 +72,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA wal_autocheckpoint = 64;")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -82,6 +83,18 @@ class DatabaseManager:
             yield conn
         finally:
             conn.close()
+
+    def checkpoint(self) -> Optional[tuple]:
+        """Rapatrie le journal WAL (`lasme_llm.db-wal`) dans la base.
+
+        À appeler à l'arrêt propre de l'application : les écritures
+        récentes vivent dans le journal tant qu'il n'est pas checkpointé,
+        et seraient perdues s'il était supprimé (nettoyage) avant cette
+        étape. Ne jamais supprimer `-wal`/`-shm` à la main.
+        """
+        with self._connection() as conn:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+        return tuple(row) if row is not None else None
 
     def _init_db(self):
         with self._connection() as conn:

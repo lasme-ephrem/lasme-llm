@@ -23,6 +23,9 @@ data/mcp-workspace/
 # Regenerated on demand by scripts/eval_agents.py
 .models/logs/agent_evals.json
 lasme_llm.db
+# NE JAMAIS supprimer lasme_llm.db-wal / lasme_llm.db-shm : c'est le journal
+# WAL de la base. Les écritures récentes y vivent jusqu'au checkpoint et une
+# suppression avant PRAGMA wal_checkpoint(TRUNCATE) = perte définitive.
 lasme_llm.db-*
 database.db
 chat/web/generated_images/*
@@ -35,7 +38,8 @@ models/
 *.safetensors
 cloudflared.exe
 
-# Archived local prototypes (not part of the production application)
+# Archived local prototypes (moved to archive/, not part of the application)
+archive/
 app/
 pylearn/
 python_academy/

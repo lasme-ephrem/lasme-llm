@@ -707,7 +707,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             const capabilities = await capabilitiesResponse.json();
             if (!capabilities.vision_enabled && menuAttachImageBtn) {
                 menuAttachImageBtn.disabled = true;
-                menuAttachImageBtn.title = "Aucun modèle de vision Ollama configuré";
+                menuAttachImageBtn.title = "Aucun modèle de vision configuré";
                 menuAttachImageBtn.setAttribute("aria-disabled", "true");
             }
             if (!capabilities.external_image_generation_enabled && menuGenerateImageBtn) {
@@ -2174,6 +2174,29 @@ async function sendChatMessage(options = {}) {
                         live.reasoningState = "done";
                         if (isStreamVisible()) {
                             resetStreamedAnswer(assistantBubble, parsed.text || "");
+                        }
+                    }
+                    if (parsed.type === "content_replace") {
+                        // Version de service assainie (citations [n]
+                        // vérifiées, section « Sources » retirée) : elle
+                        // remplace le flux brut déjà affiché pour que le
+                        // texte visible soit exactement celui qui est
+                        // persisté.
+                        fullResponse = cleanModelText(String(parsed.text || ""));
+                        live.answerText = fullResponse;
+                        if (isStreamVisible()) {
+                            renderAssistantProgressively(
+                                assistantBubble,
+                                fullResponse,
+                                webResultsMeta,
+                                reasoningDuration,
+                                {
+                                    onPaint: () => followStreamingResponse(
+                                        userMessage,
+                                        assistantMessage
+                                    ),
+                                }
+                            );
                         }
                     }
                     if (parsed.type === "agent_tool_call") {
