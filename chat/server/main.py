@@ -1638,14 +1638,22 @@ def sanitize_generated_title(raw: str) -> str:
     title = re.sub(r"\s+", " ", title)
     if not title:
         return ""
+    # Cap propre : jamais de coupe en plein mot (8 mots max).
+    words = title.split(" ")
+    if len(words) > 8:
+        title = " ".join(words[:8])
     # Majuscule sur le premier caractère (accents compris : é → É).
     return title[0].upper() + title[1:]
 
 
 async def async_generate_and_update_title(session_id: str, prompt: str, model: str):
-    """Generates LLM title in background without blocking model streaming."""
+    """Generates the session title in parallel with the chat stream.
+
+    Pas de sleep initial : la tâche démarre immédiatement et progresse sur
+    les autres slots du routeur pendant que la réponse principale streame —
+    le titre est prêt quand le flux se termine.
+    """
     try:
-        await asyncio.sleep(1)  # Allow the main chat stream to take priority
         title_prompt = [
             {
                 "role": "system",
@@ -1676,9 +1684,10 @@ async def async_generate_and_update_title(session_id: str, prompt: str, model: s
         clean_title = sanitize_generated_title(
             clean_model_text(reply.get("message", {}).get("content", ""))
         )
-        if not clean_title:
-            # Échantillonnage malchanceux : le raisonnement a mangé le
-            # budget. Un seul retry avec le double, puis abandon silencieux.
+        if not clean_title or reply.get("done_reason") == "length":
+            # Échantillonnage malchanceux (reasoning a mangé le budget -> vide)
+            # ou modèle bavard coupé en plein mot (done_reason=length) : un
+            # seul retry avec le double, puis abandon silencieux.
             reply = await client.chat(
                 model=model,
                 messages=title_prompt,
@@ -3554,7 +3563,9 @@ async def chat_stream(req: ChatRequest):
 
     if not session_id and not temporary:
         is_new_session = True
-        initial_title = last_user_msg[:35] if last_user_msg else "Nouvelle Conversation"
+        # Titre transitoire neutre : le vrai titre arrive du LLM en ~3 s
+        # (async_generate_and_update_title). Jamais de coupe brutale du prompt.
+        initial_title = "Nouvelle conversation"
         session = db.create_session(
             title=initial_title,
             model=selected_model,
