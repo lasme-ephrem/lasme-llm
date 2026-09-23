@@ -18,6 +18,8 @@ htmlcov/
 
 # Runtime state
 .runtime/
+# Regenerated on demand by scripts/eval_agents.py
+.models/logs/agent_evals.json
 lasme_llm.db
 lasme_llm.db-*
 database.db

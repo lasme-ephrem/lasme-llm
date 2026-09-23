@@ -2,7 +2,8 @@
 
 ## Frontières de confiance
 
-- FastAPI et Ollama doivent écouter sur `127.0.0.1`.
+- FastAPI et le runtime llama.cpp (`llama-server`) doivent écouter sur
+  `127.0.0.1`.
 - Cloudflared peut exposer le chat, mais toutes les API distantes nécessitent
   `LASME_ACCESS_TOKEN`.
 - Les routes de développement et les fichiers sont locaux uniquement, sauf
@@ -51,9 +52,11 @@ Les réponses Web, documents RAG et sorties de modèles sont non fiables :
   type MIME fourni par le client ;
 - les noms sont normalisés, les chemins sont résolus sous
   `.runtime/project_files` et les doublons sont détectés par SHA-256 ;
-- l’exécution Python utilise un conteneur Docker éphémère sans réseau, en
-  lecture seule, exécuté sous un UID non privilégié, sans capacités Linux et
-  avec des limites de temps, mémoire, CPU, processus et volume de sortie ;
+- l’exécution Python s’exécute dans un conteneur Docker sans réseau (pool
+  chaud réutilisé entre tâches via `docker exec`, sinon un conteneur à
+  froid par tâche), en lecture seule, sous un UID non privilégié, sans
+  capacités Linux et avec des limites de temps, mémoire, CPU, processus et
+  volume de sortie ;
 - seuls les fichiers simples écrits dans le dossier de sortie dédié peuvent
   être téléchargés ;
 - le runner, le terminal et les routes de développement restent locaux par

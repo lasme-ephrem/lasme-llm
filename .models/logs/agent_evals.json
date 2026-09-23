@@ -1,16 +1,16 @@
 {
   "model": "gemma-4-e4b",
-  "ts": "2026-09-20T03:25:44",
+  "ts": "2026-09-23T18:10:38",
   "rows": [
     {
       "scenario": "calc_direct",
       "ok": true,
-      "final_excerpt": "Le résultat de (17*23)+100 est **491**.",
+      "final_excerpt": "Le résultat de (17*23)+100 est 491.",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.9
+      "seconds": 7.4
     },
     {
       "scenario": "calc_puissance",
@@ -20,7 +20,7 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.6
+      "seconds": 0.9
     },
     {
       "scenario": "somme_gauss",
@@ -30,17 +30,17 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.3
+      "seconds": 1.2
     },
     {
       "scenario": "heure",
       "ok": true,
-      "final_excerpt": "Nous sommes **dimanche 20 septembre 2026** et il est actuellement **03:25:40** (heure de Paris/Madrid, heure d'été).",
+      "final_excerpt": "Nous sommes mercredi 23 septembre 2026, et il est actuellement 18:10:33 (heure d’été, fuseau Paris/Madrid).",
       "turns": 2,
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.2
+      "seconds": 1.4
     },
     {
       "scenario": "sans_outil",
@@ -50,27 +50,27 @@
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.5
+      "seconds": 1.0
     },
     {
       "scenario": "multi_outils",
       "ok": true,
-      "final_excerpt": "Le résultat de (12 * 12) est **144**.\n\nLe jour de la semaine actuel est **dimanche**.",
+      "final_excerpt": "Le résultat de (12*12) est **144**.\n\nLe jour de la semaine actuel est **mercredi**.",
       "turns": 2,
       "tool_calls": 2,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 1.0
+      "seconds": 1.4
     },
     {
       "scenario": "outil_inexistant",
       "ok": true,
-      "final_excerpt": "Bonjour se traduit par **Hello** ou **Good morning** en anglais.",
+      "final_excerpt": "Bonjour se traduit par \"hello\" ou \"good morning\" en anglais.",
       "turns": 1,
       "tool_calls": 0,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.6
+      "seconds": 0.8
     },
     {
       "scenario": "echo_determinisme",
@@ -80,7 +80,7 @@
       "tool_calls": 1,
       "malformed": 0,
       "done_reason": "stop",
-      "seconds": 0.9
+      "seconds": 1.1
     }
   ],
   "success_rate": 1.0

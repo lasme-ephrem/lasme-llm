@@ -1,9 +1,7 @@
 import asyncio
 import unittest
-from typing import Any, Dict, List
 
 from core.agent.registry import build_agent_registry
-from core.agent.tools_platform import _format_rag_results
 from core.agent.tools_web import _format_search_results, _run_fetch_pages
 
 

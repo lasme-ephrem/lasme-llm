@@ -1,8 +1,6 @@
 import subprocess
-import os
 import shlex
 from pathlib import Path
-from typing import Dict, Any
 from core.config import settings
 from core.security import resolve_workspace_path, SecurityError
 

@@ -3,7 +3,6 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
 from core.memory.database import DatabaseManager
 

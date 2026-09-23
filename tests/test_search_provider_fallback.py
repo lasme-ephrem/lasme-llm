@@ -440,7 +440,6 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
             patch.object(web_search.settings, "brave_search_api_key", ""),
             patch.object(web_search.settings, "search_specialists_enabled", False),
-            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search.monid_provider, "is_available", return_value=False
             ),
@@ -478,52 +477,6 @@ class SequentialSearchProviderTests(unittest.TestCase):
             "ok",
         )
 
-    def test_sonar_quota_falls_back_to_searxng_before_tavily(self):
-        tavily = Mock()
-        with (
-            patch.object(web_search.settings, "perplexity_api_key", "test-key"),
-            patch.object(web_search.settings, "brave_search_api_key", ""),
-            patch.object(web_search.settings, "search_specialists_enabled", False),
-            patch.object(web_search.settings, "searxng_enabled", True),
-            patch.object(
-                web_search.monid_provider, "is_available", return_value=False
-            ),
-            patch.object(
-                web_search,
-                "_search_with_sonar",
-                side_effect=web_search.SonarSearchError(
-                    "quota_or_rate_limit",
-                    429,
-                ),
-            ),
-            patch.object(
-                web_search,
-                "_search_with_searxng",
-                return_value=[_official_world_cup_result("SearXNG")],
-            ) as searxng,
-            patch.object(web_search, "tavily_client", tavily),
-            patch.object(
-                web_search,
-                "DDGS",
-                side_effect=AssertionError("DuckDuckGo should not run"),
-            ),
-        ):
-            report = web_search.search_web_detailed(
-                "Qui est le dernier vainqueur de la Coupe du monde ?"
-            )
-
-        searxng.assert_called_once()
-        tavily.search.assert_not_called()
-        self.assertEqual(report["engine"], "SearXNG")
-        self.assertEqual(
-            next(
-                item
-                for item in report["strategy"]["provider_attempts"]
-                if item["provider"] == "SearXNG"
-            )["status"],
-            "ok",
-        )
-
     def test_tavily_failure_falls_back_to_duckduckgo(self):
         tavily = Mock()
         tavily.search.side_effect = RuntimeError("Tavily unavailable")
@@ -542,7 +495,6 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
             patch.object(web_search.settings, "brave_search_api_key", ""),
             patch.object(web_search.settings, "search_specialists_enabled", False),
-            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search.monid_provider, "is_available", return_value=False
             ),
@@ -576,7 +528,6 @@ class SequentialSearchProviderTests(unittest.TestCase):
             patch.object(web_search.settings, "perplexity_api_key", "test-key"),
             patch.object(web_search.settings, "brave_search_api_key", "brave-key"),
             patch.object(web_search.settings, "search_specialists_enabled", False),
-            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search.monid_provider, "is_available", return_value=False
             ),
