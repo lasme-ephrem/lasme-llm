@@ -1722,7 +1722,7 @@ function beginInlineMessageEdit(messageElement, messageId, currentText) {
             </span>
             <span>
                 <strong>Modifier votre message</strong>
-                <small>Une nouvelle branche sera créée automatiquement.</small>
+                <small>La réponse sera régénérée dans cette conversation.</small>
             </span>
         </div>
         <textarea aria-label="Message modifié"></textarea>
@@ -1750,14 +1750,56 @@ function beginInlineMessageEdit(messageElement, messageId, currentText) {
         if (!replacement) return;
         submitButton.disabled = true;
         textarea.disabled = true;
-        status.textContent = "Relance en cours…";
+        status.textContent = "Mise à jour en cours…";
         try {
-            await createConversationBranch(messageId, replacement);
+            if (!currentSessionId || !messageId) {
+                throw new Error("Impossible de modifier ce message.");
+            }
+            const response = await fetch(
+                `${API_BASE}/sessions/${encodeURIComponent(currentSessionId)}/messages/${encodeURIComponent(messageId)}/edit`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content: replacement })
+                }
+            );
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || "Édition impossible.");
+
+            // The turn is now the last one: update the bubble in place...
+            textContent.textContent = replacement;
+            editor.remove();
+            textContent.style.display = "";
+            decorateMessageActions(messageElement, "user", messageId, replacement);
+
+            // ...drop every rendered message that followed it...
+            let following = messageElement.nextElementSibling;
+            while (following) {
+                const next = following.nextElementSibling;
+                if (following.classList.contains("message")) following.remove();
+                following = next;
+            }
+
+            // ...and align the in-memory history with the truncated session.
+            if (Array.isArray(conversationHistory)) {
+                let lastUserIndex = -1;
+                for (let i = conversationHistory.length - 1; i >= 0; i -= 1) {
+                    if (conversationHistory[i]?.role === "user") {
+                        lastUserIndex = i;
+                        break;
+                    }
+                }
+                if (lastUserIndex >= 0) {
+                    conversationHistory.length = lastUserIndex + 1;
+                    conversationHistory[lastUserIndex] = { role: "user", content: replacement };
+                }
+            }
+
             await sendChatMessage({ replayExistingLastUser: true });
         } catch (error) {
             submitButton.disabled = false;
             textarea.disabled = false;
-            status.textContent = error.message || "Impossible de relancer.";
+            status.textContent = error.message || "Impossible de modifier.";
         }
     };
     submitButton.addEventListener("click", submitEdit);

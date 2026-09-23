@@ -84,7 +84,7 @@ class MonidChainTests(unittest.TestCase):
             ),
             patch.object(
                 web_search.monid_provider,
-                "search_links",
+                "search_links_cross",
                 monid_search,
             ),
             patch.object(

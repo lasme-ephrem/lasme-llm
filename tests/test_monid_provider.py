@@ -151,7 +151,9 @@ class AvailabilityTests(unittest.TestCase):
             self.assertTrue(monid_provider.is_available())
 
 
-class MonidSearchTests(unittest.IsolatedAsyncioTestCase):
+class MonidEnvMixin(unittest.IsolatedAsyncioTestCase):
+    """Hermetic env + tmp disk cache shared by all Monid test classes."""
+
     def setUp(self):
         # Hermetic env: key set, knobs reset.
         self._original_env = {
@@ -186,7 +188,8 @@ class MonidSearchTests(unittest.IsolatedAsyncioTestCase):
             monid_provider.httpx, "AsyncClient", lambda **kwargs: fake
         )
 
-    # --- 2. Synchronous 200 run: mapping, slicing, truncation ---------------
+
+class MonidSearchTests(MonidEnvMixin):
 
     async def test_run_200_completed_maps_and_slices(self):
         raw = [
@@ -443,6 +446,111 @@ class MonidSearchTests(unittest.IsolatedAsyncioTestCase):
         joined = "\n".join(logs.output)
         self.assertNotIn(API_KEY, joined)
         self.assertNotIn("Bearer", joined)
+
+
+class MonidRichParamsTests(MonidEnvMixin):
+    """Rich tinyfish /search params forwarded (or safely dropped) in
+    ``input.queryParams`` — a bad caller hint can never break the search."""
+
+    async def test_every_rich_param_is_forwarded(self):
+        fake = FakeAsyncClient(
+            post_responses=[_discover_response(), _run_response([])]
+        )
+        with self._patch_client(fake):
+            await monid_provider.search_links(
+                "robotaxi news",
+                5,
+                purpose="follow Robotaxi announcements",
+                domain_type="news",
+                include_domains=["reuters.com", "bloomberg.com"],
+                exclude_domains=["pinterest.com"],
+                recency_minutes=10080,
+                language="fr",
+                page=2,
+            )
+        params = fake.post_calls[1]["json"]["input"]["queryParams"]
+        self.assertEqual(params["query"], "robotaxi news")
+        self.assertEqual(params["purpose"], "follow Robotaxi announcements")
+        self.assertEqual(params["domain_type"], "news")
+        self.assertEqual(params["include_domains"], ["reuters.com", "bloomberg.com"])
+        self.assertEqual(params["exclude_domains"], ["pinterest.com"])
+        self.assertEqual(params["recency_minutes"], 10080)
+        self.assertEqual(params["language"], "fr")
+        self.assertEqual(params["page"], 2)
+
+    async def test_invalid_params_are_ignored_not_sent(self):
+        fake = FakeAsyncClient(
+            post_responses=[_discover_response(), _run_response([])]
+        )
+        with self._patch_client(fake), self.assertLogs("Monid", level="INFO"):
+            await monid_provider.search_links(
+                "q",
+                5,
+                domain_type="dark_web",
+                recency_minutes=-30,
+                include_domains=["  ", ""],
+                page=99,  # clamped to the contract range 0..10
+            )
+        params = fake.post_calls[1]["json"]["input"]["queryParams"]
+        self.assertNotIn("domain_type", params)
+        self.assertNotIn("recency_minutes", params)
+        self.assertNotIn("include_domains", params)
+        self.assertEqual(params["page"], 10)
+
+    async def test_legacy_positional_call_still_works(self):
+        fake = FakeAsyncClient(
+            post_responses=[_discover_response(), _run_response([])]
+        )
+        with self._patch_client(fake):
+            links = await monid_provider.search_links("plain query", 4)
+        self.assertEqual(links, [])
+        params = fake.post_calls[1]["json"]["input"]["queryParams"]
+        self.assertEqual(set(params), {"query", "purpose"})
+        self.assertTrue(params["purpose"].startswith("web search for:"))
+
+    async def test_empty_purpose_falls_back_to_derivation(self):
+        fake = FakeAsyncClient(
+            post_responses=[_discover_response(), _run_response([])]
+        )
+        with self._patch_client(fake):
+            await monid_provider.search_links("q", 5, purpose="   ")
+        params = fake.post_calls[1]["json"]["input"]["queryParams"]
+        self.assertEqual(params["purpose"], "web search for: q")
+
+    async def test_octen_nested_results_are_extracted(self):
+        fake = FakeAsyncClient(
+            post_responses=[
+                _discover_response(),
+                FakeResponse(
+                    200,
+                    {
+                        "runId": "run_oct",
+                        "status": "COMPLETED",
+                        "output": {
+                            "data": {
+                                "query": "q",
+                                "results": [
+                                    {
+                                        "title": "Octen hit",
+                                        "url": "https://octen.example/a",
+                                        "highlight": "body text",
+                                    }
+                                ],
+                            }
+                        },
+                        "price": {
+                            "type": "PER_CALL",
+                            "amount": {"value": 0.001, "currency": "USD"},
+                        },
+                        "billedUnits": 1,
+                    },
+                ),
+            ]
+        )
+        with self._patch_client(fake):
+            links = await monid_provider.search_links("q", 5)
+        self.assertEqual(links[0]["url"], "https://octen.example/a")
+        self.assertEqual(links[0]["snippet"], "body text")
 
 
 if __name__ == "__main__":

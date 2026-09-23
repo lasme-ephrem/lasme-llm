@@ -775,6 +775,7 @@ function renderSessions(sessions) {
 }
 
 async function selectSession(sessionId) {
+    releaseOutgoingLiveBubbleTimers();
     temporaryChatEnabled = false;
     updateTemporaryChatUI();
     resetDocumentAttachment();
@@ -783,11 +784,17 @@ async function selectSession(sessionId) {
     localStorage.setItem("active_session_id", sessionId);
     conversationHistory = [];
     if (chatMessages) chatMessages.innerHTML = "";
+    const live = liveStreams.get(sessionId) || null;
+    const liveActive = Boolean(live && !live.done);
 
     try {
         const resp = await fetch(`${API_BASE}/sessions/${sessionId}/messages`);
         if (!resp.ok) {
-            startNewChat();
+            if (liveActive) {
+                renderLiveSessionFromStore(live);
+            } else {
+                startNewChat();
+            }
             return;
         }
         const data = await resp.json();
@@ -801,7 +808,11 @@ async function selectSession(sessionId) {
         const msgs = data.messages || [];
 
         if (msgs.length === 0) {
-            startNewChat();
+            if (liveActive) {
+                renderLiveSessionFromStore(live);
+            } else {
+                startNewChat();
+            }
             return;
         }
 
@@ -832,10 +843,22 @@ async function selectSession(sessionId) {
             conversationHistory.push({ role: msg.role, content: msg.content });
         });
 
+        if (liveActive) {
+            const lastEntry = conversationHistory[conversationHistory.length - 1];
+            const userAlreadyShown = lastEntry?.role === "user"
+                && (!live.userText
+                    || String(lastEntry.content || "").includes(live.userText));
+            renderLiveTurn(live, userAlreadyShown);
+        }
+
         void loadSessions();
     } catch (err) {
         console.error("Erreur lecture messages session:", err);
-        startNewChat();
+        if (liveActive) {
+            renderLiveSessionFromStore(live);
+        } else {
+            startNewChat();
+        }
     }
 }
 
@@ -881,11 +904,15 @@ temporaryChatBtn?.addEventListener("click", () => {
 });
 
 async function startNewChat(options = {}) {
+    releaseOutgoingLiveBubbleTimers();
     const nextTemporaryState = Boolean(options.temporary);
     if (temporaryChatEnabled && !nextTemporaryState) {
         const temporaryController = streamControllers.get(null);
         temporaryController?.abort();
         streamControllers.delete(null);
+        const temporaryLive = liveStreams.get(null);
+        releaseLiveBubbleTimers(temporaryLive?.dom?.assistantBubble || null);
+        deleteLiveStreamKey(null, temporaryController);
     }
     temporaryChatEnabled = nextTemporaryState;
     resetDocumentAttachment();
@@ -940,6 +967,14 @@ async function startNewChat(options = {}) {
     `;
     chatMessages.appendChild(heroDiv);
 
+    if (temporaryChatEnabled) {
+        const temporaryLive = liveStreams.get(null);
+        if (temporaryLive && !temporaryLive.done) {
+            chatMessages.querySelector(".chatgpt-welcome-hero")?.remove();
+            renderLiveSessionFromStore(temporaryLive);
+        }
+    }
+
     await loadSessions();
 }
 
@@ -948,6 +983,7 @@ async function deleteSession(sessionId) {
         const controller = streamControllers.get(sessionId);
         if (controller) controller.abort();
         streamControllers.delete(sessionId);
+        deleteLiveStreamKey(sessionId, controller);
         const response = await fetch(
             `${API_BASE}/sessions/${sessionId}`,
             { method: "DELETE" }
@@ -1253,6 +1289,227 @@ function activeControllerForCurrentConversation() {
     return streamControllers.get(currentStreamKey()) || null;
 }
 
+// ── Flux live multi-conversations ─────────────────────────────────────
+// Un état par génération en cours, indexé exactement comme
+// streamControllers (id de session, scope documentaire d'une nouvelle
+// conversation non enregistrée, ou null pour la conversation temporaire).
+// Le lecteur SSE accumule TOUJOURS chaque événement ici (source de vérité)
+// et ne peint le DOM que si sa conversation est celle affichée : on peut
+// changer de chat sans jamais perdre un flux. En revenant sur la
+// conversation, la bulle est reconstruite depuis ce store (renderLiveTurn)
+// et les événements suivants reprennent la peinture en direct (rebind).
+const liveStreams = new Map();
+
+function liveStreamHasContent(live) {
+    return Boolean(
+        live.answerText
+        || live.reasoningText
+        || live.decorations.length
+        || live.imageLoading
+    );
+}
+
+// Retire l'entrée du store pour une clé, uniquement si elle appartient
+// bien au contrôleur donné (évite de supprimer celle d'un autre flux).
+function deleteLiveStreamKey(key, controller) {
+    const live = liveStreams.get(key);
+    if (live && (!controller || live.controller === controller)) {
+        liveStreams.delete(key);
+    }
+}
+
+// Libère les timers purement DOM (phrases de réflexion, collapse programmé,
+// ticker image, rendu progressif programmé) d'une bulle sur le point d'être
+// abandonnée. Le store conserve tout l'état nécessaire à la reconstruction.
+function releaseLiveBubbleTimers(bubble) {
+    if (activeTickerInterval) {
+        clearInterval(activeTickerInterval);
+        activeTickerInterval = null;
+    }
+    if (!bubble) return;
+    window.LasmeProgressiveRenderer?.cancel?.(bubble);
+    bubble.querySelectorAll(".thinking-panel").forEach(panel => {
+        if (panel._lasmePhraseTimer) {
+            clearInterval(panel._lasmePhraseTimer);
+            panel._lasmePhraseTimer = null;
+        }
+        if (panel._lasmeCollapseTimer) {
+            clearTimeout(panel._lasmeCollapseTimer);
+            panel._lasmeCollapseTimer = null;
+        }
+    });
+}
+
+// Libère les timers de la bulle en direct de la conversation courante
+// avant un changement de vue (selectSession / startNewChat).
+function releaseOutgoingLiveBubbleTimers() {
+    const live = liveStreams.get(currentStreamKey());
+    if (live) releaseLiveBubbleTimers(live.dom?.assistantBubble || null);
+}
+
+// Rejoue, dans l'ordre chronologique, toutes les décorations accumulées
+// (activités Web, cartes d'outils agent, plan et étapes de recherche)
+// dans une bulle fraîche, avec exactement les mêmes primitives que le
+// handler SSE : une bulle reconstruite est identique à une bulle qui
+// n'aurait jamais quitté l'écran.
+function paintLiveAssistantState(bubble, live) {
+    for (const item of live.decorations) {
+        if (item.kind === "activity") {
+            renderAssistantActivity(bubble, "web", item.state, item.title, item.detail);
+        } else if (item.kind === "tool") {
+            upsertLiveAgentToolCard(bubble, item.event);
+        } else if (item.kind === "plan") {
+            renderResearchPlan(bubble, item.steps);
+        } else if (item.kind === "step") {
+            updateResearchStep(bubble, item.event);
+        }
+    }
+    restoreThinkingPanelFromLive(bubble, live);
+    if (live.imageLoading) {
+        renderDalleLoaderCard(bubble);
+    } else if (live.answerText) {
+        renderFullAssistantMessage(
+            bubble,
+            live.answerText,
+            live.webResults,
+            live.reasoningDuration
+        );
+    }
+    if (live.generationStats) {
+        renderGenerationPerformance(bubble, live.generationStats);
+    }
+}
+
+// Reconstruit le panneau Réflexion dans son état exact au moment du
+// changement de vue (stream en cours, terminé, préambules archivés...).
+function restoreThinkingPanelFromLive(bubble, live) {
+    if (live.reasoningState === "idle" && !live.reasoningText) return;
+    const panel = ensureThinkingPanel(bubble);
+    const pre = panel.querySelector(".thinking-text");
+    if (pre) {
+        pre.textContent = live.reasoningText;
+        pre.classList.toggle(
+            "is-scrollable",
+            pre.scrollHeight > pre.clientHeight + 4
+        );
+    }
+    if (live.reasoningState === "streaming") {
+        panel.classList.add("streaming");
+        setThinkingMode(panel, "stream");
+        startThinkingPhrases(panel);
+        const windowEl = panel.querySelector(".thinking-window");
+        if (windowEl) windowEl.scrollTop = windowEl.scrollHeight;
+        return;
+    }
+    panel.classList.remove("streaming");
+    stopThinkingPhrases(panel);
+    const label = panel.querySelector(".thinking-label");
+    if (label) label.textContent = "Réflexion";
+    const durationText = formatThinkingDuration(live.reasoningDuration);
+    const durationEl = panel.querySelector(".thinking-duration");
+    if (durationEl && durationText) {
+        durationEl.textContent = `· ${durationText}`;
+    }
+    setThinkingMode(panel, "closed");
+}
+
+// Ré-entrée dans une conversation dont le flux est toujours en cours :
+// reconstruit le tour en cours (message utilisateur manquant + bulle
+// assistante en streaming) puis rebranche les prochains événements SSE
+// sur les nouveaux nœuds DOM via live.rebind.
+function renderLiveTurn(live, userAlreadyShown) {
+    streamingAutoScrollPaused = false;
+    releaseLiveBubbleTimers(live.dom?.assistantBubble || null);
+
+    let userMessageEl = null;
+    if (!userAlreadyShown) {
+        const userBubble = appendMessage(
+            "user",
+            live.userText,
+            live.userImageUrl || null
+        );
+        userMessageEl = userBubble?.closest(".message") || null;
+        conversationHistory.push({ role: "user", content: live.userText });
+        if (
+            live.userMessageId
+            && userMessageEl
+            && typeof decorateMessageActions === "function"
+        ) {
+            decorateMessageActions(
+                userMessageEl,
+                "user",
+                live.userMessageId,
+                live.userText
+            );
+        }
+    } else {
+        const userMessages = chatMessages
+            ? chatMessages.querySelectorAll(".message.user")
+            : [];
+        userMessageEl = userMessages[userMessages.length - 1] || null;
+    }
+
+    const assistantBubble = appendMessage(
+        "assistant",
+        liveStreamHasContent(live) ? "" : "..."
+    );
+    const assistantMessageEl = assistantBubble.closest(".message");
+    paintLiveAssistantState(assistantBubble, live);
+    if (
+        live.assistantMessageId
+        && typeof decorateMessageActions === "function"
+    ) {
+        decorateMessageActions(
+            assistantMessageEl,
+            "assistant",
+            live.assistantMessageId,
+            live.answerText
+        );
+    }
+    if (live.artifactId) {
+        assistantBubble.dataset.artifactId = live.artifactId;
+    }
+
+    live.dom.userMessageEl = userMessageEl;
+    live.dom.assistantBubble = assistantBubble;
+    live.dom.assistantMessageEl = assistantMessageEl;
+    live.rebind?.(live.dom);
+    replaceTurnSpacer(userMessageEl, assistantMessageEl);
+    if (live.contextMeta) {
+        updateContextUsage(live.contextMeta);
+    }
+}
+
+// Historique serveur indisponible (erreur réseau, message utilisateur pas
+// encore persisté) : reconstruit la conversation entière depuis le
+// snapshot du store pour ne pas perdre le flux en cours.
+function renderLiveSessionFromStore(live) {
+    (live.messages || []).forEach(message => {
+        let imageUrl = null;
+        let cleanText = message.content;
+        if (
+            message.role === "user"
+            && cleanText
+            && cleanText.startsWith("![")
+        ) {
+            const imageMatch = cleanText.match(/^!\[([^\]]*)\]\(([^)]+)\)\n\n?/);
+            if (imageMatch) {
+                imageUrl = imageMatch[2];
+                cleanText = cleanText
+                    .replace(imageMatch[0], "")
+                    .trim();
+            }
+        }
+        appendMessage(message.role, cleanText, imageUrl);
+        conversationHistory.push({
+            role: message.role,
+            content: message.content,
+        });
+    });
+    renderLiveTurn(live, true);
+}
+
+
 function replaceTurnSpacer(userMessage, assistantMessage) {
     activeTurnSpacer?.remove();
     activeTurnSpacer = document.createElement("div");
@@ -1546,9 +1803,9 @@ async function sendChatMessage(options = {}) {
     const streamConversationHistory = conversationHistory;
 
     // Append Assistant Container with Animated Pulsing Dots
-    const assistantBubble = appendMessage("assistant", "...");
-    const userMessage = userBubble?.closest(".message") || null;
-    const assistantMessage = assistantBubble.closest(".message");
+    let assistantBubble = appendMessage("assistant", "...");
+    let userMessage = userBubble?.closest(".message") || null;
+    let assistantMessage = assistantBubble.closest(".message");
     replaceTurnSpacer(userMessage, assistantMessage);
     positionTurnAtViewportTop(userMessage);
     let fullResponse = "";
@@ -1562,6 +1819,53 @@ async function sendChatMessage(options = {}) {
     let streamKey = initialStreamKey;
     streamControllers.set(streamKey, streamController);
     refreshSendButtonState();
+
+    // ── État live de CE flux (source de vérité multi-conversations) ──
+    const live = {
+        key: streamKey,
+        controller: streamController,
+        startedAt: Date.now(),
+        done: false,
+        messages: [
+            ...streamConversationHistory.map(m => ({ ...m })),
+            userMsgObj
+        ],
+        userText: userPromptText,
+        userImageUrl: currentImageDataUrls[0] || null,
+        userMessageId: null,
+        assistantMessageId: null,
+        answerText: "",
+        reasoningText: "",
+        reasoningDuration: null,
+        reasoningState: "idle",
+        decorations: [],
+        webResults: webResultsMeta,
+        generationStats: null,
+        imageLoading: false,
+        artifactId: null,
+        contextMeta: null,
+        dom: {
+            userMessageEl: userMessage,
+            assistantBubble: assistantBubble,
+            assistantMessageEl: assistantMessage
+        }
+    };
+    liveStreams.set(streamKey, live);
+    // Indirection DOM : renderLiveTurn peut remplacer ces nœuds (ré-entrée
+    // dans la conversation) sans toucher au corps du handler SSE.
+    live.rebind = (dom) => {
+        assistantBubble = dom.assistantBubble;
+        assistantMessage = dom.assistantMessageEl;
+        userMessage = dom.userMessageEl;
+    };
+    // Activités Web : toujours accumulées dans le store, peintes seulement
+    // si le flux est visible.
+    const trackAssistantActivity = (bubble, kind, state, title, detail = "") => {
+        live.decorations.push({ kind: "activity", state, title, detail });
+        if (isStreamVisible()) {
+            renderAssistantActivity(bubble, kind, state, title, detail);
+        }
+    };
 
     let activeSessionIdForStream = currentSessionId;
     const isStreamVisible = () => {
@@ -1668,7 +1972,10 @@ async function sendChatMessage(options = {}) {
                             if (streamControllers.get(streamKey) === streamController) {
                                 streamControllers.delete(streamKey);
                             }
+                            deleteLiveStreamKey(streamKey, streamController);
                             streamKey = parsed.session_id;
+                            live.key = streamKey;
+                            liveStreams.set(streamKey, live);
                             streamControllers.set(streamKey, streamController);
                         }
                         const shouldActivateSession = streamSessionId
@@ -1685,31 +1992,46 @@ async function sendChatMessage(options = {}) {
                         }
                         loadSessions();
                     }
-                    if (parsed.user_message_id && userBubble) {
-                        decorateMessageActions(
-                            userBubble.closest(".message"),
-                            "user",
-                            parsed.user_message_id,
-                            userPromptText
-                        );
+                    if (parsed.user_message_id) {
+                        live.userMessageId = parsed.user_message_id;
+                        if (isStreamVisible() && userMessage) {
+                            decorateMessageActions(
+                                userMessage,
+                                "user",
+                                parsed.user_message_id,
+                                userPromptText
+                            );
+                        }
                     }
                     if (parsed.type === "message_saved" && parsed.message_id) {
-                        decorateMessageActions(
-                            assistantBubble.closest(".message"),
-                            "assistant",
-                            parsed.message_id,
-                            fullResponse
-                        );
+                        live.assistantMessageId = parsed.message_id;
+                        if (isStreamVisible()) {
+                            decorateMessageActions(
+                                assistantMessage,
+                                "assistant",
+                                parsed.message_id,
+                                fullResponse
+                            );
+                        }
                     }
                     if (parsed.type === "research_plan") {
-                        renderResearchPlan(assistantBubble, parsed.steps || []);
+                        live.decorations.push({ kind: "plan", steps: parsed.steps || [] });
+                        if (isStreamVisible()) {
+                            renderResearchPlan(assistantBubble, parsed.steps || []);
+                        }
                     }
                     if (parsed.type === "research_step") {
-                        updateResearchStep(assistantBubble, parsed);
+                        live.decorations.push({ kind: "step", event: parsed });
+                        if (isStreamVisible()) {
+                            updateResearchStep(assistantBubble, parsed);
+                        }
                     }
                     if (parsed.type === "research_synthesis") {
-                        if (parsed.web_results) webResultsMeta = parsed.web_results;
-                        renderAssistantActivity(
+                        if (parsed.web_results) {
+                            webResultsMeta = parsed.web_results;
+                            live.webResults = webResultsMeta;
+                        }
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "active",
@@ -1718,26 +2040,39 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "research_done") {
-                        if (parsed.web_results) webResultsMeta = parsed.web_results;
-                        renderAssistantActivity(
+                        if (parsed.web_results) {
+                            webResultsMeta = parsed.web_results;
+                            live.webResults = webResultsMeta;
+                        }
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "done",
                             "Recherche approfondie terminée",
                             `${parsed.result_count || 0} source(s) retenue(s)`
                         );
-                        if (parsed.artifact_id && typeof openCanvasArtifact === "function") {
-                            assistantBubble.dataset.artifactId = parsed.artifact_id;
+                        if (parsed.artifact_id) {
+                            live.artifactId = parsed.artifact_id;
+                            if (
+                                isStreamVisible()
+                                && typeof openCanvasArtifact === "function"
+                            ) {
+                                assistantBubble.dataset.artifactId = parsed.artifact_id;
+                            }
                         }
                     }
                     if (parsed.type === "session" && parsed.context_meta) {
-                        updateContextUsage(parsed.context_meta);
+                        live.contextMeta = parsed.context_meta;
+                        if (isStreamVisible()) {
+                            updateContextUsage(parsed.context_meta);
+                        }
                     }
                     if (parsed.web_results && parsed.web_results.length > 0) {
                         webResultsMeta = parsed.web_results;
+                        live.webResults = webResultsMeta;
                     }
                     if (parsed.type === "web_search_start") {
-                        renderAssistantActivity(
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "active",
@@ -1745,7 +2080,7 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "tool_start") {
-                        renderAssistantActivity(
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "active",
@@ -1753,7 +2088,7 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "tool_done" && parsed.status !== "ok") {
-                        renderAssistantActivity(
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "warning",
@@ -1762,7 +2097,7 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "web_extract_done") {
-                        renderAssistantActivity(
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             "active",
@@ -1775,6 +2110,7 @@ async function sendChatMessage(options = {}) {
                     if (parsed.type === "web_search_done") {
                         if (parsed.web_results) {
                             webResultsMeta = parsed.web_results;
+                            live.webResults = webResultsMeta;
                         }
                         const webContextAvailable = (
                             parsed.status === "ok"
@@ -1783,7 +2119,7 @@ async function sendChatMessage(options = {}) {
                         const evidenceInsufficient = (
                             parsed.status === "insufficient_evidence"
                         );
-                        renderAssistantActivity(
+                        trackAssistantActivity(
                             assistantBubble,
                             "web",
                             webContextAvailable ? "done" : "warning",
@@ -1815,47 +2151,75 @@ async function sendChatMessage(options = {}) {
                         );
                     }
                     if (parsed.type === "reasoning_start") {
-                        handleReasoningStart(assistantBubble);
+                        if (live.reasoningText) live.reasoningText += "\n\n";
+                        live.reasoningState = "streaming";
+                        if (isStreamVisible()) {
+                            handleReasoningStart(assistantBubble);
+                        }
                     }
                     if (parsed.type === "reasoning_delta") {
-                        appendReasoningDelta(assistantBubble, parsed.text);
+                        live.reasoningText += String(parsed.text || "");
+                        if (isStreamVisible()) {
+                            appendReasoningDelta(assistantBubble, parsed.text);
+                        }
                     }
                     if (parsed.type === "reasoning_done") {
                         reasoningDuration = parsed.duration;
-                        handleReasoningDone(assistantBubble, parsed.duration);
+                        live.reasoningDuration = parsed.duration;
+                        live.reasoningState = "done";
+                        if (isStreamVisible()) {
+                            handleReasoningDone(assistantBubble, parsed.duration);
+                        }
                     }
                     if (parsed.type === "content_reset") {
                         fullResponse = "";
-                        resetStreamedAnswer(assistantBubble, parsed.text || "");
+                        live.answerText = "";
+                        live.reasoningText += (live.reasoningText ? "\n\n" : "")
+                            + `— préambule —\n${String(parsed.text || "")}`;
+                        live.reasoningState = "done";
+                        if (isStreamVisible()) {
+                            resetStreamedAnswer(assistantBubble, parsed.text || "");
+                        }
                     }
                     if (parsed.type === "agent_tool_call") {
                         agentToolEvents.push(parsed);
-                        upsertLiveAgentToolCard(assistantBubble, parsed);
+                        live.decorations.push({ kind: "tool", event: parsed });
+                        if (isStreamVisible()) {
+                            upsertLiveAgentToolCard(assistantBubble, parsed);
+                        }
                     }
                     if (parsed.type === "agent_tool_result") {
                         agentToolEvents.push(parsed);
-                        upsertLiveAgentToolCard(assistantBubble, parsed);
+                        live.decorations.push({ kind: "tool", event: parsed });
+                        if (isStreamVisible()) {
+                            upsertLiveAgentToolCard(assistantBubble, parsed);
+                        }
                     }
                     if (parsed.type === "generation_stats") {
                         generationStatsMeta = parsed;
+                        live.generationStats = parsed;
                     }
                     if (parsed.type === "error") {
                         const message = parsed.message || "La génération a été interrompue.";
                         fullResponse = fullResponse
                             ? `${fullResponse}\n\n*${message}*`
                             : `*${message}*`;
-                        renderFullAssistantMessage(
-                            assistantBubble,
-                            fullResponse,
-                            webResultsMeta,
-                            reasoningDuration
-                        );
-                        followStreamingResponse(
-                            userMessage,
-                            assistantMessage
-                        );
+                        live.answerText = fullResponse;
+                        if (isStreamVisible()) {
+                            renderFullAssistantMessage(
+                                assistantBubble,
+                                fullResponse,
+                                webResultsMeta,
+                                reasoningDuration
+                            );
+                            followStreamingResponse(
+                                userMessage,
+                                assistantMessage
+                            );
+                        }
                     }
                     if (parsed.type === "image_start") {
+                        live.imageLoading = true;
                         if (isStreamVisible()) {
                             renderDalleLoaderCard(assistantBubble);
                             followStreamingResponse(
@@ -1866,6 +2230,8 @@ async function sendChatMessage(options = {}) {
                     }
                     if (parsed.type === "image_done" && parsed.image_url) {
                         fullResponse = `![${parsed.prompt}](${parsed.image_url})`;
+                        live.answerText = fullResponse;
+                        live.imageLoading = false;
                         if (isStreamVisible()) {
                             renderGeneratedImageCard(assistantBubble, parsed.image_url, parsed.prompt);
                             followStreamingResponse(
@@ -1876,7 +2242,8 @@ async function sendChatMessage(options = {}) {
                     }
                     if (parsed.content) {
                         fullResponse = cleanModelText(fullResponse + parsed.content);
-
+                        live.answerText = fullResponse;
+                    
                         // Only render to active UI if user is still on this conversation
                         if (isStreamVisible()) {
                             renderAssistantProgressively(
@@ -1940,10 +2307,13 @@ async function sendChatMessage(options = {}) {
         // The [n] citation markers are intentionally KEPT in the persisted
         // content: together with the message's web_results metadata they
         // allow the marker-based chips to be re-rendered on history load.
-        streamConversationHistory.push({ role: "assistant", content: fullResponse });
+        if (conversationHistory === streamConversationHistory) {
+            streamConversationHistory.push({ role: "assistant", content: fullResponse });
+        }
         if (
             requestIsTemporary
             && fullResponse
+            && isStreamVisible()
             && typeof decorateMessageActions === "function"
         ) {
             decorateMessageActions(
@@ -1969,13 +2339,16 @@ async function sendChatMessage(options = {}) {
             } else {
                 fullResponse = "*(Génération arrêtée par l'utilisateur)*";
             }
+            live.answerText = fullResponse;
             if (isStreamVisible()) {
                 renderFullAssistantMessage(assistantBubble, fullResponse, webResultsMeta, reasoningDuration);
                 if (agentToolEvents.length) {
                     renderAgentToolsSummary(assistantBubble, agentToolEvents);
                 }
             }
-            streamConversationHistory.push({ role: "assistant", content: fullResponse });
+            if (conversationHistory === streamConversationHistory) {
+                streamConversationHistory.push({ role: "assistant", content: fullResponse });
+            }
         } else {
             if (isStreamVisible()) {
                 assistantBubble.textContent = `Erreur : ${err.message || "connexion au serveur local impossible"}`;
@@ -1991,6 +2364,10 @@ async function sendChatMessage(options = {}) {
         }
         if (streamControllers.get(initialStreamKey) === streamController) {
             streamControllers.delete(initialStreamKey);
+        }
+        deleteLiveStreamKey(streamKey, streamController);
+        if (initialStreamKey !== streamKey) {
+            deleteLiveStreamKey(initialStreamKey, streamController);
         }
         refreshSendButtonState();
         loadSessions();
