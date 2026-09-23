@@ -936,6 +936,65 @@ class DatabaseManager:
         item["metadata"] = json.loads(item.get("metadata") or "{}")
         return item
 
+    def edit_message_and_truncate(
+        self,
+        session_id: str,
+        message_id: str,
+        new_content: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Edit a user message in place and drop everything that followed it.
+
+        The canonical read order (see get_session_messages) is timestamp ASC;
+        rowid is used as the deterministic tiebreaker so that messages sharing
+        an identical timestamp are still ordered by insertion position.
+        """
+        normalized = (new_content or "").strip()
+        if not normalized:
+            raise ValueError("Message content cannot be empty.")
+        now = datetime.datetime.now().isoformat()
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, session_id, role, timestamp, rowid
+                FROM messages
+                WHERE id = ? AND session_id = ?
+                """,
+                (message_id, session_id),
+            )
+            target = cursor.fetchone()
+            if not target:
+                return None
+            if target["role"] != "user":
+                raise ValueError("Only user messages can be edited.")
+            cursor.execute(
+                "UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
+                (normalized, now, message_id),
+            )
+            cursor.execute(
+                """
+                DELETE FROM messages
+                WHERE session_id = ?
+                  AND (
+                        timestamp > ?
+                     OR (timestamp = ? AND rowid > ?)
+                  )
+                """,
+                (
+                    session_id,
+                    target["timestamp"],
+                    target["timestamp"],
+                    target["rowid"],
+                ),
+            )
+            cursor.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            remaining = int(cursor.fetchone()[0])
+            conn.commit()
+        return {"updated": True, "remaining": remaining}
+
     def branch_session(
         self,
         session_id: str,

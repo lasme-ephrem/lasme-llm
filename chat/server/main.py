@@ -322,6 +322,10 @@ class BranchRequest(BaseModel):
     model: Optional[str] = Field(default=None, max_length=100)
 
 
+class MessageEditRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=100_000)
+
+
 class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
@@ -1899,6 +1903,27 @@ async def branch_session(session_id: str, payload: BranchRequest):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"session": branch}
+
+
+@app.post("/api/sessions/{session_id}/messages/{message_id}/edit")
+async def edit_session_message(
+    session_id: str,
+    message_id: str,
+    payload: MessageEditRequest,
+):
+    if not db.get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    try:
+        result = db.edit_message_and_truncate(
+            session_id,
+            message_id,
+            payload.content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    return {"ok": True, "remaining": result["remaining"]}
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):

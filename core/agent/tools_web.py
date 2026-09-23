@@ -209,7 +209,12 @@ async def _run_web_search(
 
     # Agentic rule: link providers only — never a synthesizing provider.
     # Monid (if configured) is tried inside the chain itself, as its first
-    # provider, with automatic fallback to the local providers.
+    # provider, with automatic fallback to the local providers. The recency
+    # window is threaded into the chain so Monid can pass a real
+    # recency_minutes filter to its engines (any → no filter).
+    recency_kwargs: Dict[str, Any] = (
+        {"recency": recency} if recency != "any" else {}
+    )
     payload = await asyncio.to_thread(
         search_fn,
         query,
@@ -217,6 +222,7 @@ async def _run_web_search(
         None,
         skip_primary_provider=True,
         force_full_chain=(recency != "any"),
+        **recency_kwargs,
     )
     payload.pop("provider_answer", None)
     payload.pop("answer_mode", None)

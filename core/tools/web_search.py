@@ -74,7 +74,13 @@ OFFICIAL_DOMAIN_RULES = (
     (("deepseek",), ("deepseek.com", "api-docs.deepseek.com")),
     (("glm", "zhipu"), ("bigmodel.cn", "zhipuai.cn")),
     (("minimax",), ("minimax.io", "minimaxi.com")),
-    (("ernie", "baidu"), ("baidu.com", "cloud.baidu.com")),
+    # « ernie » seul est une sous-chaîne de « dernier » (très fréquent en
+    # français) : seules les formes non ambiguës du modèle Baidu activent
+    # baidu.com dans include_domains.
+    (
+        ("ernie bot", "ernie 4", "ernie 5", "baidu"),
+        ("baidu.com", "cloud.baidu.com"),
+    ),
     (
         ("llm chinois", "modeles chinois", "modeles llm chinois"),
         (
@@ -1604,6 +1610,16 @@ def _adaptive_report(
     )
 
 
+# Tool-facing recency buckets → tinyfish recency_minutes windows (Monid).
+RECENCY_MINUTES: Dict[str, int] = {
+    "hour": 60,
+    "day": 1440,
+    "week": 10080,
+    "month": 43200,
+    "year": 525600,
+}
+
+
 def search_web_detailed(
     query: str,
     max_results: int | None = None,
@@ -1611,6 +1627,7 @@ def search_web_detailed(
     *,
     force_full_chain: bool = False,
     skip_primary_provider: bool = False,
+    recency: str | None = None,
 ) -> Dict[str, Any]:
     """Search, rerank and stop once enough independent evidence is available."""
     candidates: List[Dict[str, Any]] = []
@@ -1803,9 +1820,12 @@ def search_web_detailed(
         )
 
     # 2b. Monid (tinyfish gateway) is the first link provider of the chain
-    # once the primary grounded provider had its chance. An empty or failing
-    # Monid must never break the search: any error or empty payload falls
-    # through to the local chain below.
+    # once the primary grounded provider had its chance. The cross-search
+    # fans out over tinyfish (free) plus one affordable secondary engine in
+    # parallel, and every contextual hint already computed above (official
+    # domains, news vertical, recency window) is forwarded to tighten the
+    # ranking. An empty or failing Monid must never break the search: any
+    # error or empty payload falls through to the local chain below.
     if (
         force_full_chain or not selected["strategy"]["sufficient"]
     ) and monid_provider.is_available():
@@ -1814,27 +1834,46 @@ def search_web_detailed(
             if official_domains
             else cleaned_query
         )
+        monid_params: Dict[str, Any] = {
+            "purpose": f"web search: {cleaned_query}"[:120],
+        }
+        if detect_search_vertical(cleaned_query) == "news":
+            monid_params["domain_type"] = "news"
+        if official_domains:
+            monid_params["include_domains"] = list(official_domains)
+        recency_minutes = RECENCY_MINUTES.get(str(recency or "").strip().casefold())
+        if recency_minutes:
+            monid_params["recency_minutes"] = recency_minutes
         try:
-            logger.info("Executing Monid search for %r", monid_query)
+            logger.info("Executing Monid cross search for %r", monid_query)
             monid_links = asyncio.run(
-                monid_provider.search_links(
+                monid_provider.search_links_cross(
                     monid_query,
                     plan["candidate_limit"],
+                    **monid_params,
                 )
             )
-            monid_results = [
-                {
-                    "title": str(link.get("title") or link["url"])[:200],
-                    "snippet": str(link.get("snippet") or "")[:600],
-                    "url": str(link["url"]).strip(),
-                    "engine": "monid",
-                }
-                for link in monid_links
-                if isinstance(link, dict) and str(link.get("url") or "").strip()
-            ]
+            monid_results = []
+            monid_engines: List[str] = []
+            for link in monid_links:
+                if not isinstance(link, dict):
+                    continue
+                url = str(link.get("url") or "").strip()
+                if not url:
+                    continue
+                engine = str(link.get("engine") or "monid").strip() or "monid"
+                monid_engines.append(engine)
+                monid_results.append(
+                    {
+                        "title": str(link.get("title") or url)[:200],
+                        "snippet": str(link.get("snippet") or "")[:600],
+                        "url": url,
+                        "engine": engine,
+                    }
+                )
             candidates.extend(monid_results)
-            if monid_results:
-                engines_used.append("monid")
+            for engine in dict.fromkeys(monid_engines):
+                engines_used.append(engine)
             search_rounds.append(
                 {
                     "engine": "monid",
