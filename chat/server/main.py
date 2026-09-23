@@ -47,16 +47,11 @@ from core.tools.web_search import (
     format_search_results,
     search_web_detailed,
 )
-from core.tools.search_providers import detect_search_vertical
 from core.tools.search_ranking import (
     is_commercial_comparison,
     requires_strict_grounding,
 )
 from core.tools.web_orchestrator import search_extract_verify
-from core.tools.specialized import (
-    detect_specialized_request,
-    run_specialized_tool,
-)
 from core.tools.image_generator import generate_image_from_prompt, IMAGES_DIR
 from core.memory.database import db
 from core.memory.context import select_conversation_context
@@ -835,11 +830,10 @@ def sanitize_citation_markers(text: str, source_count: int) -> str:
 
 
 # --- Sources découvertes par l'agent lui-même (web_search / fetch_pages) ---
-# La pré-recherche remplit web_results_data via search_report, mais quand
-# l'agent cherche et lit avec SES outils pendant un run, les résultats
+# Quand l'agent cherche et lit avec SES outils pendant un run, les résultats
 # n'existent que dans le journal du run (EventLog.to_list() : dicts à plat,
 # payload fusionné au niveau supérieur). On les re-parse pour alimenter le
-# drawer et la persistance au même format que search_report["results"].
+# drawer et la persistance au format des résultats de recherche.
 
 _AGENT_SEARCH_TITLE_RE = re.compile(r"^\[(\d+)\]\s+(.+?)\s*$")
 _AGENT_SEARCH_URL_RE = re.compile(r"^\s+(https?://\S+)\s*$")
@@ -1141,80 +1135,6 @@ def build_generation_stats(
         for key, value in stats.items()
         if value is not None and value != ""
     }
-
-
-async def build_contextual_search_query(
-    messages: List[ChatMessage],
-    model: str,
-) -> str:
-    """Rewrite the latest conversational turn as a standalone Web query."""
-    fallback_query = _fallback_contextual_search_query(messages)
-    user_messages = [message for message in messages if message.role == "user"]
-    if len(user_messages) < 2:
-        return fallback_query
-    latest_user_text = user_messages[-1].content.strip()
-    if fallback_query != latest_user_text:
-        # The deterministic resolver has already attached the root topic.
-        # Avoid a slow, lossy LLM rewrite for natural conversational refinements.
-        return fallback_query
-    if (
-        len(latest_user_text.split()) <= 6
-        or re.search(
-            r"\b(c['’]est faux|faux|incorrect|vérifie|verifie|"
-            r"tu te trompes|et maintenant|alors)\b",
-            latest_user_text,
-            flags=re.IGNORECASE,
-        )
-    ):
-        # The deterministic fallback already carries the previous topic. Avoid
-        # a costly Ollama rewrite on short corrections and natural follow-ups.
-        return fallback_query
-
-    recent_history = messages[-6:]
-    history_text = "\n".join(
-        f"{message.role}: {message.content[:700]}" for message in recent_history
-    )
-    today = datetime.date.today().isoformat()
-    rewrite_messages = [
-        {
-            "role": "system",
-            "content": (
-                "Tu reformules la dernière demande d'une conversation en une "
-                "requête de recherche Web autonome et précise. Réutilise le sujet, "
-                "les personnes, l'événement et la période mentionnés dans les tours "
-                "précédents. Une relance comme « et maintenant ? », « vérifie » ou "
-                "« donne la bonne réponse » doit conserver le sujet précédent et "
-                "demander les informations les plus récentes. Si la dernière demande "
-                "est déjà autonome, conserve-la. Réponds avec UNE seule requête, sans "
-                f"explication ni guillemets. Date actuelle : {today}."
-            ),
-        },
-        {"role": "user", "content": history_text},
-    ]
-
-    try:
-        reply = await asyncio.wait_for(
-            client.chat(
-                model=model or settings.chat_model,
-                messages=rewrite_messages,
-                temperature=0.0,
-                num_ctx=4_096,
-                num_predict=80,
-            ),
-            timeout=20.0,
-        )
-        rewritten = clean_model_text(
-            reply.get("message", {}).get("content", "")
-        ).strip()
-        rewritten = re.sub(r"<think>.*?</think>", "", rewritten, flags=re.DOTALL)
-        rewritten = rewritten.strip(" \t\r\n\"'`")
-        rewritten = " ".join(rewritten.split())
-        if rewritten and len(rewritten) <= 350:
-            return rewritten
-    except Exception:
-        pass
-
-    return fallback_query
 
 
 def should_perform_web_search(
@@ -3495,17 +3415,6 @@ def is_recency_sensitive(query: str) -> bool:
     return any(pattern.search(normalized) for _family, pattern in _RECENCY_RULES)
 
 
-def recency_sensitive_family(query: str) -> Optional[str]:
-    """Famille de motif d'actualité matchée (journalisation), ou None."""
-    normalized = _normalize_recency_text(query)
-    if not normalized:
-        return None
-    for family, pattern in _RECENCY_RULES:
-        if pattern.search(normalized):
-            return family
-    return None
-
-
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
     last_user_msg = req.messages[-1].content if req.messages else ""
@@ -3751,19 +3660,13 @@ async def chat_stream(req: ChatRequest):
                 "au lieu de compléter avec une invention."
             )
 
-    # 2. Smart Intent-Based Web Search Execution (bypassed if prompt has images)
+    # 2. Web tools availability (bypassed if prompt has images)
     web_mode = (req.web_search_mode or "auto").strip().lower()
     if web_mode not in {"auto", "always", "off"}:
         web_mode = "auto"
     user_toggle = (
         req.web_search_enabled if req.web_search_enabled is not None else True
     ) and web_mode != "off"
-    has_conversation_context = len(req.messages) > 1
-    prior_web_context = (
-        {}
-        if temporary
-        else previous_verified_web_context(session_id)
-    )
     # W3 : plus de pré-recherche web — l'agent décide lui-même via ses
     # outils. Les modes de l'UI contrôlent la DISPONIBILITÉ des outils :
     # off → pas d'outils web ; auto → disponibles, l'agent juge ;
@@ -3803,14 +3706,11 @@ async def chat_stream(req: ChatRequest):
         _recency_logger.info(
             "[recency] recherche forcée (motif sensible au temps)"
         )
-    web_search_needed = False
     strict_grounding = bool(
         user_toggle
         and not has_images
         and requires_strict_grounding(last_user_msg)
     )
-
-    search_query = last_user_msg
 
     current_date_str = datetime.datetime.now().strftime("%d %B %Y")
     presentation_mode, presentation_instruction = response_presentation_profile(
@@ -3982,14 +3882,8 @@ async def chat_stream(req: ChatRequest):
     async def event_generator():
         full_assistant_reply = ""
         stream_messages = [dict(message) for message in messages_payload]
-        local_search_query = search_query
         web_results_data = []
-        web_search_event_emitted = False
-        provider_answer = ""
         answer_mode = None
-        answer_provider = None
-        search_report: Dict[str, Any] = {}
-        used_previous_web_context = False
         web_status = "agent" if web_tools_available else "disabled"
 
         context_percentage = min(
@@ -4000,121 +3894,9 @@ async def chat_stream(req: ChatRequest):
                 / max(1, model_profile.history_tokens)
             ),
         )
-        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'project_id': project_id, 'user_message_id': user_message_id, 'temporary': temporary, 'web_results': [], 'search_query': None, 'web_search': {'enabled': user_toggle, 'mode': web_mode, 'needed': web_search_needed, 'status': web_status}, 'context_meta': {'original_messages': context_selection.original_message_count, 'selected_messages': context_selection.selected_message_count, 'estimated_tokens': context_selection.estimated_tokens, 'history_budget': model_profile.history_tokens, 'percentage': context_percentage, 'summary_used': context_selection.summary_used, 'personal_memory_count': len(active_personal_memories), 'rag_chunk_count': rag_chunk_count}})}\n\n"
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'project_id': project_id, 'user_message_id': user_message_id, 'temporary': temporary, 'web_results': [], 'search_query': None, 'web_search': {'enabled': user_toggle, 'mode': web_mode, 'status': web_status}, 'context_meta': {'original_messages': context_selection.original_message_count, 'selected_messages': context_selection.selected_message_count, 'estimated_tokens': context_selection.estimated_tokens, 'history_budget': model_profile.history_tokens, 'percentage': context_percentage, 'summary_used': context_selection.summary_used, 'personal_memory_count': len(active_personal_memories), 'rag_chunk_count': rag_chunk_count}})}\n\n"
 
-        if web_search_needed:
-            local_search_query = await build_contextual_search_query(
-                req.messages,
-                selected_model or settings.chat_model,
-            )
-            specialized_request = detect_specialized_request(
-                local_search_query
-            )
-            search_report = None
-            if specialized_request:
-                tool_name = specialized_request.get("type", "structured")
-                yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name, 'message': 'Consultation de données structurées'})}\n\n"
-                specialized_report = await asyncio.to_thread(
-                    run_specialized_tool,
-                    local_search_query,
-                )
-                if specialized_report.get("results"):
-                    result_count = len(specialized_report["results"])
-                    specialized_report["strategy"] = {
-                        "scope": "direct",
-                        "candidate_count": result_count,
-                        "search_rounds": 1,
-                        "evidence_strength": 1.0,
-                        "extracted_count": 0,
-                        "verified_count": result_count,
-                        "verification_status": "structured_api",
-                        "stop_reason": "specialized_tool",
-                    }
-                    search_report = specialized_report
-                yield f"data: {json.dumps({'type': 'tool_done', 'tool': tool_name, 'status': specialized_report.get('status', 'unavailable'), 'result_count': len(specialized_report.get('results', []))})}\n\n"
-
-            if search_report is None:
-                yield f"data: {json.dumps({'type': 'web_search_start', 'message': 'Recherche et vérification des sources'})}\n\n"
-                search_report = await asyncio.to_thread(
-                    search_extract_verify,
-                    local_search_query,
-                    deadline_seconds=(
-                        24.0 if strict_grounding else 8.0
-                    ),
-                    conversation_messages=[
-                        {
-                            "role": message.role,
-                            "content": message.content,
-                        }
-                        for message in req.messages
-                    ],
-                )
-            if (
-                not search_report.get("results")
-                and prior_web_context.get("results")
-                and can_reuse_previous_web_context(last_user_msg)
-            ):
-                used_previous_web_context = True
-                previous_strategy = dict(search_report.get("strategy") or {})
-                search_report = {
-                    **search_report,
-                    "status": "cached",
-                    "engine": "Contexte Web précédent",
-                    "results": prior_web_context["results"],
-                    "provider_answer": prior_web_context.get("answer", ""),
-                    "answer_mode": None,
-                    "strategy": {
-                        **previous_strategy,
-                        "candidate_count": len(
-                            prior_web_context["results"]
-                        ),
-                        "selected_count": len(
-                            prior_web_context["results"]
-                        ),
-                        "verified_count": len(
-                            prior_web_context["results"]
-                        ),
-                        "verification_status": "previous_verified_context",
-                        "stop_reason": "previous_verified_context",
-                    },
-                }
-            web_results_data = search_report.get("results", [])
-            provider_answer = strip_web_citation_markers(
-                str(search_report.get("provider_answer") or "")
-            ).strip()
-            answer_mode = search_report.get("answer_mode")
-            answer_provider = search_report.get("engine")
-            web_status = search_report.get("status", "unavailable")
-            search_strategy = search_report.get("strategy", {})
-            extracted_count = int(search_strategy.get("extracted_count", 0))
-            verified_count = int(search_strategy.get("verified_count", 0))
-            if extracted_count:
-                yield f"data: {json.dumps({'type': 'web_extract_done', 'message': f'{extracted_count} page(s) analysée(s)', 'extracted_count': extracted_count, 'verified_count': verified_count})}\n\n"
-            web_event_message = (
-                "Contexte Web précédent réutilisé"
-                if used_previous_web_context
-                else (
-                    "Aucun fait suffisamment vérifié"
-                    if web_status == "insufficient_evidence"
-                    else (
-                        "Réponse Web vérifiée"
-                        if answer_mode == "provider"
-                        else (
-                            "Sources Web pertinentes vérifiées"
-                            if web_results_data
-                            else "Recherche Web indisponible"
-                        )
-                    )
-                )
-            )
-            yield f"data: {json.dumps({'type': 'web_search_done', 'status': web_status, 'message': web_event_message, 'search_query': local_search_query, 'engine': search_report.get('engine'), 'answer_mode': answer_mode, 'answer_provider': answer_provider, 'web_results': web_results_data, 'result_count': len(web_results_data), 'candidate_count': search_strategy.get('candidate_count', len(web_results_data)), 'search_rounds': search_strategy.get('search_rounds', 0), 'evidence_strength': search_strategy.get('evidence_strength', 0), 'extracted_count': extracted_count, 'verified_count': verified_count, 'verification_status': search_strategy.get('verification_status'), 'elapsed_ms': search_strategy.get('elapsed_ms'), 'stop_reason': search_strategy.get('stop_reason')})}\n\n"
-            web_search_event_emitted = True
-
-        if (
-            strict_grounding
-            and not web_results_data
-            and not web_tools_available
-        ):
+        if strict_grounding and not web_tools_available:
             # Le web est désactivé par l'utilisateur ET la demande exige
             # des faits vérifiés : refus honnête. Quand les outils web
             # sont disponibles, l'agent recherche et lit lui-même (W3).
@@ -4154,172 +3936,12 @@ async def chat_stream(req: ChatRequest):
             yield "data: [DONE]\n\n"
             return
 
-        provider_answer_usable = provider_answer_is_usable(
-            provider_answer,
-            web_results_data,
-            list(
-                (search_report.get("strategy") or {}).get(
-                    "official_domains",
-                    [],
-                )
-            ),
-        )
-        provider_passthrough = (
-            answer_mode == "provider"
-            and provider_answer_usable
-            and not bool(rag_context)
-        )
-        if answer_mode == "provider" and not provider_answer_usable:
-            provider_answer = ""
-        if provider_passthrough:
-            # Sonar's response is already grounded and its [n] markers align
-            # with web_results_data. Do not make the local model paraphrase it.
-            full_assistant_reply = unicodedata.normalize(
-                "NFC",
-                provider_answer,
-            ).replace("\ufffd", "")
-            provider_usage = search_report.get("usage", {})
-            provider_elapsed_ms = int(
-                (search_report.get("strategy") or {}).get("elapsed_ms")
-                or search_report.get("elapsed_ms")
-                or 0
-            )
-            provider_stats = {
-                "provider": answer_provider,
-                "prompt_tokens": int(
-                    provider_usage.get("prompt_tokens") or 0
-                ),
-                "output_tokens": int(
-                    provider_usage.get("completion_tokens") or 0
-                ),
-                "total_seconds": (
-                    round(provider_elapsed_ms / 1_000, 2)
-                    if provider_elapsed_ms
-                    else None
-                ),
-                "done_reason": "provider_answer",
-            }
-            provider_stats = {
-                key: value
-                for key, value in provider_stats.items()
-                if value is not None and value != ""
-            }
-            provider_deltas = list(
-                iter_stream_text_chunks(full_assistant_reply)
-            )
-            for index, delta in enumerate(provider_deltas):
-                yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
-                if index + 1 < len(provider_deltas):
-                    # A short cooperative pause prevents local proxies and
-                    # browsers from coalescing a complete provider answer into
-                    # one visual update while adding only a few milliseconds.
-                    await asyncio.sleep(0.006)
-            if not temporary:
-                message_metadata = compact_web_source_metadata(
-                    web_results_data
-                )
-                message_metadata["generation_stats"] = provider_stats
-                assistant_message_id = db.add_message(
-                    session_id,
-                    "assistant",
-                    full_assistant_reply,
-                    metadata=message_metadata,
-                )
-                yield f"data: {json.dumps({'type': 'message_saved', 'role': 'assistant', 'message_id': assistant_message_id})}\n\n"
-                asyncio.create_task(
-                    async_update_conversation_memory(session_id, selected_model)
-                )
-                asyncio.create_task(
-                    async_update_personal_memory(selected_model)
-                )
-            yield f"data: {json.dumps({'type': 'generation_stats', **provider_stats})}\n\n"
-            if is_new_session and last_user_msg:
-                asyncio.create_task(
-                    async_generate_and_update_title(
-                        session_id,
-                        last_user_msg,
-                        selected_model,
-                    )
-                )
-            yield "data: [DONE]\n\n"
-            return
-
-        web_context_parts: List[str] = []
-        if provider_answer:
-            web_context_parts.append(
-                "\n\n### SYNTHÈSE DU FOURNISSEUR WEB À VÉRIFIER\n"
-                "<provider_answer>\n"
-                f"{provider_answer}\n"
-                "</provider_answer>"
-            )
-        if web_results_data:
-            web_context_parts.append(
-                "\n\n" + format_search_results(web_results_data)
-            )
-        web_context = "".join(web_context_parts)
-        web_runtime_instruction = ""
-        if used_previous_web_context:
-            web_runtime_instruction = (
-                "\n\nLa recherche Web de ce tour n'a pas renvoyé de nouvelle "
-                "preuve, mais un contexte Web vérifié au tour précédent couvre "
-                "la relance. Réponds naturellement à partir de ce contexte et "
-                "du fil. Ne prétends jamais ne pas avoir accès à Internet. "
-                "Ne parle de l'échec du rafraîchissement que si la question "
-                "exige une information plus récente que les preuves conservées. "
-                "Cite ces sources avec leurs marqueurs numériques [n] "
-                "conformément à la directive de citation."
-            )
-        elif web_search_needed and web_results_data:
-            web_runtime_instruction = (
-                "\n\nLa recherche Web vient d'être exécutée avec succès pour "
-                "cette demande. Réponds directement à la question factuelle à "
-                "partir des sources fournies. Ne prétends jamais ne pas avoir "
-                "accès à Internet ou manquer de données en temps réel lorsque "
-                "ces sources contiennent la réponse. Cite ces sources avec "
-                "leurs marqueurs numériques [n] conformément à la directive "
-                "de citation."
-            )
-            if detect_search_vertical(local_search_query) == "news":
-                web_runtime_instruction += (
-                    " Pour une demande d'actualités, ne retiens que les "
-                    "événements explicitement décrits par un titre d'article "
-                    "ou un extrait vérifié. Donne la date lorsqu'elle figure "
-                    "dans la preuve. Une rubrique générale ou une page de "
-                    "catégorie ne prouve aucune annonce. N'invente jamais un "
-                    "lancement, une restriction, une levée de fonds ou une "
-                    "déclaration pour compléter une source trop vague."
-                )
-        elif web_search_needed:
-            web_runtime_instruction = (
-                "\n\nUne recherche Web a été tentée pour cette demande mais "
-                "aucune preuve exploitable n'a été obtenue. N'invente aucun "
-                "fait actuel. Explique en une phrase naturelle que la "
-                "vérification actuelle n'a pas abouti, puis réponds seulement "
-                "avec les faits stables déjà établis dans le fil. Ne récite "
-                "pas tes limites techniques et ne demande pas à l'utilisateur "
-                "de faire la recherche à ta place."
-            )
-        if rag_context or web_context:
+        if rag_context:
             stream_messages[-1]["content"] += (
-                f"{rag_context}{web_context}{context_instruction}"
+                f"{rag_context}{context_instruction}"
             )
-            if provider_answer and rag_context:
-                stream_messages[-1]["content"] += (
-                    "\n\nTu dois produire une synthèse unifiée : compare la "
-                    "réponse du fournisseur Web aux documents du projet. "
-                    "Cite les sources Web par leurs marqueurs numériques "
-                    "[n] conformément à la directive de citation, et "
-                    "préserve uniquement les citations documentaires "
-                    "[Document : nom, p. X]{file:identifiant}. "
-                    "Si les deux corpus divergent, "
-                    "explique précisément la divergence sans l'effacer."
-                )
-        if web_runtime_instruction:
-            stream_messages[-1]["content"] += web_runtime_instruction
-        # Chemin agent : la pré-recherche est morte (web_context vide), donc
-        # le bloc ci-dessus n'injecte jamais context_instruction. La directive
-        # de citation [n] DOIT atteindre l'agent, sinon il écrit des sections
-        # « Sources : » et aucun marqueur.
+        # Chemin agent : la directive de citation [n] DOIT atteindre l'agent,
+        # sinon il écrit des sections « Sources : » et aucun marqueur.
         if web_tools_available:
             stream_messages[-1]["content"] += context_instruction
 
@@ -4517,23 +4139,17 @@ async def chat_stream(req: ChatRequest):
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
         if agent_result is not None:
-            # Les sources trouvées par les outils de l'agent (web_search /
-            # fetch_pages pendant le run) complètent celles de la
-            # pré-recherche : priorité à l'existant, ajouts en fin, dédup
-            # par URL normalisée. La persistance et le drawer en profitent.
+            # Sources trouvées par les outils de l'agent (web_search /
+            # fetch_pages pendant le run) : dédup par URL normalisée.
+            # La persistance et le drawer en profitent.
             sources_before_agent = len(web_results_data)
             web_results_data = merge_dedup_sources(
                 web_results_data,
                 extract_agent_sources(agent_result.log.to_list()),
             )
-            if (
-                len(web_results_data) > sources_before_agent
-                and not web_search_event_emitted
-            ):
-                # Aucun web_search_done n'a été émis par le pré-flux :
-                # c'est l'agent qui a découvert les sources, on émet le
-                # même événement pour que le drawer les affiche.
-                web_search_event_emitted = True
+            if len(web_results_data) > sources_before_agent:
+                # C'est l'agent qui a découvert les sources : on émet
+                # web_search_done pour que le drawer les affiche.
                 yield f"data: {json.dumps({'type': 'web_search_done', 'status': 'ok', 'engine': 'agent', 'answer_mode': answer_mode, 'message': f'{len(web_results_data)} sources Web consultées', 'web_results': web_results_data, 'result_count': len(web_results_data)})}\n\n"
             if agent_tool_names:
                 # W5 : une URL citée doit avoir été vue par l'agent
@@ -4708,7 +4324,6 @@ async def generate_image_endpoint(req: ImageGenerateRequest):
 
 # --- AGENTIC IDE ENDPOINTS ---
 from coding.subagents.manager import subagent_manager
-from coding.tools.fs_tools import tool_get_file_tree
 
 class FileSaveRequest(BaseModel):
     path: Optional[str] = None

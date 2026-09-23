@@ -42,13 +42,6 @@ if (-not $llamaReady) {
     }
 }
 
-$envFile = Join-Path $projectRoot ".env"
-if (Test-Path -LiteralPath $envFile) {
-    # SearXNG n'est plus demarre : la recherche web agentique n'utilise
-    # que des fournisseurs de liens sans Docker (DDG, specialistes,
-    # Brave, Tavily, et Monid/tinyfish si MONID_API_KEY).
-}
-
 if ($docker) {
     $runnerInspect = & $docker image inspect `
         "lasme-python-runner:latest" `
@@ -137,7 +130,4 @@ if ($health.checks.ocr.status -ne "ok") {
         "OCR Tesseract indisponible. Les images utilisent Lasme Vision; " +
         "les PDF scannes necessitent Vision ou Tesseract."
     )
-}
-if ($searxEnabled) {
-    Write-Host "  SearXNG demande : http://127.0.0.1:8080/"
 }

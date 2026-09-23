@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Match
 
 from core.agent.tools import (
     CATEGORY_NETWORK,
-    CATEGORY_READ,
     ToolDefinition,
     ToolRegistry,
 )

@@ -308,7 +308,6 @@ class ChainRecencyWiringTests(unittest.TestCase):
                 "",
             ),
             patch("core.tools.web_search.settings.search_specialists_enabled", False),
-            patch("core.tools.web_search.settings.searxng_enabled", False),
             patch("core.tools.web_search.settings.brave_search_api_key", ""),
             patch("core.tools.web_search.tavily_client", None),
             patch(

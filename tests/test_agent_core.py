@@ -1,7 +1,5 @@
 import asyncio
-import json
 import unittest
-from typing import Any, Dict, List
 
 from core.agent.builtin import build_default_registry
 from core.agent.events import EventLog
@@ -10,7 +8,6 @@ from core.agent.tools import (
     SCHEMA_VIOLATION,
     ToolDefinition,
     ToolRegistry,
-    ToolResult,
     validate_arguments,
 )
 

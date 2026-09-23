@@ -270,7 +270,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         await client.aclose()
     return {
         "benchmark": "lasme-local-models-v1",
-        "ollama_base_url": settings.ollama_base_url,
         "num_ctx": num_ctx,
         "num_predict": num_predict,
         "elapsed_seconds": round(time.perf_counter() - benchmark_started, 3),

@@ -127,10 +127,6 @@ class SonarSearchError(RuntimeError):
         super().__init__(f"{reason}{status_suffix}")
 
 
-class SearXNGSearchError(RuntimeError):
-    """Safe error raised when the optional local metasearch is unavailable."""
-
-
 COMPARISON_LEDGER_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -1128,61 +1124,6 @@ def _search_with_sonar(
     }
 
 
-def _search_with_searxng(
-    query: str,
-    candidate_limit: int,
-) -> List[Dict[str, Any]]:
-    """Query a configured private SearXNG JSON endpoint."""
-    if not settings.searxng_enabled or not settings.searxng_base_url:
-        return []
-    try:
-        with httpx.Client(
-            timeout=httpx.Timeout(5, connect=2),
-            follow_redirects=False,
-            trust_env=False,
-        ) as http:
-            response = http.get(
-                f"{settings.searxng_base_url}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "language": "fr",
-                    "safesearch": 1,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise SearXNGSearchError("local_provider_unavailable") from exc
-
-    results: List[Dict[str, Any]] = []
-    for index, item in enumerate(data.get("results") or []):
-        if len(results) >= candidate_limit:
-            break
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or "").strip()
-        snippet = str(item.get("content") or "").strip()
-        if not title or not url or not snippet:
-            continue
-        try:
-            safe_url = validate_public_http_url(url)
-        except ValueError:
-            continue
-        results.append(
-            {
-                "title": title,
-                "snippet": snippet,
-                "url": safe_url,
-                "engine": "SearXNG",
-                "engine_score": max(0.45, 0.9 - index * 0.04),
-                "source_engines": item.get("engines") or [],
-            }
-        )
-    return results
-
-
 def fetch_url_content(url: str, timeout: int = 8, max_chars: int = 30_000) -> str:
     """Fetch public text pages while blocking SSRF and oversized responses."""
     try:
@@ -1759,7 +1700,6 @@ def search_web_detailed(
                             "Perplexity Sonar",
                             "monid",
                             "Domain specialist",
-                            "SearXNG",
                             "Brave Search",
                             "Tavily AI",
                             "DuckDuckGo",
@@ -2047,84 +1987,7 @@ def search_web_detailed(
             }
         )
 
-    # 4. The optional local SearXNG metasearch is the sovereign fallback.
-    if (
-        force_full_chain or not selected["strategy"]["sufficient"]
-    ) and settings.searxng_enabled:
-        try:
-            searx_queries = (
-                _official_evidence_queries(cleaned_query, official_domains)
-                if official_domains
-                else [general_web_query]
-            )
-            searxng_results: List[Dict[str, Any]] = []
-            per_query_limit = max(
-                3,
-                min(
-                    plan["candidate_limit"],
-                    5 if len(searx_queries) > 1 else plan["candidate_limit"],
-                ),
-            )
-            for round_query in searx_queries:
-                logger.info(
-                    "Executing local SearXNG search for %r",
-                    round_query,
-                )
-                round_results = _search_with_searxng(
-                    round_query,
-                    per_query_limit,
-                )
-                searxng_results.extend(round_results)
-                search_rounds.append(
-                    {
-                        "engine": "SearXNG",
-                        "kind": (
-                            "official_vendor"
-                            if round_query != general_web_query
-                            else "metasearch"
-                        ),
-                        "query": round_query,
-                        "returned": len(round_results),
-                    }
-                )
-            candidates.extend(searxng_results)
-            if searxng_results:
-                engines_used.append("SearXNG")
-            provider_attempts.append(
-                {
-                    "provider": "SearXNG",
-                    "status": "ok" if searxng_results else "empty",
-                }
-            )
-            selected = _adaptive_report(
-                candidates,
-                cleaned_query,
-                official_domains,
-                max_results=max_results,
-            )
-        except SearXNGSearchError as exc:
-            errors.append(f"SearXNG: {exc}")
-            provider_attempts.append(
-                {
-                    "provider": "SearXNG",
-                    "status": "fallback",
-                    "reason": str(exc),
-                }
-            )
-            logger.warning("SearXNG unavailable for %r", cleaned_query)
-    else:
-        provider_attempts.append(
-            {
-                "provider": "SearXNG",
-                "status": (
-                    "skipped_sufficient"
-                    if selected["strategy"]["sufficient"]
-                    else "not_configured"
-                ),
-            }
-        )
-
-    # 5. Brave contributes an independent Web index. HTTP 402/429 responses
+    # 4. Brave contributes an independent Web index. HTTP 402/429 responses
     # are explicitly classified so the chain can continue without surfacing a
     # provider error to the user.
     if (
@@ -2194,7 +2057,7 @@ def search_web_detailed(
             }
         )
 
-    # 6. Tavily runs only when earlier providers lack sufficient evidence.
+    # 5. Tavily runs only when earlier providers lack sufficient evidence.
     if (
         force_full_chain or not selected["strategy"]["sufficient"]
     ) and tavily_client:
@@ -2307,7 +2170,7 @@ def search_web_detailed(
             }
         )
 
-    # 7. DuckDuckGo is the final no-key fallback.
+    # 6. DuckDuckGo is the final no-key fallback.
     if force_full_chain or not selected["strategy"]["sufficient"]:
         try:
             logger.info(
@@ -2382,7 +2245,6 @@ def search_web_detailed(
                 "Perplexity Sonar",
                 "monid",
                 "Domain specialist",
-                "SearXNG",
                 "Brave Search",
                 "Tavily AI",
                 "DuckDuckGo",
@@ -2391,10 +2253,6 @@ def search_web_detailed(
         },
     }
 
-
-def search_web(query: str, max_results: int = 4) -> List[Dict[str, str]]:
-    """Backward-compatible result-only Web search helper."""
-    return search_web_detailed(query, max_results)["results"]
 
 def format_search_results(results: List[Dict[str, str]]) -> str:
     """Formats search results with clear citation markers for the LLM."""

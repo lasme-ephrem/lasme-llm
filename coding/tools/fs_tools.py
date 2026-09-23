@@ -1,9 +1,7 @@
-import os
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, Any, List
-from core.security import resolve_workspace_path, SecurityError
+from core.security import resolve_workspace_path
 
 def tool_list_dir(path: str = ".") -> str:
     """Lists files and directories at the given path."""

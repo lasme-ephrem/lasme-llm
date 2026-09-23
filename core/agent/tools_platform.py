@@ -6,7 +6,6 @@ avoids import cycles with the chat server.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional
 
 from core.agent.tools import (

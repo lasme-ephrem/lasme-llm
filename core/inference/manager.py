@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from core.config import settings
-from core.inference.profiles import RUNTIME_PROFILES, RuntimeProfile
+from core.inference.profiles import RuntimeProfile
 
 
 @dataclass(frozen=True)
@@ -98,67 +98,3 @@ def is_profile_downloaded(profile: RuntimeProfile, cache_root: Optional[Path] = 
         base = [n for n in model.gguf_files if not n.startswith("mmproj") and "mtp" not in n.lower()]
         return bool(base)
     return False
-
-
-def missing_profiles(cache_root: Optional[Path] = None) -> List[RuntimeProfile]:
-    return [
-        profile
-        for profile in RUNTIME_PROFILES.values()
-        if not is_profile_downloaded(profile, cache_root)
-    ]
-
-
-def download_profile(
-    profile: RuntimeProfile,
-    server_executable: Path,
-    scratch_port: int = 8099,
-    timeout_s: int = 1800,
-) -> bool:
-    """Download a profile's files by booting a throwaway llama-server.
-
-    llama-server downloads ``-hf`` repos into the HF cache on startup;
-    we boot it on a scratch port with a tiny context and stop it as soon
-    as it is healthy (files are then fully cached).
-    """
-    import time
-
-    command = [
-        str(server_executable),
-        "-hf", profile.hf_repo,
-        "-ngl", "0",
-        "-c", "512",
-        "--host", "127.0.0.1",
-        "--port", str(scratch_port),
-    ]
-    creationflags = 0
-    if hasattr(subprocess, "CREATE_NO_WINDOW"):
-        creationflags = subprocess.CREATE_NO_WINDOW
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-        creationflags=creationflags,
-    )
-    import httpx
-
-    deadline = time.monotonic() + timeout_s
-    try:
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                return is_profile_downloaded(profile)
-            try:
-                resp = httpx.get(
-                    f"http://127.0.0.1:{scratch_port}/health", timeout=2.0
-                )
-                if resp.status_code == 200:
-                    return True
-            except httpx.HTTPError:
-                pass
-            time.sleep(2.0)
-        return False
-    finally:
-        if process.poll() is None:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                capture_output=True,
-            )

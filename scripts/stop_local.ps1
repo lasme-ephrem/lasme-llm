@@ -33,33 +33,6 @@ else {
     Write-Host "Aucun serveur Lasme LLM gere par start_local.ps1 n'est enregistre."
 }
 
-$envFile = Join-Path $projectRoot ".env"
-$searxEnabled = $false
-if (Test-Path -LiteralPath $envFile) {
-    $searxEnabled = [bool](
-        Select-String `
-            -LiteralPath $envFile `
-            -Pattern "^\s*SEARXNG_ENABLED\s*=\s*(true|1|yes|on)\s*$" `
-            -Quiet
-    )
-}
-$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
-$docker = if ($dockerCommand) {
-    $dockerCommand.Source
-}
-elseif (Test-Path -LiteralPath "C:\Program Files\Docker\Docker\resources\bin\docker.exe") {
-    "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
-}
-else {
-    $null
-}
-if ($searxEnabled -and $docker) {
-    & $docker compose `
-        -f (Join-Path $projectRoot "infra\searxng\compose.yaml") `
-        stop
-    Write-Host "OK - SearXNG arrete."
-}
-
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 if (Test-Path -LiteralPath $python) {
     & $python -m scripts.serve stop

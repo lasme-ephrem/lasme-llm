@@ -21,7 +21,6 @@ import httpx
 
 from core.config import settings
 from core.inference.profiles import (
-    ModelProfile,
     RUNTIME_PROFILES,
     get_model_profile,
     resolve_runtime_profile,

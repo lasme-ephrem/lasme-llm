@@ -23,7 +23,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 class Settings(BaseModel):
     app_name: str = "Lasme LLM"
-    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     # llama.cpp runtime (v2). The supervisor launches llama-server in
     # router mode from these settings; the client talks OpenAI-compatible
@@ -46,11 +45,6 @@ class Settings(BaseModel):
     perplexity_api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
     perplexity_sonar_model: str = os.getenv("PERPLEXITY_SONAR_MODEL", "sonar")
     brave_search_api_key: str = os.getenv("BRAVE_SEARCH_API_KEY", "")
-    searxng_enabled: bool = _env_bool("SEARXNG_ENABLED", False)
-    searxng_base_url: str = os.getenv(
-        "SEARXNG_BASE_URL",
-        "http://127.0.0.1:8080",
-    ).rstrip("/")
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
     # Monid (tinyfish gateway) : premier provider de la chaîne de recherche

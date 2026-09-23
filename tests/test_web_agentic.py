@@ -1,8 +1,7 @@
 """Phases W : recherche web agentique sans fournisseur synthétique."""
 
 import unittest
-from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from core.agent.tools_web import (
     _format_search_results,

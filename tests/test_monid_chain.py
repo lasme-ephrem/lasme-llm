@@ -73,7 +73,6 @@ class MonidChainTests(unittest.TestCase):
             patch.object(
                 web_search.settings, "search_specialists_enabled", False
             ),
-            patch.object(web_search.settings, "searxng_enabled", False),
             patch.object(
                 web_search.settings, "brave_search_api_key", "brave-key"
             ),
