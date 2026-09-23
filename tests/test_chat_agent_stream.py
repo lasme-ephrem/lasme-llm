@@ -76,10 +76,7 @@ class AgenticChatStreamTests(unittest.TestCase):
 
     def _run_chat(self, scripted, *, web_mode="auto", web_enabled=True):
         session = self.db.create_session(title="test agent chat")
-        with patch(
-            "chat.server.main.client", scripted
-        ), patch("chat.server.main.search_web_detailed") as mock_search:
-            mock_search.return_value = {"results": [], "errors": []}
+        with patch("chat.server.main.client", scripted):
             response = self.client.post(
                 "/api/chat/stream",
                 headers=self.headers,
@@ -98,16 +95,12 @@ class AgenticChatStreamTests(unittest.TestCase):
             for line in response.text.splitlines():
                 if line.startswith("data: ") and line != "data: [DONE]":
                     events.append(json.loads(line[6:]))
-        return session["id"], events, mock_search
+        return session["id"], events
 
     def test_tool_flow_reaches_sse_and_persists_run(self):
         scripted = ScriptedChatClient([list(TOOL_TURN), list(FINAL_TURN)])
-        session_id, events, mock_search = self._run_chat(scripted)
+        session_id, events = self._run_chat(scripted)
         try:
-            # W3 : plus de pré-recherche Sonar — même pour une question
-            # où l'agent a des outils web disponibles.
-            mock_search.assert_not_called()
-
             types = [event.get("type") for event in events]
             self.assertIn("agent_tool_call", types)
             self.assertIn("agent_tool_result", types)
@@ -124,7 +117,7 @@ class AgenticChatStreamTests(unittest.TestCase):
             # Le modèle a bien reçu la palette d'outils du chat (mode auto).
             self.assertIsNotNone(getattr(scripted, "tools", None))
             tool_names = {t["function"]["name"] for t in scripted.tools}
-            self.assertIn("web_search", tool_names)
+            self.assertIn("web_research", tool_names)
             self.assertIn("rag_search", tool_names)
 
             content = "".join(
@@ -148,7 +141,7 @@ class AgenticChatStreamTests(unittest.TestCase):
 
     def test_plain_answer_without_tools_still_works(self):
         scripted = ScriptedChatClient([list(FINAL_TURN)])
-        session_id, events, _ = self._run_chat(scripted)
+        session_id, events = self._run_chat(scripted)
         try:
             types = [event.get("type") for event in events]
             self.assertIn("content_delta", types)
@@ -162,13 +155,13 @@ class AgenticChatStreamTests(unittest.TestCase):
 
     def test_web_off_mode_removes_web_tools_from_registry(self):
         scripted = ScriptedChatClient([list(FINAL_TURN)])
-        session_id, events, _ = self._run_chat(
+        session_id, _events = self._run_chat(
             scripted, web_mode="off", web_enabled=False
         )
         try:
             tool_names = {t["function"]["name"] for t in scripted.tools or []}
-            self.assertNotIn("web_search", tool_names)
-            self.assertNotIn("fetch_pages", tool_names)
+            self.assertNotIn("web_research", tool_names)
+            self.assertNotIn("web_read", tool_names)
             # Les autres outils restent disponibles.
             self.assertIn("calculate", tool_names)
             self.assertIn("rag_search", tool_names)

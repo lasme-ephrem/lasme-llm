@@ -8,9 +8,7 @@ from core.rag.store import RAGDocumentStore
 from core.security import (
     SecurityError,
     resolve_workspace_path,
-    validate_public_http_url,
 )
-from core.tools.web_search import _select_quality_results
 
 
 class SecurityTests(unittest.TestCase):
@@ -26,16 +24,6 @@ class SecurityTests(unittest.TestCase):
             finally:
                 settings.workspace_root = previous_root
 
-    def test_private_and_local_urls_are_blocked(self):
-        for url in (
-            "http://127.0.0.1:11434/api/tags",
-            "http://localhost:8000/api/health",
-            "http://169.254.169.254/latest/meta-data",
-            "http://10.0.0.5/private",
-        ):
-            with self.subTest(url=url), self.assertRaises(SecurityError):
-                validate_public_http_url(url)
-
     def test_terminal_blocks_shell_control_and_unknown_executables(self):
         previous = settings.agent_terminal_enabled
         settings.agent_terminal_enabled = False
@@ -50,17 +38,6 @@ class SecurityTests(unittest.TestCase):
                     _parse_safe_command(command)
         finally:
             settings.agent_terminal_enabled = previous
-
-    def test_web_results_prefer_editorial_sources_over_social_reposts(self):
-        results = [
-            {"title": "Video", "url": "https://youtube.com/watch?v=1"},
-            {"title": "Official", "url": "https://www.fifa.com/article"},
-        ]
-        selected = _select_quality_results(results, "world cup winner", 4)
-        self.assertEqual([item["title"] for item in selected], ["Official"])
-
-        requested = _select_quality_results(results, "youtube world cup", 4)
-        self.assertEqual(len(requested), 2)
 
 
 class PersistentRAGTests(unittest.TestCase):

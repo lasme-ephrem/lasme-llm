@@ -30,7 +30,7 @@ def _format_rag_results(chunks: List[Dict[str, Any]]) -> str:
     if not chunks:
         return (
             "Aucun passage trouvé dans les documents du projet. "
-            "Propose d'importer le document ou utilise web_search."
+            "Propose d'importer le document ou utilise web_research."
         )
     lines = []
     for index, chunk in enumerate(chunks, start=1):
@@ -117,9 +117,10 @@ def register_platform_tools(
                 name="python_run",
                 description=(
                     "Exécute du code Python dans un bac à sable Docker "
-                    "isolé (sans réseau). matplotlib/numpy/pandas/openpyxl "
-                    "disponibles. Retourne stdout, stderr et les fichiers "
-                    "produits."
+                    "isolé (sans réseau). Le sandbox a déjà pandas, numpy "
+                    "et matplotlib (MPLBACKEND Agg) ; les figures se "
+                    "sauvegardent sous /workspace. openpyxl disponible. "
+                    "Retourne stdout, stderr et les fichiers produits."
                 ),
                 parameters={
                     "type": "object",

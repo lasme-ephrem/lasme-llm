@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from core.agent.builtin import build_default_registry
 from core.agent.tools import ToolRegistry
+from core.agent.tools_mcp_stack import register_mcp_stack
 from core.agent.tools_platform import register_platform_tools
 from core.agent.tools_web import register_web_tools
 
 
 def build_agent_registry(
     *,
-    search_fn: Optional[Callable[..., Any]] = None,
-    fetch_fn: Optional[Callable[[str], str]] = None,
+    mcp_client: Optional[Any] = None,
+    web_enabled: bool = True,
+    model_id: str = "gemma-4-12b",
     rag_search_fn: Optional[Any] = None,
     python_runner: Optional[Any] = None,
     file_store: Optional[Any] = None,
@@ -23,17 +25,15 @@ def build_agent_registry(
     artifact_store: Optional[Any] = None,
     default_project_id: str = "default",
 ) -> ToolRegistry:
-    """Builtin tools + web + platform tools, with injectable engines.
+    """Builtin tools, optional web tools, platform tools, then the MCP stack.
 
-    ``search_fn``/``fetch_fn`` default to the proven v1 chain; a tinyfish
-    (Monid) engine can be injected later without touching contracts.
-    ``prebound_image`` attaches one image to the whole run: analyze_image
-    then takes only a question.
+    ``web_research`` / ``web_read`` are registered only when ``web_enabled``
+    is true. ``model_id`` selects which MCP servers the stack exposes.
     """
     registry = build_default_registry()
 
-    if search_fn is not None and fetch_fn is not None:
-        register_web_tools(registry, search_fn=search_fn, fetch_fn=fetch_fn)
+    if web_enabled:
+        register_web_tools(registry, mcp_client=mcp_client)
 
     register_platform_tools(
         registry,
@@ -45,5 +45,10 @@ def build_agent_registry(
         prebound_image=prebound_image,
         artifact_store=artifact_store,
         default_project_id=default_project_id,
+    )
+    register_mcp_stack(
+        registry,
+        mcp_client=mcp_client,
+        model_id=model_id,
     )
     return registry

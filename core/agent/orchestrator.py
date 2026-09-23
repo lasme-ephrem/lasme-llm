@@ -36,8 +36,8 @@ class AgentConfig:
     think: Any = "low"
     system_prompt: str = ""
     max_parallel_tools: int = 3
-    # Harness rule: after a web_search, the model MUST read at least one
-    # page (fetch_pages) before answering. Snippets alone are how stale
+    # Harness rule: after a web_research, the model MUST read at least one
+    # page (web_read) before answering. Snippets alone are how stale
     # index results and training priors sneak into answers.
     require_fetch_after_search: bool = False
     # Harness rule: when the request (or the user explicitly) demands a
@@ -231,16 +231,16 @@ class AgentOrchestrator:
                         top_urls = pick_urls_for_reading(
                             last_search_output or "", max_urls=4
                         )
-                        if top_urls and self.registry.get("fetch_pages"):
+                        if top_urls and self.registry.get("web_read"):
                             fetch_result = await self.registry.execute(
-                                "fetch_pages",
+                                "web_read",
                                 json.dumps({"urls": top_urls}),
                             )
                             await emit(
                                 ev.TOOL_CALL,
                                 {
                                     "id": "auto_fetch",
-                                    "name": "fetch_pages",
+                                    "name": "web_read",
                                     "arguments": json.dumps({"urls": top_urls}),
                                     "repeat": 1,
                                     "auto": True,
@@ -250,7 +250,7 @@ class AgentOrchestrator:
                                 ev.TOOL_RESULT,
                                 {
                                     "id": "auto_fetch",
-                                    "name": "fetch_pages",
+                                    "name": "web_read",
                                     "ok": fetch_result.ok,
                                     "output": fetch_result.output,
                                     "error": fetch_result.error,
@@ -271,7 +271,7 @@ class AgentOrchestrator:
                                         "ta mémoire, LA PAGE GAGNE (elle est "
                                         "plus récente que toi). Si aucune page "
                                         "ne répond à la question, relance "
-                                        "web_search avec une requête plus "
+                                        "web_research avec une requête plus "
                                         "précise (ex : « résultat final … »).\n\n"
                                         + fetch_result.output
                                     ),
@@ -285,11 +285,11 @@ class AgentOrchestrator:
                                     "Système : tu as lancé une recherche Web "
                                     "mais tu n'as lu AUCUNE page. Les extraits "
                                     "seuls ne suffisent pas (index périmés, "
-                                    "articles ambigus). Utilise fetch_pages sur "
+                                    "articles ambigus). Utilise web_read sur "
                                     "au moins une URL des résultats, puis "
                                     "réponds en te basant sur ce que tu as lu. "
                                     "Si aucun résultat ne répond à la question, "
-                                    "relance web_search avec une requête plus "
+                                    "relance web_research avec une requête plus "
                                     "précise."
                                 ),
                             }
@@ -317,7 +317,7 @@ class AgentOrchestrator:
                                     "recherche Web et tu n'as appelé aucun "
                                     "outil. Ta mémoire d'entraînement peut "
                                     "être périmée ou fausse ici. Utilise "
-                                    "web_search maintenant, puis fetch_pages "
+                                    "web_research maintenant, puis web_read "
                                     "sur les résultats, avant de répondre."
                                 ),
                             }
@@ -344,9 +344,9 @@ class AgentOrchestrator:
                 for call in executable:
                     name = (call.get("function") or {}).get("name", "")
                     arguments = (call.get("function") or {}).get("arguments", "")
-                    if name == "web_search":
+                    if name == "web_research":
                         search_fired = True
-                    if name == "fetch_pages":
+                    if name == "web_read":
                         fetch_fired = True
                     signature = self._tool_call_signature(call)
                     repeats = signatures.get(signature, 0) + 1
@@ -372,7 +372,7 @@ class AgentOrchestrator:
                         )
                     else:
                         result = await self.registry.execute(name, arguments)
-                    if name == "web_search" and result.ok:
+                    if name == "web_research" and result.ok:
                         last_search_output = result.output
                     await emit(
                         ev.TOOL_RESULT,

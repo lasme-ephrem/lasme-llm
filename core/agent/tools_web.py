@@ -1,81 +1,23 @@
-"""Agent tools for web search and page fetching — fully agentic.
-
-Design (W phases):
-- NO provider synthesis: Perplexity Sonar is never called by the agent;
-  the search tool returns RAW ranked links and OUR model does the
-  reading, comparing and citing through ``fetch_pages``.
-- Provider chain (all link providers, no Docker): Monid (tinyfish, if
-  MONID_API_KEY is set) → DuckDuckGo → specialists (GDELT/OpenAlex/
-  Wikimedia) → Brave → Tavily. The proven ranking (dedup, authority,
-  freshness, MMR) is reused. Monid lives inside the chain itself
-  (first provider, automatic fallback), not as a pre-chain shortcut.
-"""
+"""Outils agent web_research et web_read, branchés sur le client MCP."""
 
 from __future__ import annotations
 
-import asyncio
 import re
-from typing import Any, Callable, Dict, List, Match
+from typing import Any
 
-from core.agent.tools import (
-    CATEGORY_NETWORK,
-    ToolDefinition,
-    ToolRegistry,
-)
-
-RECENCY_HINTS = {
-    "hour": " (dernière heure)",
-    "day": " (dernières 24 heures)",
-    "week": " (dernière semaine)",
-    "month": " (dernier mois)",
-    "year": " (dernière année)",
-}
+from core.agent.tools import CATEGORY_NETWORK, ToolDefinition, ToolRegistry
+from core.mcp.research import read_pages, research_web
+from core.mcp.types import McpClient
 
 MAX_SEARCH_OUTPUT = 6_000
-MAX_FETCH_URLS = 5
 MAX_FETCH_TOTAL_CHARS = 14_000
 
 _URL_RE = re.compile(r"https?://[^\s\)>\]\"']+")
+_WARNING = (
+    "⚠ Extraits insuffisants pour répondre : appelle web_read "
+    "sur les URLs pertinentes avant de répondre."
+)
 
-
-class SearchResultNumbering:
-    """Numérotation CUMULATIVE des résultats web_search d'un même message.
-
-    Contrat interface : le modèle cite par marqueurs [n] et le frontend
-    remplace chaque [n] par la puce de ``web_results[n-1]``. Les numéros
-    ne repartent donc PAS à 1 à chaque appel web_search : 1re recherche
-    → [1..n1], 2e recherche → [n1+1..n1+n2], etc.
-
-    Une instance vive est créée PAR enregistrement des outils (donc par
-    requête de chat, ``build_agent_registry`` étant appelé dans le flux
-    SSE) : aucun compteur module-level, qui fuiterait entre messages.
-    ``seed`` aligne le départ sur les sources déjà trouvées par la
-    pré-recherche (occupant [1..N] dans le contexte) ; seuls les
-    résultats réellement formatés consomment des numéros.
-    """
-
-    def __init__(self, start: int = 0) -> None:
-        self._last = max(0, int(start))
-
-    @property
-    def last(self) -> int:
-        """Dernier numéro attribué (0 si aucun résultat encore formaté)."""
-        return self._last
-
-    def seed(self, start: int) -> None:
-        """Réserve [1..start] pour des sources déjà numérotées ailleurs."""
-        self._last = max(self._last, int(start))
-
-    def allocate(self, count: int) -> range:
-        """Attribue ``count`` numéros consécutifs et avance le compteur."""
-        count = max(0, int(count))
-        start = self._last + 1
-        self._last += count
-        return range(start, self._last + 1)
-
-# Stale-index triage: search engines mix pre-event prediction/betting
-# pages with post-event result pages. When the harness auto-fetches,
-# result-toned pages must be read first.
 _RESULT_MARKERS = (
     "s'est terminé", "s'est imposé", "champion", "sacré", "a remporté",
     "vainqueur", "a battu", "victoire", "classement final",
@@ -88,31 +30,61 @@ _PREDICTION_MARKERS = (
 )
 
 
-def pick_urls_for_reading(search_output: str, max_urls: int = 2) -> List[str]:
-    """Pick the URLs most likely to carry *results*, not predictions.
+class SearchResultNumbering:
+    """Numérotation cumulative des résultats web d'un même message.
 
-    Parses the numbered [title / url / snippet] blocks produced by
-    ``_format_search_results`` and ranks them: result-toned text wins,
-    prediction-toned text sinks, original order breaks ties.
+    Le modèle cite [n] et le frontend lit web_results[n-1]. Les numéros
+    ne repartent pas à 1 entre deux recherches. ``seed`` réserve [1..N]
+    pour une pré-recherche. « Aucun résultat. » n'alloue rien.
     """
-    entries: List[Dict[str, str]] = []
-    current: Dict[str, str] | None = None
+
+    def __init__(self, start: int = 0) -> None:
+        self._last = max(0, int(start))
+
+    @property
+    def last(self) -> int:
+        return self._last
+
+    def seed(self, start: int) -> None:
+        self._last = max(self._last, int(start))
+
+    def allocate(self, count: int) -> range:
+        count = max(0, int(count))
+        start = self._last + 1
+        self._last += count
+        return range(start, self._last + 1)
+
+
+def pick_urls_for_reading(search_output: str, max_urls: int = 2) -> list[str]:
+    """Choisit les URL les plus susceptibles de porter un résultat.
+
+    Parse les blocs [titre / url indentée / extrait]. Le ton « résultat »
+    passe devant le ton « pronostic » ; l'ordre d'origine départage.
+    """
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
     for line in search_output.splitlines():
         stripped = line.strip()
+        if not stripped or stripped.startswith("⚠"):
+            continue
+        if stripped.startswith(("Moteurs:", "Intention:")):
+            continue
         header = re.match(r"^\[\d+\]\s+(.*)$", stripped)
         if header:
             if current:
                 entries.append(current)
             current = {"title": header.group(1), "url": "", "snippet": ""}
-        elif current is not None:
-            if stripped.startswith("http"):
-                current["url"] = stripped
-            elif stripped and not current["snippet"]:
-                current["snippet"] = stripped
+            continue
+        if current is None:
+            continue
+        if stripped.startswith(("http://", "https://")) and not current["url"]:
+            current["url"] = stripped.rstrip(".,;")
+        elif not current["snippet"]:
+            current["snippet"] = stripped
     if current:
         entries.append(current)
 
-    def score(entry: Dict[str, str]) -> int:
+    def score(entry: dict[str, str]) -> int:
         text = (entry["title"] + " " + entry["snippet"]).lower()
         value = sum(2 for marker in _RESULT_MARKERS if marker in text)
         value -= sum(3 for marker in _PREDICTION_MARKERS if marker in text)
@@ -125,11 +97,8 @@ def pick_urls_for_reading(search_output: str, max_urls: int = 2) -> List[str]:
     return [entry["url"] for entry in ranked[:max_urls]]
 
 
-def collect_known_urls(events: List[Dict[str, Any]]) -> set[str]:
-    """URLs legitimately seen by the agent: search results + fetched pages.
-
-    Accepts the serialized event list of a run (see EventLog.to_list()).
-    """
+def collect_known_urls(events: list[dict[str, Any]]) -> set[str]:
+    """URL vues par l'agent : résultats de recherche et pages lues."""
     known: set[str] = set()
     for event in events:
         if event.get("type") not in ("tool_call", "tool_result"):
@@ -144,13 +113,9 @@ def collect_known_urls(events: List[Dict[str, Any]]) -> set[str]:
 
 
 def strip_unsupported_citations(text: str, known_urls: set[str]) -> str:
-    """Remove URLs the agent never actually saw (anti-hallucination).
+    """Retire les URL que l'agent n'a pas vues."""
 
-    Markdown links lose only their target; bare URLs are replaced by a
-    short marker so the sentence stays readable.
-    """
-
-    def _replace(match: Match[str]) -> str:
+    def _replace(match: re.Match[str]) -> str:
         url = match.group(0).rstrip(".,;:")
         if url in known_urls:
             return match.group(0)
@@ -160,150 +125,156 @@ def strip_unsupported_citations(text: str, known_urls: set[str]) -> str:
     return _URL_RE.sub(_replace, text)
 
 
+def _engine_header(payload: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    names: list[str] = []
+
+    def add(raw: str) -> None:
+        for part in re.split(r"[+·,]", raw):
+            part = part.strip()
+            if part and part not in names:
+                names.append(part)
+
+    engines = payload.get("engines")
+    if isinstance(engines, str):
+        add(engines)
+    elif isinstance(engines, list):
+        for item in engines:
+            add(str(item))
+    if not names:
+        for result in results:
+            add(str(result.get("engine") or ""))
+    return " · ".join(names)
+
+
 def _format_search_results(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     numbering: SearchResultNumbering | None = None,
 ) -> str:
-    """Formate les liens bruts avec la numérotation cumulative en cours.
-
-    Sans ``numbering`` (compatibilité), la numérotation est locale à
-    l'appel. Avec, chaque résultat affiché consomme le numéro suivant du
-    compteur du message : les marqueurs [n] du modèle restent alignés sur
-    l'ordre des sources envoyées au frontend. « Aucun résultat. » ne
-    consomme aucun numéro.
-    """
-    results = payload.get("results") or []
+    """Liens bruts numérotés. L'avertissement web_read est unique, en fin."""
+    results = [
+        item
+        for item in (payload.get("results") or [])
+        if isinstance(item, dict)
+        and str(item.get("url") or "").strip().startswith(("http://", "https://"))
+    ]
     if not results:
         errors = payload.get("errors") or []
-        detail = f" erreurs: {'; '.join(errors[:2])}" if errors else ""
+        if not isinstance(errors, list):
+            errors = [errors]
+        detail = (
+            f" erreurs: {'; '.join(str(item) for item in errors[:2])}"
+            if errors
+            else ""
+        )
         return f"Aucun résultat.{detail}"
     if numbering is None:
         numbering = SearchResultNumbering()
     numbers = numbering.allocate(len(results))
-    lines = []
-    for index, result in zip(numbers, results):
-        title = str(result.get("title") or "Sans titre").strip()[:140]
+    lines: list[str] = []
+    engines = _engine_header(payload, results)
+    if engines:
+        lines.append(f"Moteurs: {engines}")
+    intent = str(payload.get("intent") or "").strip()
+    if intent:
+        lines.append(f"Intention: {intent}")
+    for index, result in zip(numbers, results, strict=True):
+        title = re.sub(r"\s+", " ", str(result.get("title") or "")).strip()
+        title = (title or "Sans titre")[:140]
         url = str(result.get("url") or "").strip()
-        snippet = str(result.get("snippet") or "").strip()
+        snippet = re.sub(r"\s+", " ", str(result.get("snippet") or "")).strip()
         if len(snippet) > 500:
-            snippet = snippet[:500] + "…"
+            snippet = snippet[:499].rstrip() + "…"
         lines.append(f"[{index}] {title}\n    {url}\n    {snippet}")
-        lines.append(
-            "⚠ Extraits insuffisants pour répondre : appelle fetch_pages "
-            "sur les URLs pertinentes avant de répondre."
-        )
-    return "\n".join(lines)[:MAX_SEARCH_OUTPUT]
+    body = "\n".join(lines)
+    full = f"{body}\n{_WARNING}" if body else _WARNING
+    if len(full) <= MAX_SEARCH_OUTPUT:
+        return full
+    keep = MAX_SEARCH_OUTPUT - len(_WARNING) - 1
+    if keep < 1:
+        return _WARNING[:MAX_SEARCH_OUTPUT]
+    return f"{body[:keep].rstrip()}\n{_WARNING}"
 
 
-async def _run_web_search(
-    search_fn: Callable[..., Dict[str, Any]],
-    args: Dict[str, Any],
-    numbering: SearchResultNumbering | None = None,
-) -> str:
-    query = str(args["query"]).strip()
-    recency = str(args.get("recency") or "any")
-    if recency in RECENCY_HINTS:
-        query += RECENCY_HINTS[recency]
-    max_results = int(args.get("max_results") or 5)
+def _resolve_mcp_client(mcp_client: McpClient | None) -> McpClient:
+    if mcp_client is not None:
+        return mcp_client
+    from core.mcp.pool import get_mcp_client
 
-    # Agentic rule: link providers only — never a synthesizing provider.
-    # Monid (if configured) is tried inside the chain itself, as its first
-    # provider, with automatic fallback to the local providers. The recency
-    # window is threaded into the chain so Monid can pass a real
-    # recency_minutes filter to its engines (any → no filter).
-    recency_kwargs: Dict[str, Any] = (
-        {"recency": recency} if recency != "any" else {}
-    )
-    payload = await asyncio.to_thread(
-        search_fn,
-        query,
-        max_results,
-        None,
-        skip_primary_provider=True,
-        force_full_chain=(recency != "any"),
-        **recency_kwargs,
-    )
-    payload.pop("provider_answer", None)
-    payload.pop("answer_mode", None)
-    return _format_search_results(payload, numbering)
-
-
-async def _run_fetch_pages(
-    fetch_fn: Callable[[str], str],
-    args: Dict[str, Any],
-) -> str:
-    urls = [str(u).strip() for u in args["urls"] if str(u).strip()]
-    sections: List[str] = []
-    budget = MAX_FETCH_TOTAL_CHARS
-
-    async def fetch_one(url: str) -> tuple[str, str]:
-        try:
-            text = await asyncio.to_thread(fetch_fn, url)
-            return url, text or ""
-        except Exception as exc:  # network failures are per-URL facts
-            return url, f"ERREUR: {type(exc).__name__}: {exc}"
-
-    for url, text in await asyncio.gather(*(fetch_one(u) for u in urls)):
-        if text.startswith("ERREUR"):
-            sections.append(f"## {url}\n{text}")
-            continue
-        allowance = max(1_500, budget // max(1, len(urls)))
-        if len(text) > allowance:
-            text = text[:allowance] + f"\n…[tronqué à {allowance} caractères]"
-        budget -= len(text)
-        sections.append(f"## {url} ({len(text)} caractères)\n{text}")
-    return "\n\n".join(sections)[:MAX_FETCH_TOTAL_CHARS]
+    return get_mcp_client()
 
 
 def register_web_tools(
     registry: ToolRegistry,
     *,
-    search_fn: Callable[..., Dict[str, Any]],
-    fetch_fn: Callable[[str], str],
+    mcp_client: McpClient | None = None,
     numbering: SearchResultNumbering | None = None,
 ) -> None:
-    """Enregistre web_search/fetch_pages avec un compteur PAR requête.
+    """Enregistre web_research et web_read. Le client absent est résolu à l'appel."""
+    counter = numbering or SearchResultNumbering()
+    registry.web_result_numbering = counter
 
-    Sans ``numbering`` fourni, un compteur frais est créé ici (une
-    instance par enregistrement, donc par message assistant : la
-    numérotation ne fuite jamais d'un message à l'autre). Il est exposé
-    comme ``registry.web_result_numbering`` pour que le serveur de chat
-    puisse l'aligner (``seed``) sur les sources de la pré-recherche.
-    """
-    numbering = numbering or SearchResultNumbering()
-    registry.web_result_numbering = numbering
+    async def _research(args: dict[str, Any]) -> str:
+        client = _resolve_mcp_client(mcp_client)
+        recency = args.get("recency")
+        payload = await research_web(
+            client,
+            str(args["query"]).strip(),
+            recency=None if recency in (None, "", "any") else str(recency),
+            intent=str(args.get("intent") or "auto"),
+            max_results=8,
+        )
+        return _format_search_results(payload, counter)
+
+    async def _read(args: dict[str, Any]) -> str:
+        client = _resolve_mcp_client(mcp_client)
+        raw_urls = args.get("urls") or []
+        if isinstance(raw_urls, str):
+            raw_urls = [raw_urls]
+        return await read_pages(client, [str(url) for url in raw_urls])
+
     registry.register(
         ToolDefinition(
-            name="web_search",
+            name="web_research",
             description=(
-                "Recherche sur le Web et retourne des LIENS BRUTS "
-                "numérotés (titre, URL, extrait) — jamais de réponse "
-                "pré-rédigée. La numérotation est CUMULATIVE d'un appel "
-                "web_search à l'autre du même message : c'est elle qui "
-                "fonde tes marqueurs de citation [n]. 'recency' filtre la "
-                "fraîcheur (jusqu'à la dernière heure). RÈGLE : pour toute "
-                "information issue de cette recherche, appelle ensuite "
-                "fetch_pages sur les URLs pertinentes et ne cite que ce "
-                "que tu y as lu."
+                "Interroge plusieurs moteurs MCP (Exa, Brave, Tavily) plus "
+                "une source spécialisée selon le sujet (sport, météo, actu, "
+                "wikipedia, arxiv, HN). Ne renvoie que des liens bruts "
+                "numérotés (titre, URL, extrait), jamais une réponse rédigée. "
+                "La numérotation est cumulative entre les appels du même "
+                "message. Avant de citer, appelle web_read sur les URLs "
+                "pertinentes."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Recherche"},
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Nombre de sources (1-8)",
-                        "enum": [1, 2, 3, 4, 5, 6, 7, 8],
+                    "query": {
+                        "type": "string",
+                        "description": "Requête de recherche",
                     },
                     "recency": {
                         "type": "string",
                         "enum": ["any", "hour", "day", "week", "month", "year"],
                         "description": "Fenêtre de fraîcheur souhaitée",
                     },
+                    "intent": {
+                        "type": "string",
+                        "enum": [
+                            "auto",
+                            "general",
+                            "news",
+                            "sports",
+                            "weather",
+                            "academic",
+                            "knowledge",
+                            "code",
+                            "finance",
+                        ],
+                        "description": "auto déduit le sujet, sinon force le routage",
+                    },
                 },
                 "required": ["query"],
             },
-            handler=lambda args: _run_web_search(search_fn, args, numbering),
+            handler=_research,
             category=CATEGORY_NETWORK,
             timeout_s=90.0,
             max_output_chars=MAX_SEARCH_OUTPUT,
@@ -311,12 +282,11 @@ def register_web_tools(
     )
     registry.register(
         ToolDefinition(
-            name="fetch_pages",
+            name="web_read",
             description=(
-                "Récupère le contenu intégral de 1 à 5 URLs en Markdown. "
-                "À utiliser après web_search AVANT de répondre : ta "
-                "synthèse et tes citations doivent provenir de pages que "
-                "tu as réellement lues."
+                "Lit le contenu de 1 à 5 pages web. À appeler AVANT de citer : "
+                "la réponse doit s'appuyer sur des pages réellement lues, pas "
+                "seulement sur les extraits de web_research."
             ),
             parameters={
                 "type": "object",
@@ -324,12 +294,12 @@ def register_web_tools(
                     "urls": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "URLs à récupérer",
+                        "description": "URLs http(s) à lire (1 à 5)",
                     }
                 },
                 "required": ["urls"],
             },
-            handler=lambda args: _run_fetch_pages(fetch_fn, args),
+            handler=_read,
             category=CATEGORY_NETWORK,
             timeout_s=120.0,
             max_output_chars=MAX_FETCH_TOTAL_CHARS,

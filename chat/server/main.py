@@ -37,22 +37,24 @@ from chat.server.routers.agent import AgentDeps, create_agent_router
 from chat.server.routers.meta import MetaDeps, create_meta_router
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
 from core.agent.registry import build_agent_registry
+from core.agent.tools import ToolRegistry
+from core.agent.grounding import (
+    is_commercial_comparison,
+    requires_strict_grounding,
+)
 from core.agent.tools_web import (
     collect_known_urls,
     strip_unsupported_citations,
 )
 from core.config import settings
-from core.tools.web_search import (
-    fetch_url_content,
-    format_search_results,
-    search_web_detailed,
+from core.mcp.format import format_search_results
+from core.mcp.pool import get_mcp_client
+from core.mcp.research import research_report
+from core.tools.image_generator import (
+    IMAGES_DIR,
+    generate_image_from_prompt,
+    save_base64_image,
 )
-from core.tools.search_ranking import (
-    is_commercial_comparison,
-    requires_strict_grounding,
-)
-from core.tools.web_orchestrator import search_extract_verify
-from core.tools.image_generator import generate_image_from_prompt, IMAGES_DIR
 from core.memory.database import db
 from core.memory.context import select_conversation_context
 from core.memory.compaction import (
@@ -643,49 +645,6 @@ def strip_web_citation_markers(value: str) -> str:
     return "".join(parts)
 
 
-def provider_answer_is_usable(
-    answer: str,
-    results: List[Dict[str, Any]],
-    official_domains: Optional[List[str]] = None,
-) -> bool:
-    """Reject grounded-provider answers that contradict available evidence."""
-    normalized = unicodedata.normalize("NFKD", str(answer or "").casefold())
-    normalized = "".join(
-        character
-        for character in normalized
-        if not unicodedata.combining(character)
-    )
-    if results and re.search(
-        r"\b(?:je\s+ne\s+peux\s+pas|pas\s+d[' ]?acces|"
-        r"ne\s+suis\s+pas\s+(?:connecte|branche)|"
-        r"pas\s+connecte)\b.{0,80}\b(?:internet|web|temps\s+reel)\b",
-        normalized,
-    ):
-        return False
-
-    official = [
-        str(domain or "").casefold().strip()
-        for domain in (official_domains or [])
-        if str(domain or "").strip()
-    ]
-    has_official_result = any(
-        any(
-            urlparse(str(item.get("url") or "")).hostname == domain
-            or (
-                urlparse(str(item.get("url") or "")).hostname or ""
-            ).endswith(f".{domain}")
-            for domain in official
-        )
-        for item in (results or [])
-    )
-    if has_official_result and re.search(
-        r"\b(?:aucune\s+trace\s+officielle|n[' ]?existe\s+pas|"
-        r"pas\s+ete\s+annonce)\b",
-        normalized,
-    ):
-        return False
-    return bool(str(answer or "").strip())
-
 
 _SENSITIVE_NUMBER_PATTERN = re.compile(
     r"(?:[$€£¥]\s*\d+(?:[.,]\d+)?"
@@ -829,7 +788,8 @@ def sanitize_citation_markers(text: str, source_count: int) -> str:
     return "".join(parts)
 
 
-# --- Sources découvertes par l'agent lui-même (web_search / fetch_pages) ---
+# --- Sources découvertes par l'agent (web_research / web_read,
+# compatibilité des journaux web_search / fetch_pages) ---
 # Quand l'agent cherche et lit avec SES outils pendant un run, les résultats
 # n'existent que dans le journal du run (EventLog.to_list() : dicts à plat,
 # payload fusionné au niveau supérieur). On les re-parse pour alimenter le
@@ -878,7 +838,7 @@ def _title_from_url(url: str) -> str:
 
 
 def _iter_search_output_entries(output: str):
-    """Triplets (numéro, titre, url) d'un output web_search : ligne
+    """Triplets (numéro, titre, url) d'un output web_research : ligne
     « [n] titre » suivie de la ligne indentée « url » (format
     _format_search_results). Le numéro [n] est la position citable de la
     source dans la réponse du modèle (marqueur [n] ⇒ web_results[n-1])."""
@@ -898,7 +858,7 @@ def _iter_search_output_entries(output: str):
 
 
 def _iter_fetch_output_urls(output: str):
-    """URLs réellement lues par fetch_pages (« ## url (n caractères) »).
+    """URLs réellement lues par web_read (« ## url (n caractères) »).
     Les sections en ERREUR (page non lue) ne sont pas des sources."""
     lines = str(output or "").splitlines()
     urls: List[str] = []
@@ -919,16 +879,18 @@ def extract_agent_sources(
     """Sources Web que l'agent a trouvées via ses propres outils.
 
     Parcourt les tool_result du journal de run et parse les outputs de
-    web_search (liens numérotés) et fetch_pages (« ## url (n caractères) »).
+    web_research (liens numérotés ; l'ancien nom web_search est encore
+    accepté) et web_read (« ## url (n caractères) » ; l'ancien nom
+    fetch_pages est encore accepté).
 
     Contrat interface : le modèle cite par marqueur [n] et le frontend
-    affiche web_results[n-1]. Chaque résultat de web_search est donc
+    affiche web_results[n-1]. Chaque résultat de web_research est donc
     placé à l'INDEX n-1 du numéro [n] affiché dans la sortie d'outil ;
     les positions non attribuées (trou de numérotation) sont rendues
     comme None — merge_dedup_sources les ignore. Une URL déjà vue ne
     duplique pas d'entrée : la première occurrence, à la plus petite
-    position, gagne. Un titre réel de web_search prime sur un titre
-    déduit de l'URL par fetch_pages — et fait alors passer la source
+    position, gagne. Un titre réel de web_research prime sur un titre
+    déduit de l'URL par web_read — et fait alors passer la source
     sans numéro (non citable) à sa position citable [n]. Les pages
     fetchées restées sans numéro sont ajoutées en fin de liste : elles
     n'ont jamais de marqueur, leur décalage n'affecte aucun [n].
@@ -956,7 +918,7 @@ def extract_agent_sources(
             else:
                 unnumbered.append(entry)
         elif number > 0 and "number" not in entry:
-            # URL d'abord vue via fetch_pages (sans numéro) : le vrai
+            # URL d'abord vue via web_read (sans numéro) : le vrai
             # titre de la recherche et sa position citable sont adoptés.
             entry["title"] = title[:300]
             entry["number"] = number
@@ -982,10 +944,10 @@ def extract_agent_sources(
             continue
         name = str(event.get("name") or "")
         output = str(event.get("output") or "")
-        if name == "web_search":
+        if name in {"web_research", "web_search"}:
             for number, title, url in _iter_search_output_entries(output):
                 _register_search(number, title, url)
-        elif name == "fetch_pages":
+        elif name in {"web_read", "fetch_pages"}:
             for url in _iter_fetch_output_urls(output):
                 _register_fetch(url)
 
@@ -1018,68 +980,6 @@ def merge_dedup_sources(
     return merged
 
 
-def previous_verified_web_context(
-    session_id: Optional[str],
-) -> Dict[str, Any]:
-    """Return the latest persisted Web-grounded answer for a follow-up."""
-    if not session_id:
-        return {}
-    try:
-        messages = db.get_session_messages(session_id)
-    except Exception:
-        return {}
-    for message in reversed(messages):
-        if str(message.get("role") or "") != "assistant":
-            continue
-        metadata = message.get("metadata") or {}
-        sources = [
-            dict(item)
-            for item in (metadata.get("web_results") or [])
-            if isinstance(item, dict)
-            and item.get("title")
-            and item.get("url")
-        ]
-        if not sources:
-            continue
-        answer = strip_web_citation_markers(
-            str(message.get("content") or "")
-        ).strip()
-        if not answer:
-            continue
-        for index, source in enumerate(sources):
-            source.setdefault(
-                "snippet",
-                (
-                    "Source utilisée pour la réponse Web vérifiée au tour "
-                    "précédent."
-                    if index
-                    else f"Synthèse vérifiée précédente : {answer[:1_200]}"
-                ),
-            )
-            source["evidence_kind"] = "previous_verified_context"
-            source["verified"] = True
-        return {
-            "answer": answer,
-            "results": sources,
-        }
-    return {}
-
-
-def can_reuse_previous_web_context(query: str) -> bool:
-    """Limit cached Web evidence to genuine referential follow-ups."""
-    normalized = re.sub(r"\s+", " ", (query or "").strip().casefold())
-    if not normalized or len(normalized.split()) > 18:
-        return False
-    return bool(
-        re.search(
-            r"^(?:et|alors|maintenant|ensuite|mais|donc)\b"
-            r"|\b(?:ça|cela|celui-ci|celle-ci|ce dernier|cette dernière|"
-            r"il|elle|lui)\b"
-            r"|\b(?:le|la|les)\s+(?:faire|lancer|installer|exécuter|"
-            r"executer|utiliser|télécharger|telecharger|tester|run)\b",
-            normalized,
-        )
-    )
 
 
 def build_generation_stats(
@@ -1137,197 +1037,73 @@ def build_generation_stats(
     }
 
 
-def should_perform_web_search(
-    query: str,
-    user_toggle_enabled: bool,
-    has_conversation_context: bool = False,
-    mode: str = "auto",
-    conversation_messages: Optional[List[ChatMessage]] = None,
-    has_prior_web_evidence: bool = False,
-) -> bool:
-    """Classify whether live information is useful in auto/always/off modes."""
-    normalized_mode = (mode or "auto").strip().lower()
-    if not user_toggle_enabled or normalized_mode == "off" or not query:
-        return False
-        
-    lower_q = query.strip().casefold()
-    clean_q = " ".join(
-        re.sub(r"[^\w\s]", " ", lower_q).split()
-    )
-    words = clean_q.split()
 
-    # 1. Skip search for simple greetings & conversational chitchat
-    greetings = {
-        "bonjour", "salut", "hello", "coucou", "hi", "bonsoir", "hey",
-        "ca va", "ça va", "comment vas tu", "comment vas-tu", "comment allez vous",
-        "merci", "merci beaucoup", "de rien", "super", "ok", "d'accord", "parfait",
-        "qui es tu", "qui es-tu", "tu es qui", "au revoir", "bye", "a plus", "à plus"
-    }
-    greeting_exchange = bool(
-        re.fullmatch(
-            r"(?:bonjour|salut|hello|coucou|hi|bonsoir|hey)"
-            r"(?:\s+(?:"
-            r"comment\s+(?:tu\s+vas|vas\s+tu|allez\s+vous)"
-            r"|(?:ça|ca)\s+va"
-            r"))?",
-            clean_q,
-        )
+# Salutations de premier contact, pas seulement le mot « bonjour ».
+_GREETING_ANCHORS = frozenset({
+    "bonjour", "bonsoir", "salut", "hello", "hi", "hey", "coucou",
+    "yo", "slt", "cc", "wesh", "kikou", "lut", "hola", "welcome",
+    "bienvenue", "morning", "evening", "afternoon", "good",
+})
+_CONTACT_ANCHORS = _GREETING_ANCHORS | frozenset({
+    "merci", "bye", "ciao", "enchante", "revoir", "bientot", "ravi",
+})
+_SOCIAL_FILLERS = _CONTACT_ANCHORS | frozenset({
+    "a", "allez", "ami", "amis", "apres", "au", "beaucoup", "bien",
+    "bonne", "ca", "comment", "cv", "de", "des", "equipe", "es",
+    "etes", "faire", "here", "ici", "je", "journee", "juste", "la",
+    "lasme", "le", "les", "midi", "moi", "monde", "nuit", "nouveau",
+    "nouvelle", "plaisir", "plait", "please", "plus", "present",
+    "presente", "qui", "rencontre", "rencontrer", "salutations",
+    "sil", "soiree", "stp", "svp", "te", "there", "toi", "tous",
+    "tout", "tu", "un", "une", "va", "vas", "vous", "you",
+})
+_TASK_WORDS = frozenset({
+    "aide", "aider", "analyse", "calcule", "calcul", "cherche",
+    "code", "combien", "comment", "compare", "cours", "dis",
+    "donne", "donner", "ecris", "ecrire", "explique", "expliquer",
+    "fais", "liste", "montre", "pourquoi", "prix", "quel", "quelle",
+    "quelles", "quels", "quand", "redige", "recherche", "rechercher",
+    "resume", "traduis", "traduire", "trouve", "trouver",
+})
+
+
+def is_social_turn(query: str) -> bool:
+    """True for a first-contact greeting, thanks, or goodbye.
+
+    Covers salut, hello, coucou, « ça va », « salut tout le monde »,
+    and the same with a first name. A real request that only starts
+    with a greeting stays a request.
+    """
+    text = unicodedata.normalize("NFKD", query or "")
+    text = "".join(
+        character
+        for character in text
+        if not unicodedata.combining(character)
     )
-    if (
-        clean_q in greetings
-        or greeting_exchange
-        or (len(words) <= 3 and any(w in greetings for w in words))
+    words = re.findall(r"[a-z0-9]+", text.casefold())
+    if not words or len(words) > 16 or any(word.isdigit() for word in words):
+        return False
+    vocabulary = set(words)
+    how_are_you = (
+        "comment" in vocabulary
+        and bool(vocabulary & {"va", "vas", "allez"})
+    )
+    if any(
+        word in _TASK_WORDS and not (word == "comment" and how_are_you)
+        for word in words
     ):
         return False
-
-    if normalized_mode == "always":
-        return True
-
-    # Mutable facts must never silently fall back to the training memory of a
-    # local GGUF model. This covers prices, product comparisons, versions,
-    # availability, rankings and benchmarks.
-    if requires_strict_grounding(query):
-        return True
-
-    # 2. Skip search for pure feedback phrases without content
-    feedback_phrases = {
-        "c'est faux", "cest faux", "c est faux", "c'est pas vrai", "non", 
-        "tu te trompes", "faux", "exact", "vrai", "pas du tout", "incorrect"
-    }
-    if clean_q in feedback_phrases and not has_conversation_context:
+    contact = bool(vocabulary & _CONTACT_ANCHORS) or how_are_you
+    contact = contact or {"qui", "es"} <= vocabulary or "presente" in vocabulary
+    contact = contact or {"a", "plus"} <= vocabulary
+    contact = contact or (
+        "bonne" in vocabulary
+        and bool(vocabulary & {"nuit", "journee", "soiree", "midi"})
+    )
+    if not contact:
         return False
-
-    live_markers = {
-        "actuel", "actuelle", "actuellement", "aujourd'hui", "maintenant",
-        "dernier", "dernière", "derniers", "dernières", "récent", "récente",
-        "nouveau", "nouvelle", "actualité", "actualités", "prix", "météo",
-        "score", "résultat", "classement", "président", "gouvernement",
-        "version", "sortie", "disponible", "horaire", "programme", "bilan",
-        "statistique", "statistiques",
-    }
-    explicit_markers = {
-        "cherche", "recherche", "internet", "web", "source", "sources",
-        "vérifie", "verifie", "confirme", "lien", "url",
-    }
-    competitive_markers = {
-        "vainqueur", "vainqueurs", "gagnant", "gagnante", "champion",
-        "championne", "finale", "buteur", "buteuse", "classement",
-        "gagne", "gagné", "gagnée", "remporte", "remporté", "remportée",
-    }
-    competition_markers = {
-        "coupe", "mondial", "monde", "fifa", "uefa", "tournoi",
-        "championnat", "ligue", "nba", "nfl",
-    }
-    sports_stat_markers = {
-        "but", "buts", "passe", "passes", "buteur", "buteuse", "score",
-        "match", "matches", "tournoi", "saison", "record", "statistique",
-        "statistiques", "bilan",
-    }
-    word_set = set(words)
-    local_document_intent = bool(
-        re.search(
-            r"\b(?:ce|ces|le|les|du|des)\s+(?:document|documents|fichier|fichiers)\b"
-            r"|\b(?:document|documents|fichier|fichiers)\s+"
-            r"(?:dans|du|de)\s+(?:ce|cet|le|du)\s+(?:projet|dossier)\b",
-            clean_q,
-        )
-    )
-    if (
-        local_document_intent
-        and not word_set.intersection(live_markers | explicit_markers)
-    ):
-        # A project/document request must stay grounded in the local RAG
-        # context. A recent year in a previous turn must not accidentally
-        # turn it into an unrelated Web search.
-        return False
-
-    follow_up_markers = {
-        "alors", "maintenant", "et", "faux", "incorrect", "vérifie", "verifie",
-        "comment", "pourquoi", "quand", "où", "ou", "ensuite",
-    }
-    if re.search(r"https?://", query, flags=re.IGNORECASE):
-        return True
-    if word_set.intersection(live_markers | explicit_markers):
-        return True
-    emerging_ai_entity = bool(
-        re.search(
-            r"\b(?:kimi|gpt|chatgpt|claude|gemini|grok|qwen|llama|"
-            r"deepseek|mistral|mixtral|phi|command\s+r|nemotron)"
-            r"(?:[\s_-]*(?:[a-z]*\d[\w.-]*|pro|ultra|sonnet|opus|"
-            r"haiku|coder|vision))?\b",
-            clean_q,
-        )
-    )
-    if emerging_ai_entity:
-        return True
-    current_year = datetime.date.today().year
-    mentions_recent_year = any(
-        int(year) >= current_year - 1
-        for year in re.findall(r"\b(20\d{2})\b", clean_q)
-    )
-    # A recent year is sufficient on its own. Natural follow-ups should not
-    # have to repeat the athlete and competition in every turn.
-    if mentions_recent_year:
-        return True
-    if word_set.intersection(sports_stat_markers):
-        return True
-    if (
-        (
-            word_set.intersection(competitive_markers)
-            or mentions_recent_year
-        )
-        and word_set.intersection(competition_markers)
-    ):
-        return True
-    if (
-        has_conversation_context
-        and (
-            clean_q in feedback_phrases
-            or word_set.intersection(follow_up_markers)
-        )
-    ):
-        recent_context = " ".join(
-            message.content
-            for message in (conversation_messages or [])[-9:-1]
-        ).lower()
-        context_words = set(
-            re.sub(r"[^\w\s]", " ", recent_context).split()
-        )
-        current_year = datetime.date.today().year
-        recent_year = any(
-            int(year) >= current_year - 1
-            for year in re.findall(r"\b(20\d{2})\b", recent_context)
-        )
-        cited_web_context = bool(re.search(r"\[\d+\]", recent_context))
-        if (
-            not conversation_messages
-            or context_words.intersection(live_markers)
-            or recent_year
-            or cited_web_context
-        ):
-            return True
-
-    referential_follow_up = bool(
-        re.search(
-            r"\b(le|la|les|ce|cet|cette|ça|cela|il|elle|lui|leur)\b",
-            clean_q,
-        )
-    ) and len(words) <= 14
-    if has_conversation_context and referential_follow_up:
-        if has_prior_web_evidence:
-            return True
-        recent_context = " ".join(
-            message.content
-            for message in (conversation_messages or [])[-9:-1]
-        ).lower()
-        current_year = datetime.date.today().year
-        if (
-            any(marker in recent_context for marker in live_markers)
-            or bool(re.search(rf"\b({current_year - 1}|{current_year})\b", recent_context))
-            or bool(re.search(r"\[\d+\]", recent_context))
-        ):
-            return True
-    return False
+    leftover = [word for word in words if word not in _SOCIAL_FILLERS]
+    return len(leftover) <= 1
 
 
 def is_simple_factual_lookup(query: str) -> bool:
@@ -1596,10 +1372,8 @@ async def async_generate_and_update_title(session_id: str, prompt: str, model: s
             messages=title_prompt,
             temperature=0.2,
             num_ctx=2_048,
-            # Gemma raisonne avant de répondre : avec 40 tokens, tout le
-            # budget partait en thinking et content restait vide (titre
-            # jamais mis à jour). 512 couvre raisonnement court + titre.
-            num_predict=512,
+            think=False,
+            num_predict=64,
         )
         clean_title = sanitize_generated_title(
             clean_model_text(reply.get("message", {}).get("content", ""))
@@ -1613,7 +1387,8 @@ async def async_generate_and_update_title(session_id: str, prompt: str, model: s
                 messages=title_prompt,
                 temperature=0.2,
                 num_ctx=2_048,
-                num_predict=1_024,
+                think=False,
+                num_predict=96,
             )
             clean_title = sanitize_generated_title(
                 clean_model_text(reply.get("message", {}).get("content", ""))
@@ -3016,12 +2791,8 @@ async def deep_research_stream(req: DeepResearchRequest):
         provider_notes: List[str] = []
         for index, step in enumerate(plan):
             yield f"data: {json.dumps({'type': 'research_step', 'step_id': step['id'], 'index': index, 'status': 'running', 'label': step['label'], 'query': step['query']})}\n\n"
-            report = await asyncio.to_thread(
-                search_extract_verify,
-                step["query"],
-                6,
-                12.0,
-                [{"role": "user", "content": req.question}],
+            report = await research_report(
+                get_mcp_client(), step["query"]
             )
             reports.append(report)
             provider_answer = str(report.get("provider_answer") or "").strip()
@@ -3225,14 +2996,22 @@ async def detect_image_intent(messages: List[ChatMessage]) -> Dict[str, Any]:
 
     return {"is_image": False, "prompt": last_msg}
 
-from core.tools.image_generator import generate_image_from_prompt, save_base64_image, IMAGES_DIR
-
 # --- CHAT & AGENT STREAM ENDPOINTS ---
 @app.post("/api/chat/suggestions")
 async def generate_follow_up_suggestions(req: SuggestionRequest):
     model = _validate_model_name(req.model or settings.chat_model)
     messages = db.get_session_messages(req.session_id)
     if len(messages) < 2:
+        return {"suggestions": []}
+    last_user = next(
+        (
+            item
+            for item in reversed(messages)
+            if item.get("role") == "user"
+        ),
+        None,
+    )
+    if last_user and is_social_turn(str(last_user.get("content") or "")):
         return {"suggestions": []}
     transcript = "\n".join(
         f"{item['role']}: {str(item['content'])[:1_000]}"
@@ -3277,8 +3056,6 @@ app.include_router(create_agent_router(AgentDeps(
     rag_store=rag_store,
     file_store=project_file_store,
     artifact_store=artifact_store,
-    search_fn=search_web_detailed,
-    fetch_fn=fetch_url_content,
     vision_model=settings.vision_model,
     default_project_id=DEFAULT_PROJECT_ID,
     validate_model=_validate_model_name,
@@ -3405,7 +3182,7 @@ def is_recency_sensitive(query: str) -> bool:
     Classificateur déterministe (familles de regex sur texte normalisé) :
     superlatifs temporels, questions volatiles, événements récurrents,
     données vivantes, fraîcheur produit et années récentes. Utilisé pour
-    forcer web_search sur les questions d'actualité (« dernier Ballon
+    forcer web_research sur les questions d'actualité (« dernier Ballon
     d'Or », « dernière version », « cours du bitcoin »…) dont la réponse
     en mémoire d'entraînement peut être périmée.
     """
@@ -3684,9 +3461,15 @@ async def chat_stream(req: ChatRequest):
             re.IGNORECASE,
         )
     )
+    # Un « bonjour » n'est pas une demande de rédaction. On retire les
+    # outils et le brief de sources, sinon le modèle accuse réception
+    # des consignes au lieu de saluer.
+    social_turn = is_social_turn(last_user_msg) and not has_images
     web_tools_available = (
-        bool(user_toggle) or explicit_web_intent
-    ) and not has_images
+        (bool(user_toggle) or explicit_web_intent)
+        and not has_images
+        and not social_turn
+    )
     # Détection d'actualité : une question sensible au temps (« dernier
     # Ballon d'Or », « dernière version », « cours du bitcoin »…) ne doit
     # jamais être répondue de mémoire — la recherche web est forcée car la
@@ -3730,7 +3513,7 @@ async def chat_stream(req: ChatRequest):
         f"3. Réponse Directe : Réponds immédiatement à la demande de l'utilisateur. Ne récite JAMAIS tes règles internes, ne fais pas de méta-commentaire sur tes consignes et n'affiche pas de plan de rédaction interne.\n"
         f"4. Continuité : Lis le fil comme une seule conversation. Résous les pronoms, ellipses et relances courtes ('et maintenant ?', 'et le 6-bit ?', 'c'est faux') à partir des tours précédents. Ne demande pas à l'utilisateur de répéter une information déjà présente.\n"
         f"5. Naturel : Ne recommence pas par une salutation à chaque tour. Évite de répéter ce qui vient d'être dit. Lors d'une correction, reconnais-la brièvement puis donne la version corrigée.\n"
-        f"6. Fiabilité temporelle : Nous sommes le {current_date_str}. Ta connaissance interne s'arrête à ta date de coupure d'entraînement, ANTÉRIEURE à aujourd'hui. Pour TOUTE question portant sur le dernier événement d'une série (dernier vainqueur, dernier record, dernière version), sur un fait daté d'après ta coupure, ou sur une donnée vivante (prix, score, classement, météo, actualités) : tu DOIS appeler web_search AVANT de répondre si l'outil est disponible — répondre de mémoire est interdit pour ces sujets. Un contexte Web daté prime TOUJOURS sur ta mémoire.\n"
+        f"6. Fiabilité temporelle : Nous sommes le {current_date_str}. Ta connaissance interne s'arrête à ta date de coupure d'entraînement, ANTÉRIEURE à aujourd'hui. Pour TOUTE question portant sur le dernier événement d'une série (dernier vainqueur, dernier record, dernière version), sur un fait daté d'après ta coupure, ou sur une donnée vivante (prix, score, classement, météo, actualités) : tu DOIS appeler web_research AVANT de répondre si l'outil est disponible — répondre de mémoire est interdit pour ces sujets. Un contexte Web daté prime TOUJOURS sur ta mémoire.\n"
         f"7. Formatage : Utilise le Markdown seulement lorsqu'il améliore réellement la lisibilité ; une réponse simple doit rester conversationnelle et concise.\n"
         f"8. Salutations : Pour une première salutation simple ('Bonjour', 'Salut'), réponds chaleureusement en une courte phrase."
     )
@@ -3746,7 +3529,7 @@ async def chat_stream(req: ChatRequest):
     if force_web_search:
         system_instruction += (
             "\n11. Recherche Web obligatoire : la demande nécessite des "
-            "informations actuelles. Utilise web_search, puis fetch_pages "
+            "informations actuelles. Utilise web_research, puis web_read "
             "sur les URLs pertinentes AVANT de répondre, et ne cite que ce "
             "que tu as réellement lu dans les pages récupérées. Si un "
             "résultat ou une page lue mentionne une édition, une version ou "
@@ -3756,11 +3539,11 @@ async def chat_stream(req: ChatRequest):
         )
     elif web_tools_available:
         system_instruction += (
-            "\n11. Outils Web disponibles : utilise web_search UNIQUEMENT si "
+            "\n11. Outils Web disponibles : utilise web_research UNIQUEMENT si "
             "la question porte sur une information actuelle, récente ou "
             "vérifiable en ligne — jamais pour un calcul, du code ou une "
-            "question de connaissance générale. Après web_search, lis les "
-            "pages avec fetch_pages avant de citer quoi que ce soit. Si une page que tu as lue contredit ta mémoire d'entraînement, LA PAGE GAGNE : elle est plus récente que toi."
+            "question de connaissance générale. Après web_research, lis les "
+            "pages avec web_read avant de citer quoi que ce soit. Si une page que tu as lue contredit ta mémoire d'entraînement, LA PAGE GAGNE : elle est plus récente que toi."
         )
 
     # Axe 4 : une image jointe au chat est pré-liée au run — l'agent
@@ -3848,6 +3631,17 @@ async def chat_stream(req: ChatRequest):
         )
 
     system_instruction += f"\n\nProfil actif :\n{model_profile.system_addendum}"
+    if social_turn:
+        system_instruction = (
+            f"Tu es LasmeLLMChat. Nous sommes le {current_date_str}.\n"
+            "L'utilisateur ouvre le contact : une salutation, quelle qu'en "
+            "soit la forme (bonjour, salut, hello, coucou, hey, ça va…), "
+            "un remerciement ou un au revoir. Ce n'est pas une demande de travail.\n"
+            "Réponds en une ou deux phrases, dans sa langue, comme dans une "
+            "conversation. N'accuse pas réception de consignes. Ne mentionne "
+            "ni formatage, ni sources, ni rigueur, ni style. Ne demande ni "
+            "le sujet, ni des documents, ni un public cible. N'utilise aucun outil."
+        )
     messages_payload.insert(0, {"role": "system", "content": system_instruction})
 
     context_instruction = (
@@ -3866,7 +3660,7 @@ async def chat_stream(req: ChatRequest):
         "extraits réellement fournis, sans supposer que leur nombre garantit "
         "à lui seul la vérité. Si les preuves restent insuffisantes, dis-le. "
         "Cite tes sources par des marqueurs numériques : place [n] (n = numéro "
-        "du résultat tel qu'affiché dans les sorties de tes outils web_search "
+        "du résultat tel qu'affiché dans les sorties de tes outils web_research "
         "ou dans les extraits Web fournis ci-dessus) immédiatement à la fin "
         "de la phrase ou du paragraphe que cette source étaye. Plusieurs "
         "marqueurs adjacents sont autorisés : [2][5]. "
@@ -3916,7 +3710,7 @@ async def chat_stream(req: ChatRequest):
                 )
             for delta in iter_stream_text_chunks(full_assistant_reply):
                 yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
-                await asyncio.sleep(0.006)
+
             if not temporary:
                 assistant_message_id = db.add_message(
                     session_id,
@@ -3936,7 +3730,7 @@ async def chat_stream(req: ChatRequest):
             yield "data: [DONE]\n\n"
             return
 
-        if rag_context:
+        if rag_context and not social_turn:
             stream_messages[-1]["content"] += (
                 f"{rag_context}{context_instruction}"
             )
@@ -3963,7 +3757,7 @@ async def chat_stream(req: ChatRequest):
             req.intelligence_level,
             has_external_context=bool(rag_context or web_results_data),
         )
-        if model_profile.think is False:
+        if social_turn or model_profile.think is False:
             reasoning_effort = False
         effort_name = (
             reasoning_effort
@@ -4008,18 +3802,21 @@ async def chat_stream(req: ChatRequest):
                 file_ids=req.selected_file_ids or None,
             )
 
-        chat_registry = build_agent_registry(
-            search_fn=search_web_detailed if web_tools_available else None,
-            fetch_fn=fetch_url_content if web_tools_available else None,
-            rag_search_fn=chat_rag_search,
-            python_runner=python_runner,
-            file_store=project_file_store,
-            vision_client=client,
-            vision_model=settings.vision_model,
-        artifact_store=artifact_store,
-        default_project_id=project_id,
-        prebound_image=(prebound_chat_image or None),
-    )
+        if social_turn:
+            chat_registry = ToolRegistry()
+        else:
+            chat_registry = build_agent_registry(
+                web_enabled=web_tools_available,
+                model_id=selected_model,
+                rag_search_fn=chat_rag_search,
+                python_runner=python_runner,
+                file_store=project_file_store,
+                vision_client=client,
+                vision_model=settings.vision_model,
+                artifact_store=artifact_store,
+                default_project_id=project_id,
+                prebound_image=(prebound_chat_image or None),
+            )
         # Numérotation cumulative des citations [n] : les sources déjà
         # trouvées par la pré-recherche occupent [1..N] (elles sont
         # numérotées ainsi dans le contexte injecté), les recherches de
@@ -4084,41 +3881,22 @@ async def chat_stream(req: ChatRequest):
                         yield f"data: {json.dumps({'type': 'reasoning_start', 'message': 'Analyse en cours', 'effort': effort_name})}\n\n"
                     yield f"data: {json.dumps({'type': 'reasoning_delta', 'text': payload.get('text') or ''})}\n\n"
                 elif event.type == "content_delta":
+                    # Le texte d'un tour n'est pas encore la réponse : il
+                    # peut être suivi d'outils ou écarté par le harnais.
+                    # On le garde et on ne l'affiche qu'à la fin du run.
                     delta = payload.get("text") or ""
                     if not delta:
                         continue
-                    if first_content_at is None:
-                        first_content_at = time.monotonic()
+                    full_assistant_reply += clean_model_text(delta)
+                elif event.type == "tool_call":
                     if reasoning_started and not reasoning_finished:
                         reasoning_finished = True
-                        duration = round(time.monotonic() - reasoning_started_at, 1)
-                        summary_parts = ["Analyse terminée."]
-                        if context_selection.selected_message_count > 1:
-                            summary_parts.insert(
-                                0,
-                                "Contexte de la conversation pris en compte.",
-                            )
-                        if web_results_data:
-                            summary_parts.insert(
-                                0,
-                                f"{len(web_results_data)} sources Web consultées.",
-                            )
-                        if rag_context:
-                            summary_parts.insert(0, "Documents joints analysés.")
-                        yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': ' '.join(summary_parts)})}\n\n"
-                    clean_delta = clean_model_text(delta)
-                    full_assistant_reply += clean_delta
-                    if not buffer_grounded_output:
-                        yield f"data: {json.dumps({'type': 'content_delta', 'content': clean_delta})}\n\n"
-                elif event.type == "tool_call":
-                    if full_assistant_reply.strip():
-                        # Le texte émis AVANT les outils n'est pas la
-                        # réponse (préambule) : effacé du fil et du futur
-                        # message persisté ; le frontend peut le déplacer
-                        # dans le panneau de raisonnement.
-                        yield f"data: {json.dumps({'type': 'content_reset', 'reason': 'preamble', 'text': full_assistant_reply})}\n\n"
-                        full_assistant_reply = ""
-                        first_content_at = None
+                        duration = round(
+                            time.monotonic() - reasoning_started_at, 1
+                        )
+                        yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
+                    full_assistant_reply = ""
+                    first_content_at = None
                     yield f"data: {json.dumps({'type': 'agent_tool_call', 'id': payload.get('id'), 'name': payload.get('name'), 'arguments': str(payload.get('arguments') or '')[:2_000]})}\n\n"
                 elif event.type == "tool_result":
                     note = payload.get("note")
@@ -4126,8 +3904,6 @@ async def chat_stream(req: ChatRequest):
                         "fetch_required_before_answer",
                         "search_required_by_request",
                     ):
-                        if full_assistant_reply.strip():
-                            yield f"data: {json.dumps({'type': 'content_reset', 'reason': 'harness_nudge', 'text': full_assistant_reply})}\n\n"
                         full_assistant_reply = ""
                         first_content_at = None
                     if payload.get("name"):
@@ -4139,8 +3915,8 @@ async def chat_stream(req: ChatRequest):
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
         if agent_result is not None:
-            # Sources trouvées par les outils de l'agent (web_search /
-            # fetch_pages pendant le run) : dédup par URL normalisée.
+            # Sources trouvées par les outils de l'agent (web_research /
+            # web_read pendant le run) : dédup par URL normalisée.
             # La persistance et le drawer en profitent.
             sources_before_agent = len(web_results_data)
             web_results_data = merge_dedup_sources(
@@ -4158,6 +3934,8 @@ async def chat_stream(req: ChatRequest):
                 full_assistant_reply = strip_unsupported_citations(
                     full_assistant_reply, known_urls
                 )
+            if full_assistant_reply and first_content_at is None:
+                first_content_at = time.monotonic()
             elapsed = time.monotonic() - generation_started_at
             # Σ des temps de décodage réels de chaque appel modèle, mesurés
             # par le client (hors exécution d'outils) : le tok/s affiché est
@@ -4219,7 +3997,7 @@ async def chat_stream(req: ChatRequest):
                 )
             for delta in iter_stream_text_chunks(full_assistant_reply):
                 yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
-                await asyncio.sleep(0.006)
+
 
         if full_assistant_reply:
             # Nettoyage final du texte PERSISTÉ et servi : les marqueurs
@@ -4232,6 +4010,10 @@ async def chat_stream(req: ChatRequest):
                 clean_model_text(full_assistant_reply),
                 len(web_results_data),
             )
+            if not buffer_grounded_output:
+                for delta in iter_stream_text_chunks(full_assistant_reply):
+                    yield f"data: {json.dumps({'type': 'content_delta', 'content': delta})}\n\n"
+    
             if not temporary:
                 message_metadata = compact_web_source_metadata(
                     web_results_data

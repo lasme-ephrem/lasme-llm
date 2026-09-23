@@ -8,35 +8,49 @@ from chat.server.main import (
     clean_model_text,
     iter_stream_text_chunks,
     is_simple_factual_lookup,
-    provider_answer_is_usable,
+    is_social_turn,
     response_presentation_profile,
     response_depth_instruction,
     should_enable_reasoning,
-    should_perform_web_search,
     strip_web_citation_markers,
     unsupported_grounded_numbers,
-    can_reuse_previous_web_context,
 )
-from core.tools.search_ranking import requires_strict_grounding
+from core.agent.grounding import requires_strict_grounding
 from core.memory.context import select_conversation_context
 from core.memory.database import DatabaseManager
 
 
 class ConversationContextTests(unittest.TestCase):
-    def test_previous_web_context_is_only_reused_for_a_real_follow_up(self):
-        self.assertTrue(
-            can_reuse_previous_web_context(
-                "Est-ce que je pourrai le faire tourner en local ?"
-            )
-        )
-        self.assertTrue(
-            can_reuse_previous_web_context("Et quelles sont ses limites ?")
-        )
-        self.assertFalse(
-            can_reuse_previous_web_context(
-                "Quelles sont les dernières nouvelles dans le monde de l'IA ?"
-            )
-        )
+
+    def test_contact_messages_are_social_and_real_requests_are_not(self):
+        for message in (
+            "bonjour",
+            "Bonjour !",
+            "Salut, comment ça va ?",
+            "salut tout le monde",
+            "hello there",
+            "hey, tu es là ?",
+            "coucou",
+            "yo",
+            "wesh",
+            "cc",
+            "bonjour à tous",
+            "hey Lasme",
+            "enchanté",
+            "bonne soirée",
+            "good morning",
+            "merci beaucoup",
+            "au revoir",
+            "qui es-tu ?",
+        ):
+            self.assertTrue(is_social_turn(message), message)
+        for message in (
+            "Bonjour, quel est le cours du bitcoin ?",
+            "salut, explique-moi la récursivité",
+            "hello, cherche le prix de la RTX",
+            "Combien font 6*7 ?",
+        ):
+            self.assertFalse(is_social_turn(message), message)
 
     def test_follow_up_keeps_previous_topic(self):
         messages = [
@@ -73,40 +87,6 @@ class ConversationContextTests(unittest.TestCase):
         self.assertIn("coupe du monde", query.lower())
         self.assertIn("meilleur buteur", query.lower())
 
-    def test_feedback_triggers_search_when_conversation_has_context(self):
-        self.assertTrue(
-            should_perform_web_search(
-                "C'est faux",
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-            )
-        )
-
-    def test_current_event_follow_up_inherits_web_search(self):
-        messages = [
-            ChatMessage(
-                role="user",
-                content="Qui est le vainqueur récent de la Coupe du monde ?",
-            ),
-            ChatMessage(
-                role="assistant",
-                content="L'Espagne a remporté la Coupe du monde 2026 [1].",
-            ),
-            ChatMessage(
-                role="user",
-                content="Comment s'est déroulé le match ?",
-            ),
-        ]
-        self.assertTrue(
-            should_perform_web_search(
-                messages[-1].content,
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                conversation_messages=messages,
-            )
-        )
-
     def test_generated_text_removes_foreign_script_and_mojibake(self):
         self.assertEqual(
             clean_model_text("privilégiant laសervation"),
@@ -128,44 +108,6 @@ class ConversationContextTests(unittest.TestCase):
         self.assertGreater(len(chunks), 4)
         self.assertEqual("".join(chunks), answer)
         self.assertTrue(all(chunks))
-
-    def test_greeting_never_triggers_search(self):
-        self.assertFalse(
-            should_perform_web_search(
-                "Bonjour",
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-            )
-        )
-        messages = [
-            ChatMessage(
-                role="user",
-                content="Quelles sont les dernières nouvelles dans l'IA ?",
-            ),
-            ChatMessage(
-                role="assistant",
-                content="Voici cinq actualités récentes [1][2].",
-            ),
-            ChatMessage(role="user", content="Bonjour, comment tu vas ?"),
-        ]
-        self.assertFalse(
-            should_perform_web_search(
-                messages[-1].content,
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                conversation_messages=messages,
-            )
-        )
-
-    def test_disabled_web_never_triggers_search(self):
-        self.assertFalse(
-            should_perform_web_search(
-                "Qui a gagné la Coupe du monde ?",
-                user_toggle_enabled=False,
-                has_conversation_context=True,
-            )
-        )
 
     def test_standard_effort_levels_pass_through(self):
         # Le niveau explicite de l'utilisateur est toujours respecté.
@@ -252,53 +194,12 @@ class ConversationContextTests(unittest.TestCase):
         # "max" est un héritage : il se replie sur "high" (échelle standard
         # low/medium/high) — voir test_legacy_effort_labels_collapse_onto_high.
 
-    def test_auto_web_search_skips_stable_question(self):
-        self.assertFalse(
-            should_perform_web_search(
-                "Explique le théorème de Pythagore",
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
-        self.assertTrue(
-            should_perform_web_search(
-                "Quelle est la dernière version disponible ?",
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
-
-    def test_auto_web_search_recognizes_recent_ai_model_names(self):
-        self.assertTrue(
-            should_perform_web_search(
-                "Tu connais Kimi K3 ?",
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
-        self.assertTrue(
-            should_perform_web_search(
-                "Est-ce que je pourrai le faire tourner en local ?",
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                has_prior_web_evidence=True,
-            )
-        )
-
     def test_cost_comparisons_require_strict_web_grounding(self):
         query = (
             "Produit un tableau comparatif des modèles LLM chinois "
             "avec leurs coûts"
         )
         self.assertTrue(requires_strict_grounding(query))
-        self.assertTrue(
-            should_perform_web_search(
-                query,
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
         self.assertEqual(response_presentation_profile(query)[0], "comparison")
         self.assertIn(
             "longueur moyenne",
@@ -360,63 +261,6 @@ class ConversationContextTests(unittest.TestCase):
             ),
         )
 
-    def test_provider_cannot_deny_web_access_when_sources_exist(self):
-        results = [
-            {
-                "title": "Kimi K3",
-                "url": "https://huggingface.co/moonshotai/Kimi-K3",
-            }
-        ]
-        self.assertFalse(
-            provider_answer_is_usable(
-                "Je ne peux pas me connecter à Internet en temps réel.",
-                results,
-                ["huggingface.co"],
-            )
-        )
-        self.assertTrue(
-            provider_answer_is_usable(
-                "Kimi K3 est publié avec ses poids ouverts.",
-                results,
-                ["huggingface.co"],
-            )
-        )
-
-    def test_project_document_request_does_not_inherit_old_web_context(self):
-        messages = [
-            ChatMessage(
-                role="user",
-                content="Quelle est la date de livraison en 2026 ?",
-            ),
-            ChatMessage(
-                role="assistant",
-                content="La livraison est prÃ©vue en novembre 2026 [1].",
-            ),
-            ChatMessage(
-                role="user",
-                content="Fais un rapport des fichiers dans ce projet.",
-            ),
-        ]
-
-        self.assertFalse(
-            should_perform_web_search(
-                messages[-1].content,
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                conversation_messages=messages,
-            )
-        )
-        self.assertFalse(
-            should_perform_web_search(
-                "Explique ce document de A Ã  Z.",
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                conversation_messages=messages,
-            )
-        )
-
     def test_recent_sports_follow_ups_always_use_web(self):
         messages = [
             ChatMessage(
@@ -432,42 +276,9 @@ class ConversationContextTests(unittest.TestCase):
                 content="Combien de buts a-t-il marqué en 2026 ?",
             ),
         ]
-        self.assertTrue(
-            should_perform_web_search(
-                messages[-1].content,
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-                conversation_messages=messages,
-            )
-        )
         query = _fallback_contextual_search_query(messages)
         self.assertIn("lionel messi", query.lower())
         self.assertIn("2026", query)
-
-    def test_sports_statistics_trigger_web_without_repeating_competition(self):
-        self.assertTrue(
-            should_perform_web_search(
-                "Quel est son bilan actuel ?",
-                user_toggle_enabled=True,
-                has_conversation_context=True,
-                mode="auto",
-            )
-        )
-        self.assertTrue(
-            should_perform_web_search(
-                "Qui est le vainqueur de la Coupe du monde ?",
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
-        self.assertTrue(
-            should_perform_web_search(
-                "Qui a remporté la Coupe du monde de football 2026 ?",
-                user_toggle_enabled=True,
-                mode="auto",
-            )
-        )
 
     def test_context_keeps_recent_relevant_and_durable_memory(self):
         messages = [

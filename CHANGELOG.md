@@ -1,5 +1,22 @@
 # Changelog
 
+## MCP — recherche web (2026-09-23)
+
+La recherche web native (DuckDuckGo, Monid/tinyfish, GDELT, OpenAlex,
+Wikimedia, Brave/Tavily en HTTP direct, `fetch_pages`) est retirée.
+La recherche passe par les MCP Exa, Brave et Tavily combinés ; la
+fraîcheur sport, météo, actu tech et Wikipédia par le serveur MCP local.
+Les autres MCP (Context7, GitHub, Git, filesystem sandbox, SQLite,
+graphiques AntV, fuseaux) dépendent du modèle : e2b minimal, e4b
+intermédiaire, 12b complet. Les outils natifs calculate, current_time,
+python_run, RAG, fichiers projet, artefacts et vision restent.
+L'agent appelle `web_research` puis `web_read`.
+
+La réponse n'est affichée qu'à la fin du tour d'agent. Le catalogue MCP
+est mis en cache. Le titre de conversation ne demande plus qu'une courte
+génération sans raisonnement, pour ne pas occuper le GPU pendant la
+réponse. Le rendu progressif rattrape le texte plus vite.
+
 ## v2 — Plateforme agentique (2026-09-23)
 
 Refonte complète de l'application : chat local agentique type ChatGPT,

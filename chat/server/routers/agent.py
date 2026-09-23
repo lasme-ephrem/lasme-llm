@@ -19,8 +19,8 @@ AGENT_SYSTEM_PROMPT = (
     "utilise-les quand ils apportent une réponse plus exacte ou plus "
     "fraîche que ta mémoire. Ta connaissance interne s'arrête à ta date "
     "de coupure d'entraînement : tout fait postérieur (événement, prix, "
-    "version, actualité) doit être vérifié avec web_search puis "
-    "fetch_pages avant d'être affirmé ; une page lue prime sur ta "
+    "version, actualité) doit être vérifié avec web_research puis "
+    "web_read avant d'être affirmé ; une page lue prime sur ta "
     "mémoire. Ne répète pas un appel d'outil identique. Quand tu "
     "réponds, sois net, structuré et honnête sur tes incertitudes. "
     "Cite les sources que tu as réellement lues."
@@ -37,8 +37,6 @@ class AgentDeps:
     rag_store: Any
     file_store: Any
     artifact_store: Any
-    search_fn: Any                 # search_web_detailed
-    fetch_fn: Any                  # fetch_url_content
     vision_model: str
     default_project_id: str
     validate_model: Any            # callable(str) -> str (raises HTTPException)
@@ -75,8 +73,7 @@ def create_agent_router(deps: AgentDeps) -> APIRouter:
             )
 
         registry = build_agent_registry(
-            search_fn=deps.search_fn,
-            fetch_fn=deps.fetch_fn,
+            model_id=selected_model,
             rag_search_fn=rag_search,
             python_runner=deps.python_runner,
             file_store=deps.file_store,

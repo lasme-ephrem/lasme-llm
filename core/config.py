@@ -7,11 +7,9 @@ from pydantic import BaseModel
 load_dotenv()
 
 # uvicorn ne configure que ses propres loggers : sans ceci, les traces INFO de
-# l'app (moteur de recherche utilisé, coût [monid], etc.) restent invisibles.
-# basicConfig est un no-op si un handler existe déjà.
+# l'app restent invisibles. basicConfig est un no-op si un handler existe déjà.
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("primp").setLevel(logging.WARNING)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -41,22 +39,6 @@ class Settings(BaseModel):
     llama_startup_timeout: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
     hf_cache_dir: str = os.getenv("HF_HOME", "")
 
-    # Search Engine Configuration
-    perplexity_api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
-    perplexity_sonar_model: str = os.getenv("PERPLEXITY_SONAR_MODEL", "sonar")
-    brave_search_api_key: str = os.getenv("BRAVE_SEARCH_API_KEY", "")
-    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
-    openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
-    # Monid (tinyfish gateway) : premier provider de la chaîne de recherche
-    # web. Optionnel — sans clé, Monid est simplement absent de la chaîne.
-    monid_api_key: str = os.getenv("MONID_API_KEY", "")
-    monid_max_price_usd: float = float(os.getenv("MONID_MAX_PRICE_USD", "0.01"))
-    monid_timeout_s: int = int(os.getenv("MONID_TIMEOUT_S", "30"))
-    search_specialists_enabled: bool = _env_bool(
-        "SEARCH_SPECIALISTS_ENABLED",
-        True,
-    )
-
     # Preferred models (v2): profile ids served by the llama.cpp router.
     # Vision is native on Gemma 4 (mmproj), so the quality profile covers
     # chat, coding, reasoning and vision; E4B is the fast lane.
@@ -71,10 +53,6 @@ class Settings(BaseModel):
         for m in os.getenv("EXTRA_MODELS", "").split(",")
         if m.strip()
     ]
-
-    # Inference defaults
-    temperature: float = 0.2
-    max_tokens: int = 4096
 
     # Local security. Proxied requests (Cloudflared, reverse proxies) require
     # LASME_ACCESS_TOKEN. Coding routes remain local-only unless explicitly
