@@ -1619,32 +1619,82 @@ def should_enable_reasoning(
         return "medium"
     return False
 
+def sanitize_generated_title(raw: str) -> str:
+    """Normalize an LLM-generated conversation title.
+
+    The big labs' standard: a short clean summary, first letter
+    capitalized, in the user's language. This keeps French apostrophes
+    (d'universalité) instead of gluing words together, strips wrapping
+    quotes and "Titre :" prefixes the model sometimes emits.
+    """
+    title = (raw or "").strip()
+    # Le modèle répète parfois un préfixe de consigne : on le retire.
+    title = re.sub(r"^(?:titre|title)\s*:\s*", "", title, flags=re.IGNORECASE)
+    # Guillemets englobants uniquement — les apostrophes françaises restent.
+    title = title.strip(" \t\"'`«»“”«»")
+    # Une seule ligne, sans ponctuation finale.
+    title = title.splitlines()[0].strip() if title else ""
+    title = title.rstrip(" .!?,;:")
+    title = re.sub(r"\s+", " ", title)
+    if not title:
+        return ""
+    # Majuscule sur le premier caractère (accents compris : é → É).
+    return title[0].upper() + title[1:]
+
+
 async def async_generate_and_update_title(session_id: str, prompt: str, model: str):
-    """Generates LLM title in background without blocking Ollama GPU streaming."""
+    """Generates LLM title in background without blocking model streaming."""
     try:
-        await asyncio.sleep(1) # Allow main chat stream to take priority
+        await asyncio.sleep(1)  # Allow the main chat stream to take priority
         title_prompt = [
-            {"role": "system", "content": "Tu es un résumeur de conversation. Génère un titre très court (3 à 5 mots) résumant la demande de l'utilisateur. Rédige le titre EXCLUSIVEMENT en français avec l'alphabet latin. N'utilise AUCUN caractère chinois, asiatique ou cyrillique. Ne mets aucun guillemet, aucune ponctuation finale, réponds UNIQUEMENT avec le titre."},
-            {"role": "user", "content": prompt[:300]}
+            {
+                "role": "system",
+                "content": (
+                    "Génère un titre très court (3 à 6 mots) résumant la "
+                    "demande de l'utilisateur, DANS LA LANGUE de sa demande. "
+                    "Style : un résumé propre, première lettre en majuscule, "
+                    "sans guillemets, sans point final, sans préfixe « Titre : » "
+                    "— réponds uniquement avec le titre. Conserve les "
+                    "apostrophes françaises (d'universalité). N'utilise aucun "
+                    "caractère chinois, asiatique ou cyrillique."
+                ),
+            },
+            {"role": "user", "content": prompt[:300]},
         ]
-        # For title summary, fallback to chat_model if vision model
-        summary_model = settings.chat_model if "vl" in model or "vision" in model else model
+        # Same model as the conversation: the router keeps it loaded, so no
+        # expensive swap for a 40-token generation.
         reply = await client.chat(
-            model=summary_model,
+            model=model,
             messages=title_prompt,
             temperature=0.2,
             num_ctx=2_048,
-            num_predict=40,
+            # Gemma raisonne avant de répondre : avec 40 tokens, tout le
+            # budget partait en thinking et content restait vide (titre
+            # jamais mis à jour). 512 couvre raisonnement court + titre.
+            num_predict=512,
         )
-        raw_title = clean_model_text(
-            reply.get("message", {}).get("content", "")
+        clean_title = sanitize_generated_title(
+            clean_model_text(reply.get("message", {}).get("content", ""))
+        )
+        if not clean_title:
+            # Échantillonnage malchanceux : le raisonnement a mangé le
+            # budget. Un seul retry avec le double, puis abandon silencieux.
+            reply = await client.chat(
+                model=model,
+                messages=title_prompt,
+                temperature=0.2,
+                num_ctx=2_048,
+                num_predict=1_024,
+            )
+            clean_title = sanitize_generated_title(
+                clean_model_text(reply.get("message", {}).get("content", ""))
+            )
+        # Strip CJK, Cyrillic, Hiragana/Katakana & Hangul (accents FR préservés).
+        clean_title = re.sub(
+            r"[\u4e00-\u9fff\u0400-\u04ff\u3040-\u30ff\uac00-\ud7af]", "",
+            clean_title,
         ).strip()
-        
-        # Remove quotes
-        clean_title = re.sub(r'[\"\']', '', raw_title)
-        # Strip CJK (Chinese), Cyrillic (Russian), Hiragana/Katakana & Hangul characters while preserving French accents!
-        clean_title = re.sub(r'[\u4e00-\u9fff\u0400-\u04ff\u3040-\u30ff\uac00-\ud7af]', '', clean_title).strip()
-        
+
         if clean_title and len(clean_title) <= 60:
             db.update_session_title(session_id, clean_title)
     except Exception:
