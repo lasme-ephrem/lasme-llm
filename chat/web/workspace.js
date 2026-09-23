@@ -1129,8 +1129,7 @@ function renderCanvasDocumentPreview(source) {
             const mathDelimiters = [
                 { left: "\\[", right: "\\]", display: true },
                 { left: "$$", right: "$$", display: true },
-                { left: "\\(", right: "\\)", display: false },
-                { left: "$", right: "$", display: false }
+                { left: "\\(", right: "\\)", display: false }
             ];
             // Boucle jusqu'à stabilité : le premier pass peut laisser des
             // fragments de formules (même raison que dans app.js).

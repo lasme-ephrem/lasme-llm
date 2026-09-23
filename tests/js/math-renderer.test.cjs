@@ -83,6 +83,32 @@ test("restores model-escaped currency without leaking internal tokens", () => {
     assert.match(prepared.text, /\*\*\$1\.10\*\*/);
 });
 
+test("keeps a price written before the dollar out of math", () => {
+    const source = (
+        "**0,10 $ par million de jetons d'entrée** et "
+        + "**0,20 $ par million de jetons de sortie**."
+    );
+    const prepared = math.prepareForMarkdown(source);
+
+    assert.equal(prepared.math.length, 0);
+    assert.equal(prepared.text, source);
+});
+
+test("keeps an escaped dollar before words out of math", () => {
+    const source = (
+        "facturé environ **0,10 \\$ par million de tokens en entrée** "
+        + "et **0,20 \\$ par million de tokens en sortie**."
+    );
+    const prepared = math.prepareForMarkdown(source);
+
+    assert.equal(prepared.math.length, 0);
+    assert.equal(
+        prepared.text,
+        "facturé environ **0,10 $ par million de tokens en entrée** "
+        + "et **0,20 $ par million de tokens en sortie**."
+    );
+});
+
 test("renders plain percentages and prices as text instead of equations", () => {
     const source = [
         "Score \\(93,12\\%\\) sur MATH.",

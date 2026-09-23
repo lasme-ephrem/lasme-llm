@@ -64,7 +64,10 @@
     function protectCurrency(text) {
         const currency = [];
         const protectedText = text.replace(
-            /\\?\$(?=\d)/g,
+            // "\$" is a model escape for a currency sign, even before a
+            // word ("0,10 \$ par million"). A bare "$" is only currency
+            // when a digit follows, so real $...$ formulas stay intact.
+            /\\\$|\\?\$(?=\d)/g,
             () => {
                 const placeholder = token(
                     CURRENCY_TOKEN_PREFIX,
@@ -102,6 +105,21 @@
             );
     }
 
+    function isFormulaDollarSpan(inner) {
+        const text = String(inner || "");
+        if (!text.trim()) return false;
+        if (/\\[a-zA-Z]/.test(text) || /[_^=<>{}]/.test(text)) return true;
+        // « 0,10 $ par million … 0,20 $ » : des mots, pas une formule.
+        if (/\s/.test(text) && /[A-Za-zÀ-ÿ]{3,}/.test(text)) return false;
+        return text.length <= 40;
+    }
+
+    function replaceInlineDollars(text, onFormula) {
+        return text.replace(/\$(?!\$)([^$\n]+?)\$/g, (match, math) => (
+            isFormulaDollarSpan(math) ? onFormula(math) : match
+        ));
+    }
+
     function protectDelimitedMath(text) {
         const blocks = [];
         let output = text;
@@ -114,7 +132,7 @@
         output = output.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => capture(true, math));
         output = output.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => capture(true, math));
         output = output.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => capture(false, math));
-        output = output.replace(/\$(?!\$)([^$\n]+?)\$/g, (_, math) => capture(false, math));
+        output = replaceInlineDollars(output, math => capture(false, math));
         return { text: output, blocks };
     }
 
@@ -191,7 +209,7 @@
         output = output.replace(/\$\$([\s\S]*?)\$\$/g, (_, source) => capture(true, source));
         output = output.replace(/\\\[([\s\S]*?)\\\]/g, (_, source) => capture(true, source));
         output = output.replace(/\\\(([\s\S]*?)\\\)/g, (_, source) => capture(false, source));
-        output = output.replace(/\$(?!\$)([^$\n]+?)\$/g, (_, source) => capture(false, source));
+        output = replaceInlineDollars(output, source => capture(false, source));
         output = restoreTokens(
             output,
             CURRENCY_TOKEN_PREFIX,

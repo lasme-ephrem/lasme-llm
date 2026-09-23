@@ -3539,8 +3539,7 @@ function renderRichContent(container, text, webResults) {
             const mathDelimiters = [
                 { left: "\\[", right: "\\]", display: true },
                 { left: "$$", right: "$$", display: true },
-                { left: "\\(", right: "\\)", display: false },
-                { left: "$", right: "$", display: false }
+                { left: "\\(", right: "\\)", display: false }
             ];
             const mathIgnoredTags = ["script", "noscript", "style", "textarea", "pre", "code"];
             // Le passage markdown peut fragmenter une formule (italique dans
