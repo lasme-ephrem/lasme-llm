@@ -56,16 +56,29 @@
         }
 
         function requestFrame(callback) {
-            if (typeof global.requestAnimationFrame === "function") {
+            // PIÈGE : requestAnimationFrame EXISTE dans un onglet masqué
+            // mais ne s'y DÉCLENCHE JAMAIS (document.hidden) — la
+            // révélation serait gelée et la réponse jamais rendue. Le
+            // timer de 16 ms est le relais de visibilité : il garde le
+            // flux vivant quelle que soit la visibilité de la page.
+            const hidden = Boolean(global.document && global.document.hidden);
+            if (
+                typeof global.requestAnimationFrame === "function"
+                && !hidden
+            ) {
                 return global.requestAnimationFrame(callback);
             }
-            return global.setTimeout(callback, 16);
+            return global.setTimeout(callback, MIN_FRAME_MS);
         }
 
         function cancelFrame(frameId) {
+            // frameId peut provenir d'un rAF OU d'un setTimeout selon la
+            // visibilité au moment de la planification : les deux annulations
+            // sont sans danger et couvrent les deux cas.
             if (typeof global.cancelAnimationFrame === "function") {
                 global.cancelAnimationFrame(frameId);
-            } else {
+            }
+            if (typeof global.clearTimeout === "function") {
                 global.clearTimeout(frameId);
             }
         }
