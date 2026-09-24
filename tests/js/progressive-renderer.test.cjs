@@ -54,3 +54,44 @@ test("preserves numeric arrays inside inline and fenced code", () => {
         ].join("\n")
     );
 });
+
+test("la révélation continue dans un onglet masqué (requestAnimationFrame gelé)", async () => {
+    const frozenFrames = [];
+    const originalRaf = globalThis.requestAnimationFrame;
+    const originalDocument = globalThis.document;
+    // Simule un onglet masqué : rAF présent mais JAMAIS déclenché.
+    globalThis.requestAnimationFrame = (callback) => {
+        frozenFrames.push(callback);
+        return frozenFrames.length;
+    };
+    globalThis.document = { hidden: true };
+    try {
+        const container = { onglet: "masque" };
+        let shown = "";
+        await new Promise((resolve) => {
+            const guard = setTimeout(resolve, 3000);
+            progressive.schedule(
+                container,
+                "x".repeat(500),
+                (_container, text) => {
+                    shown = text;
+                },
+                {
+                    final: true,
+                    onComplete: () => {
+                        clearTimeout(guard);
+                        resolve();
+                    },
+                }
+            );
+        });
+        assert.equal(shown, "x".repeat(500));
+        assert.equal(frozenFrames.length, 0);
+        progressive.cancel(container);
+    } finally {
+        if (originalRaf === undefined) delete globalThis.requestAnimationFrame;
+        else globalThis.requestAnimationFrame = originalRaf;
+        if (originalDocument === undefined) delete globalThis.document;
+        else globalThis.document = originalDocument;
+    }
+});
