@@ -4,6 +4,10 @@
 !.env.example
 README_PERSONNEL.md
 
+# Document de travail local : roadmap de refonte (prompt d'exécution).
+# À SUPPRIMER quand tous les chantiers de la ROADMAP.md seront terminés.
+ROADMAP.md
+
 # Python
 .venv/
 venv/
