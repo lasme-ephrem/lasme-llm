@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 class ScriptedChatClient:
     def __init__(self, turns):
         self.turns = list(turns)
+        self.seen_messages = []
 
     async def stream_chat(self, *, model, messages, tools=None, **kwargs):
         self.tools = tools
+        self.seen_messages.append(list(messages))
         for chunk in self.turns.pop(0):
             yield chunk
 
@@ -189,6 +191,7 @@ class AgenticChatStreamTests(unittest.TestCase):
             )
             reset = next(e for e in events if e["type"] == "content_reset")
             self.assertIn("avant de répondre", reset["text"])
+            self.assertEqual(reset.get("reason"), "tool_call")
 
             # La narration est archivée, jamais collée à la réponse.
             replace = next(e for e in events if e["type"] == "content_replace")
@@ -209,6 +212,59 @@ class AgenticChatStreamTests(unittest.TestCase):
             messages = self.db.get_session_messages(session_id)
             assistant = [m for m in messages if m["role"] == "assistant"][-1]
             self.assertEqual(replace["text"], assistant["content"])
+        finally:
+            self.db.delete_session(session_id)
+
+    def test_budget_retry_ranges_draft_without_duplicating(self):
+        # Un tour tronqué (budget dépassé) est RE-STREAMÉ par l'orchestrateur :
+        # le brouillon tronqué doit être rangé (reason budget_retried), sinon
+        # il s'accumule avec sa relance dans la réponse.
+        truncated = [
+            {"message": {"content": "Début de réponse tronqu"}},
+            {
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "done_reason": "length",
+                "finish_reason": "length",
+                "eval_count": 8,
+                "prompt_eval_count": 30,
+            },
+        ]
+        scripted = ScriptedChatClient([list(truncated), list(FINAL_TURN)])
+        session_id, events = self._run_chat(scripted)
+        try:
+            resets = [e for e in events if e["type"] == "content_reset"]
+            self.assertTrue(resets, "le brouillon tronqué doit être rangé")
+            self.assertEqual(resets[-1].get("reason"), "budget_retried")
+            self.assertIn("tronqu", resets[-1]["text"])
+            messages = self.db.get_session_messages(session_id)
+            assistant = [m for m in messages if m["role"] == "assistant"][-1]
+            self.assertNotIn("tronqu", assistant["content"])
+            self.assertEqual(
+                assistant["content"].count("Le résultat est 42."), 1
+            )
+        finally:
+            self.db.delete_session(session_id)
+
+    def test_prompt_forbids_drafting_before_tool_calls(self):
+        from core.agent.prompts import TURN_DISCIPLINE_RULE
+
+        scripted = ScriptedChatClient([list(FINAL_TURN)])
+        session_id, _events = self._run_chat(scripted)
+        try:
+            system_contents = [
+                str(message.get("content") or "")
+                for message in scripted.seen_messages[0]
+                if message.get("role") == "system"
+            ]
+            self.assertTrue(
+                any(
+                    TURN_DISCIPLINE_RULE in content
+                    for content in system_contents
+                ),
+                "la règle « outils d'abord, réponse ensuite » doit figurer "
+                "dans le prompt système du chat",
+            )
         finally:
             self.db.delete_session(session_id)
 

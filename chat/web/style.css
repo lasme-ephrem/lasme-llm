@@ -1765,6 +1765,66 @@ img.agent-tool-chart {
 
 /* Compact source drawer */
 
+/* Brouillons de travail : le texte streamé puis écarté (avant appels
+   d'outils, réponse écartée par le harnais, tour relancé) se range ici —
+   il n'est JAMAIS supprimé de l'écran. */
+.work-notes-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0.55rem 0;
+}
+
+.work-note {
+    border: 1px solid var(--border);
+    border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-card) 88%, var(--accent));
+    font-size: 0.82rem;
+    color: var(--text-secondary, #64748b);
+}
+
+.work-note summary {
+    cursor: pointer;
+    padding: 0.45rem 0.7rem;
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.work-note summary::-webkit-details-marker {
+    display: none;
+}
+
+.work-note[open] summary {
+    border-bottom: 1px solid var(--border);
+}
+
+.work-note-text {
+    margin: 0;
+    padding: 0.6rem 0.7rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    max-height: 18rem;
+    overflow-y: auto;
+}
+
+/* Rédaction en cours : le texte affiché est PROVISOIRE (brouillon de tour),
+   jamais présenté comme la réponse finale. */
+.bubble.is-drafting .answer-content::before {
+    content: "✎ Rédaction en cours…";
+    display: block;
+    margin-bottom: 0.45rem;
+    font-size: 0.78rem;
+    font-style: italic;
+    letter-spacing: 0.01em;
+    color: var(--text-secondary, #64748b);
+    opacity: 0.85;
+}
+
 /* Premium project workspace selector */
 .workspace-switcher {
     position: relative;

@@ -36,6 +36,7 @@ from core.inference.profiles import (
 from chat.server.routers.agent import AgentDeps, create_agent_router
 from chat.server.routers.meta import MetaDeps, create_meta_router
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
+from core.agent.prompts import TURN_DISCIPLINE_RULE
 from core.agent.registry import build_agent_registry
 from core.agent.tools import ToolRegistry
 from core.agent.grounding import (
@@ -3577,6 +3578,10 @@ async def chat_stream(req: ChatRequest):
         f"{presentation_instruction}\n"
         f"12. Profondeur adaptative : {depth_instruction}"
     )
+    # Règle de déroulement : outils d'abord, réponse ensuite. Sans elle,
+    # le modèle rédige un brouillon avant d'outiller — brouillon que
+    # l'utilisateur verrait streamer puis être rangé (voir bug.mp4).
+    system_instruction += TURN_DISCIPLINE_RULE
 
     if strict_grounding:
         system_instruction += (
@@ -3911,10 +3916,10 @@ async def chat_stream(req: ChatRequest):
                         )
                         yield f"data: {json.dumps({'type': 'reasoning_done', 'duration': duration, 'summary': 'Analyse terminée.'})}\n\n"
                     if full_assistant_reply:
-                        # Narration de tour (texte produit avant l'appel
-                        # d'outil) : conservée dans le panneau de réflexion
-                        # comme « préambule », jamais dans la réponse.
-                        yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply})}\n\n"
+                        # Brouillon de tour (texte produit avant l'appel
+                        # d'outil) : rangé en note de travail dépliable par
+                        # le client — jamais affiché comme réponse finale.
+                        yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply, 'reason': 'tool_call'})}\n\n"
                     full_assistant_reply = ""
                     first_content_at = None
                     yield f"data: {json.dumps({'type': 'agent_tool_call', 'id': payload.get('id'), 'name': payload.get('name'), 'arguments': str(payload.get('arguments') or '')[:2_000]})}\n\n"
@@ -3923,11 +3928,16 @@ async def chat_stream(req: ChatRequest):
                     if note in (
                         "fetch_required_before_answer",
                         "search_required_by_request",
+                        "budget_retried",
                     ):
-                        # Réponse écartée par le harnais : même sort que la
-                        # narration — conservée en préambule, pas en réponse.
+                        # Réponse écartée par le harnais ou tour relancé
+                        # (budget dépassé) : même sort que le brouillon de
+                        # tour — rangé, jamais dans la réponse finale.
+                        # budget_retried RE-STREAME le tour : sans ce
+                        # retrait, le texte tronqué et sa relance
+                        # s'accumuleraient (doublon).
                         if full_assistant_reply:
-                            yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply})}\n\n"
+                            yield f"data: {json.dumps({'type': 'content_reset', 'text': full_assistant_reply, 'reason': note})}\n\n"
                         full_assistant_reply = ""
                         first_content_at = None
                     if payload.get("name"):

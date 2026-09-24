@@ -35,7 +35,8 @@ def main() -> None:
         ("js workspace", ["node", "--check", "chat/web/workspace.js"]),
         ("js tests", ["node", "--test",
                       "tests/js/math-renderer.test.cjs",
-                      "tests/js/progressive-renderer.test.cjs"]),
+                      "tests/js/progressive-renderer.test.cjs",
+                      "tests/js/answer-stream.test.cjs"]),
         ("pytest", [PYTHON, "-m", "pytest", "-p", "no:cacheprovider"]),
         ("pip check", [PYTHON, "-m", "pip", "check"]),
     ]
