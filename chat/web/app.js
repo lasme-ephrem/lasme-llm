@@ -1387,6 +1387,12 @@ function paintLiveAssistantState(bubble, live) {
             renderAssistantActivity(bubble, "web", item.state, item.title, item.detail);
         } else if (item.kind === "tool") {
             upsertLiveAgentToolCard(bubble, item.event);
+        } else if (item.kind === "work-note") {
+            window.LasmeAnswerStream?.foldIntoWorkNote(
+                bubble,
+                item.text,
+                item.reason
+            );
         } else if (item.kind === "plan") {
             renderResearchPlan(bubble, item.steps);
         } else if (item.kind === "step") {
@@ -2167,13 +2173,23 @@ async function sendChatMessage(options = {}) {
                         }
                     }
                     if (parsed.type === "content_reset") {
+                        // Jamais d'effacement : le brouillon streamé se
+                        // range en note de travail dépliable (work-note),
+                        // rejouable en multitâche via live.decorations.
                         fullResponse = "";
                         live.answerText = "";
-                        live.reasoningText += (live.reasoningText ? "\n\n" : "")
-                            + `— préambule —\n${String(parsed.text || "")}`;
                         live.reasoningState = "done";
+                        live.decorations.push({
+                            kind: "work-note",
+                            text: String(parsed.text || ""),
+                            reason: parsed.reason || "tool_call",
+                        });
                         if (isStreamVisible()) {
-                            resetStreamedAnswer(assistantBubble, parsed.text || "");
+                            archiveStreamedAnswer(
+                                assistantBubble,
+                                String(parsed.text || ""),
+                                parsed.reason || "tool_call"
+                            );
                         }
                     }
                     if (parsed.type === "content_replace") {
@@ -2261,6 +2277,10 @@ async function sendChatMessage(options = {}) {
                     if (parsed.content) {
                         fullResponse = cleanModelText(fullResponse + parsed.content);
                         live.answerText = fullResponse;
+                        // Provisoire jusqu'à la fin de flux : badge
+                        // « Rédaction en cours », jamais présenté comme la
+                        // réponse finale (qui seule s'affiche engagée).
+                        window.LasmeAnswerStream?.setDrafting(assistantBubble, true);
                     
                         // Only render to active UI if user is still on this conversation
                         if (isStreamVisible()) {
@@ -2297,6 +2317,9 @@ async function sendChatMessage(options = {}) {
         window.setTimeout(() => void loadSessions(), 5000);
 
         if (isStreamVisible()) {
+            // Fin de flux : le texte affiché devient la réponse finale
+            // (le badge « Rédaction en cours » disparaît).
+            window.LasmeAnswerStream?.setDrafting(assistantBubble, false);
             renderAssistantProgressively(
                 assistantBubble,
                 fullResponse,
@@ -2358,6 +2381,7 @@ async function sendChatMessage(options = {}) {
 
     } catch (err) {
         window.LasmeProgressiveRenderer?.cancel?.(assistantBubble);
+        window.LasmeAnswerStream?.setDrafting(assistantBubble, false);
         if (err.name === "AbortError") {
             if (fullResponse) {
                 fullResponse += "\n\n*(Génération arrêtée par l'utilisateur)*";
@@ -2725,13 +2749,18 @@ function handleReasoningDone(bubble, duration) {
     }, delay);
 }
 
-// content_reset: the streamed answer so far was NOT the real response
-// (preamble before tool calls, or answer rejected by the harness).
-// Clear the markdown container and archive the text in the thinking panel.
-function resetStreamedAnswer(bubble, preambleText) {
+// content_reset: the streamed text so far was NOT the final response
+// (draft before tool calls, answer rejected by the harness, retried turn).
+// UX guarantee: it is NEVER erased from the screen — LasmeAnswerStream
+// folds it into a collapsible work note, and only the final answer takes
+// the answer zone.
+function archiveStreamedAnswer(bubble, draftText, reason) {
     window.LasmeProgressiveRenderer?.cancel(bubble);
-    bubble.querySelector(".answer-content")?.remove();
-    bubble.querySelector(".sources-drawer-container")?.remove();
+    if (window.LasmeAnswerStream) {
+        window.LasmeAnswerStream.foldIntoWorkNote(bubble, draftText, reason);
+    } else {
+        bubble.querySelector(".answer-content")?.remove();
+    }
     bubble.querySelector(".generation-performance")?.remove();
     bubble.querySelector(".generated-image-card")?.remove();
     bubble.querySelector(".dalle-loader-card")?.remove();
@@ -2745,18 +2774,8 @@ function resetStreamedAnswer(bubble, preambleText) {
     panel.classList.remove("streaming");
     const label = panel.querySelector(".thinking-label");
     if (label) label.textContent = "A réfléchi";
-    const pre = panel.querySelector(".thinking-text");
-    if (pre) {
-        const separator = pre.textContent ? "\n\n" : "";
-        pre.textContent += (
-            `${separator}— préambule —\n${String(preambleText || "")}`
-        );
-        pre.classList.toggle(
-            "is-scrollable",
-            pre.scrollHeight > pre.clientHeight + 4
-        );
-    }
-    // Back to the collapsed state once the preamble is archived.
+    // The draft lives in the work note now (no "— préambule —" duplicate):
+    // back to the collapsed state.
     setThinkingMode(panel, "closed");
 }
 
