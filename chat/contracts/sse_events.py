@@ -57,6 +57,12 @@ EVENT_TYPES: Set[str] = {
     # Images
     "image_start",
     "image_done",
+    # Console agent autonome (/api/agent/stream, /api/coding/agent/stream)
+    "status",
+    "thought",
+    "tool_call",
+    "tool_result",
+    "final",
 }
 
 # Raisons possibles de content_reset (rangement d'un brouillon).

@@ -37,6 +37,7 @@ def main() -> None:
                       "tests/js/math-renderer.test.cjs",
                       "tests/js/progressive-renderer.test.cjs",
                       "tests/js/answer-stream.test.cjs"]),
+        ("imports", [PYTHON, "-m", "scripts.check_imports"]),
         ("pytest", [PYTHON, "-m", "pytest", "-p", "no:cacheprovider"]),
         ("pip check", [PYTHON, "-m", "pip", "check"]),
     ]
