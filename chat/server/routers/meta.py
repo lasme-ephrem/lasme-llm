@@ -90,8 +90,10 @@ def create_meta_router(deps: MetaDeps) -> APIRouter:
             **ocr,
         }
         try:
+            from chat.server.deps import deps as app_deps
+
             heartbeat = deps.db.get_setting("worker_heartbeat", "")
-            pending_jobs = deps.job_store.pending_count()
+            pending_jobs = app_deps.job_store.pending_count()
         except Exception:
             heartbeat, pending_jobs = "", -1
         checks["worker"] = {
