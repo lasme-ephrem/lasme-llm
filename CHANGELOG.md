@@ -1,5 +1,47 @@
 # Changelog
 
+## Refonte modulaire — phases A→E (2026-09-25)
+
+Découpage du monolithe en monolithe modulaire, sans changement de
+comportement : la suite de tests historique (228 pytest + 35 subtests)
+passe **sans modification des assertions**.
+
+- **`chat/server/main.py` : 4 300 → ~150 lignes.** C'est devenu la racine
+  de composition (dépendances + middleware de sécurité patchable + réexport
+  des symboles historiques des tests). Le corps est découpé en :
+  - `chat/contracts/` — schémas Pydantic + **contrat SSE versionné**
+    (`sse_events.py`) ;
+  - `chat/server/services/` — `text` (nettoyage/citations), `sources`
+    (extraction des sources agent), `stats` (tok/s, TTFT), `heuristics`
+    (social, actualité, profondeur), `background` (titrage, compaction,
+    mémoire personnelle) ;
+  - `chat/server/modules/<domaine>/routes.py` — `workspace`, `documents`,
+    `files`, `artifacts`, `runner`, `research`, `chat`, `coding`, `media` ;
+  - `chat/server/app.py` — la factory `create_app(deps, http_dispatch)` ;
+  - `chat/server/deps.py` — injection de dépendances à **résolution
+    tardive** (les coutures de tests `patch("chat.server.main.*")`
+    historiques restent visibles, y compris `db`/`rag_store`).
+- **File de jobs durable + worker (D2/E)** : `core/memory/jobs.py`
+  (enqueue / claim atomique / complete / fail / requeue des jobs orphelins)
+  et `chat/worker/` (loop + handlers + binaire `python -m chat.worker`,
+  arrêt propre SIGINT + checkpoint WAL). Le lifespan lance le loop en
+  process : titrage, compaction, mémoire et indexation documentaire sont
+  des jobs **persistés, rejouables, observables** (fin des
+  `asyncio.create_task` nus). Health enrichi : `checks.worker`.
+- **Garde-fous (A2/A3/B3)** : surface HTTP figée
+  (`tests/snapshots/api_routes.json` + `tests/test_api_contract.py`),
+  conformité des événements SSE émis avec le contrat, smoke
+  `tests/test_app_factory.py`, et **matrice de dépendances entre couches**
+  contrôlée par `scripts/check_imports.py` (8ᵉ étape de `validate_all` :
+  `core/` ne dépend jamais de `chat/`, les contrats jamais du serveur…).
+- **Stockage (D1/D3)** : façades repositories par domaine
+  (`core/memory/repos.py`) et ADR-001 (SQLite unique, un seul écrivain,
+  `-wal` jamais supprimé).
+- **Front (C)** : client API unique `chat/web/src/api/client.js` (token,
+  fetch, découpage SSE robuste aux coupures) + 6 tests `node:test`.
+  Reste : la migration des appels de `app.js` vers ce module et le
+  découpage du fichier en modules de rendu (voir ROADMAP, C1).
+
 ## Audit complet — corrections (2026-09-24)
 
 - **Streaming réel de la réponse** : les `content_delta` partent au fil de la
