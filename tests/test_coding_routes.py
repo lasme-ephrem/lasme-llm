@@ -17,12 +17,30 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "chat" / "web"
 FRONT_CALL_RE = re.compile(r"\$\{API_BASE\}/coding/([a-z-]+(?:/[a-z-]+)*)")
 
 
+def _served_paths(app):
+    """Chemins réellement servis, routers inclus.
+
+    Les routes sont enregistrées via include_router : selon la version de
+    FastAPI, app.routes contient soit des Route (path direct), soit des
+    enveloppes de router dont les routes vivent dans ``original_router``.
+    """
+    paths = set()
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if path:
+            paths.add(path)
+            continue
+        original = getattr(route, "original_router", None)
+        for sub in getattr(original, "routes", None) or []:
+            sub_path = getattr(sub, "path", None)
+            if sub_path:
+                paths.add(sub_path)
+    return paths
+
+
 class FrontCodingRoutesTests(unittest.TestCase):
     def test_frontend_only_calls_existing_coding_routes(self):
-        served = {
-            getattr(route, "path", "")
-            for route in app.routes
-        }
+        served = _served_paths(app)
         referenced = set()
         for js_file in sorted(WEB_DIR.glob("*.js")):
             referenced.update(

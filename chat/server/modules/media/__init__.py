@@ -1,0 +1,1 @@
+"""Médias (favicons, images)."""
