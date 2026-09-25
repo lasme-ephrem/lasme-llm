@@ -13,7 +13,6 @@ from fastapi.responses import StreamingResponse
 from chat.contracts.schemas import DeepResearchRequest, validate_model_name
 from chat.server.deps import deps
 from chat.server.modules.documents.routes import _resolve_selected_rag_file_ids
-from chat.server.services.background import async_generate_and_update_title
 from chat.server.services.text import clean_model_text, compact_web_source_metadata
 from core.inference.profiles import get_model_profile
 from core.mcp.format import format_search_results
@@ -183,12 +182,9 @@ async def deep_research_stream(req: DeepResearchRequest):
         elif full_report:
             yield f"data: {json.dumps({'type': 'research_done', 'artifact_id': None, 'result_count': len(evidence), 'web_results': evidence, 'temporary': True})}\n\n"
         if is_new_session:
-            asyncio.create_task(
-                async_generate_and_update_title(
-                    session_id,
-                    req.question,
-                    selected_model,
-                )
+            deps.job_store.enqueue(
+                "title",
+                {"session_id": session_id, "prompt": req.question, "model": selected_model},
             )
         yield "data: [DONE]\n\n"
 

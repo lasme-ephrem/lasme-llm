@@ -89,6 +89,17 @@ def create_meta_router(deps: MetaDeps) -> APIRouter:
             "required": False,
             **ocr,
         }
+        try:
+            heartbeat = deps.db.get_setting("worker_heartbeat", "")
+            pending_jobs = deps.job_store.pending_count()
+        except Exception:
+            heartbeat, pending_jobs = "", -1
+        checks["worker"] = {
+            "status": "ok" if heartbeat else "starting",
+            "required": False,
+            "pending_jobs": pending_jobs,
+            "heartbeat": heartbeat,
+        }
         overall = (
             "ok"
             if all(

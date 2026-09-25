@@ -26,11 +26,6 @@ from chat.contracts.schemas import (
 )
 from chat.server.deps import deps
 from chat.server.modules.documents.routes import _resolve_selected_rag_file_ids
-from chat.server.services.background import (
-    async_generate_and_update_title,
-    async_update_conversation_memory,
-    async_update_personal_memory,
-)
 from chat.server.services.heuristics import (
     _fallback_contextual_search_query,
     is_recency_sensitive,
@@ -373,7 +368,10 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'content': err_msg})}\n\n"
 
             if is_new_session and last_user_msg:
-                asyncio.create_task(async_generate_and_update_title(session_id, last_user_msg, selected_model))
+                deps.job_store.enqueue(
+                    "title",
+                    {"session_id": session_id, "prompt": last_user_msg, "model": selected_model},
+                )
 
             yield "data: [DONE]\n\n"
 
@@ -882,12 +880,9 @@ async def chat_stream(req: ChatRequest):
                 )
                 yield f"data: {json.dumps({'type': 'message_saved', 'role': 'assistant', 'message_id': assistant_message_id})}\n\n"
             if is_new_session and last_user_msg:
-                asyncio.create_task(
-                    async_generate_and_update_title(
-                        session_id,
-                        last_user_msg,
-                        selected_model,
-                    )
+                deps.job_store.enqueue(
+                    "title",
+                    {"session_id": session_id, "prompt": last_user_msg, "model": selected_model},
                 )
             yield "data: [DONE]\n\n"
             return
@@ -1085,21 +1080,23 @@ async def chat_stream(req: ChatRequest):
                     metadata=message_metadata,
                 )
                 yield f"data: {json.dumps({'type': 'message_saved', 'role': 'assistant', 'message_id': assistant_message_id})}\n\n"
-                asyncio.create_task(
-                    async_update_conversation_memory(
-                        session_id,
-                        selected_model,
-                    )
+                deps.job_store.enqueue(
+                    "session_memory",
+                    {"session_id": session_id, "model": selected_model},
                 )
-                asyncio.create_task(
-                    async_update_personal_memory(selected_model)
+                deps.job_store.enqueue(
+                    "personal_memory",
+                    {"model": selected_model},
                 )
         if generation_stats:
             yield f"data: {json.dumps({'type': 'generation_stats', **generation_stats})}\n\n"
 
         # Update title in background AFTER stream completes
         if is_new_session and last_user_msg:
-            asyncio.create_task(async_generate_and_update_title(session_id, last_user_msg, selected_model))
+            deps.job_store.enqueue(
+                "title",
+                {"session_id": session_id, "prompt": last_user_msg, "model": selected_model},
+            )
 
         yield "data: [DONE]\n\n"
 

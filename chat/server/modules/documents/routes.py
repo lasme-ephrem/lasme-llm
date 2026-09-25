@@ -199,12 +199,14 @@ async def upload_document(
             "filename": stored_file["display_name"],
         }
 
-    background_tasks.add_task(
-        _index_project_file_in_background,
-        scope_id=scope_id,
-        filename=filename,
-        content=content,
-        stored_file=stored_file,
+    deps.job_store.enqueue(
+        "document_index",
+        {
+            "scope_id": scope_id,
+            "filename": filename,
+            "file_id": stored_file["id"],
+            "stored_file": stored_file,
+        },
     )
     return {
         "status": "accepted",

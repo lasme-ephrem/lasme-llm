@@ -32,8 +32,20 @@ class Deps:
         return client
 
     def bind(self, **stores: Any) -> "Deps":
+        """Force les valeurs (les tests remplacent ici un store)."""
         self._stores.update(stores)
         return self
+
+    def bind_missing(self, **stores: Any) -> "Deps":
+        """Complète SANS écraser : l'import tardif de main (via _resolve)
+        ne doit jamais rebinder un store déjà fourni (cas des tests)."""
+        for name, value in stores.items():
+            self._stores.setdefault(name, value)
+        return self
+
+    @property
+    def job_store(self) -> Any:
+        return self._resolve("job_store")
 
     def _resolve(self, name: str) -> Any:
         try:
@@ -79,13 +91,15 @@ def build_deps() -> Deps:
     from core.artifacts import artifact_store
     from core.files import project_file_store
     from core.memory.database import db as database
+    from core.memory.jobs import JobStore
     from core.rag.store import rag_store
     from core.runner import python_runner
 
-    return deps.bind(
+    return deps.bind_missing(
         db=database,
         rag_store=rag_store,
         project_file_store=project_file_store,
         artifact_store=artifact_store,
         python_runner=python_runner,
+        job_store=JobStore(database.db_path),
     )

@@ -85,9 +85,39 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Worker de jobs de fond en process (le même loop tourne aussi en
+        # process séparé via `python -m chat.worker`).
+        import asyncio
+        import datetime
+        import time as _time
+
+        from chat.worker.loop import worker_loop
+
+        last_beat = 0.0
+
+        def _heartbeat() -> None:
+            nonlocal last_beat
+            now = _time.monotonic()
+            if now - last_beat < 10:
+                return
+            last_beat = now
+            try:
+                dependencies.db.set_setting(
+                    "worker_heartbeat",
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+            except Exception:
+                pass
+
+        worker_task = asyncio.create_task(worker_loop(heartbeat=_heartbeat))
         try:
             yield
         finally:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
             # Arrêt propre : rapatrier le journal WAL dans le fichier
             # principal avant fermeture (jamais supprimer -wal/-shm).
             try:
