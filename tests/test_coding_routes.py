@@ -42,7 +42,10 @@ class FrontCodingRoutesTests(unittest.TestCase):
     def test_frontend_only_calls_existing_coding_routes(self):
         served = _served_paths(app)
         referenced = set()
-        for js_file in sorted(WEB_DIR.glob("*.js")):
+        # rglob : depuis le découpage C1, les appels vivent dans src/**.
+        for js_file in sorted(WEB_DIR.rglob("*.js")):
+            if "vendor" in js_file.parts:
+                continue
             referenced.update(
                 FRONT_CALL_RE.findall(js_file.read_text(encoding="utf-8"))
             )
