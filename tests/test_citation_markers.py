@@ -145,7 +145,9 @@ class CumulativeNumberingTests(unittest.TestCase):
         empty = _format_search_results(
             {"results": [], "errors": ["timeout"]}, numbering
         )
-        self.assertTrue(empty.startswith("Aucun résultat."))
+        # Un échec d'outil n'est pas « zéro résultat » : il doit être
+        # annoncé comme tel (et ne consommer aucun numéro de citation).
+        self.assertIn("Recherche Web indisponible", empty)
         self.assertEqual(numbering.last, 0)
         after = _format_search_results(
             {"results": [_result("Seul", "https://a.example.com/1")]},

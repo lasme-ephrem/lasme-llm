@@ -2,12 +2,16 @@ import sqlite3
 import uuid
 import datetime
 import json
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-DB_PATH = Path(__file__).resolve().parent.parent.parent / "lasme_llm.db"
+DB_PATH = Path(
+    os.environ.get("LASME_DATABASE_PATH")
+    or Path(__file__).resolve().parent.parent.parent / "lasme_llm.db"
+).expanduser().resolve()
 SCHEMA_VERSION = 2
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Espace principal"
@@ -836,6 +840,43 @@ class DatabaseManager:
                     item["metadata"] = {}
                 messages.append(item)
             return messages
+
+    def get_recent_assistant_sources(
+        self,
+        session_id: str,
+        limit: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Sources web citées par les derniers messages de l'assistant.
+
+        Preuve de conversation : une relance (« et par rapport à … ? »)
+        porte sur des faits DÉJÀ sourcés dans le fil. Sans elles, le harnais
+        de grounding strict prenait les chiffres déjà vérifiés pour des
+        inventions et dégradait la réponse.
+        """
+        if not session_id:
+            return []
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT metadata FROM messages
+                WHERE session_id = ? AND role = 'assistant'
+                ORDER BY rowid DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, int(limit))),
+            ).fetchall()
+        sources: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            entries = metadata.get("web_results")
+            if isinstance(entries, list):
+                sources.extend(
+                    item for item in entries if isinstance(item, dict)
+                )
+        return sources
 
     def get_session_memory(self, session_id: str) -> Dict[str, Any]:
         with self._connection() as conn:

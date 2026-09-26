@@ -14,6 +14,8 @@ from chat.server.main import (
     should_enable_reasoning,
     strip_web_citation_markers,
     unsupported_grounded_numbers,
+    ground_strict_answer,
+    grounding_evidence_text,
 )
 from core.agent.grounding import requires_strict_grounding
 from core.memory.context import select_conversation_context
@@ -49,6 +51,23 @@ class ConversationContextTests(unittest.TestCase):
             "salut, explique-moi la récursivité",
             "hello, cherche le prix de la RTX",
             "Combien font 6*7 ?",
+        ):
+            self.assertFalse(is_social_turn(message), message)
+
+    def test_address_words_and_short_checkins_stay_social(self):
+        for message in (
+            "yo mon gars",
+            "salut mon pote",
+            "wesh frérot",
+            "ping",
+            "test",
+            "yo gros",
+        ):
+            self.assertTrue(is_social_turn(message), message)
+        for message in (
+            "lance un test",
+            "calcule mon total",
+            "salut, quel est le cours du bitcoin ?",
         ):
             self.assertFalse(is_social_turn(message), message)
 
@@ -222,6 +241,160 @@ class ConversationContextTests(unittest.TestCase):
             ),
             ["$30"],
         )
+
+    def test_strict_grounding_uses_page_evidence_and_preserves_clarification(self):
+        verified_page = "Le tarif actuellement publié est de 0,27 USD par million de jetons."
+        answer = (
+            "Le tarif est de 0,27 USD par million de jetons. "
+            "Quel benchmark veux-tu comparer ?"
+        )
+        grounded = ground_strict_answer(answer, verified_page)
+        self.assertIn("0,27 USD", grounded)
+        self.assertIn("Quel benchmark", grounded)
+
+        unsupported = ground_strict_answer(
+            "Le tarif est de 30 USD. Quel benchmark veux-tu comparer ?",
+            verified_page,
+        )
+        self.assertNotIn("30 USD", unsupported)
+        self.assertIn("Quel benchmark", unsupported)
+
+    def test_strict_grounding_never_replaces_the_whole_answer(self):
+        """Sans preuve, la réponse est assagie — jamais remplacée en bloc.
+
+        Régression réelle : la relance « et par rapport à Fable 5.1 ? »
+        après une réponse sourcée a été remplacée par un refus administratif
+        (« Je n'ai pas pu vérifier ce point… »). Le lecteur voyait sa
+        réponse s'écrire puis disparaître.
+        """
+        answer = (
+            "Opus 5.5 vise la parité de performance avec Fable 5.1 pour la\n"
+            "*   **Coût** : environ 40 % moins cher que Opus 5.\n"
+            "*   **Vitesse** : environ 30 % plus rapide que Opus 5.\n"
+            "Le reste dépend de ton usage."
+        )
+        grounded = ground_strict_answer(answer, "")
+        self.assertNotIn("Je n’ai pas pu vérifier", grounded)
+        self.assertIn("Le reste dépend de ton usage.", grounded)
+        self.assertIn("parité de performance avec Fable 5.1", grounded)
+        # Les valeurs non étayées restent assagies.
+        self.assertNotIn("40 %", grounded)
+        self.assertNotIn("30 %", grounded)
+
+    def test_strict_grounding_keeps_markdown_layout(self):
+        """Les puces d'une liste ne doivent pas être fondues en un paragraphe."""
+        answer = (
+            "Voici son bilan :\n"
+            "*   **Prix** : 0,27 USD par million.\n"
+            "*   **Vitesse** : excellente.\n"
+            "*   **Contexte** : 200 000 jetons."
+        )
+        grounded = ground_strict_answer(
+            answer,
+            "Tarif publié : 0,27 USD par million.",
+        )
+        self.assertIn("\n*   **Prix**", grounded)
+        self.assertIn("\n*   **Vitesse**", grounded)
+        self.assertIn("\n*   **Contexte**", grounded)
+
+    def test_version_number_is_never_cut_in_the_middle(self):
+        """« Terminal-Bench 4.0 » ne doit pas être coupé en deux.
+
+        Le point d'un numéro de version n'est pas une fin de phrase : la
+        réserve s'insérait sinon AU MILIEU du nombre (« Terminal-Bench
+        4.…je n'ai pas de chiffre fiable…0 »).
+        """
+        answer = (
+            "Il surpasse Fable 5.1 sur le Terminal-Bench 4.0 "
+            "et obtient 86,1 de moyenne."
+        )
+        grounded = ground_strict_answer(answer, "Terminal-Bench 4.0 : 86,1.")
+        self.assertIn("Terminal-Bench 4.0", grounded)
+        self.assertEqual(grounded, answer)
+
+    def test_table_rows_keep_their_grid(self):
+        """Dans un tableau, la valeur fautive devient « non vérifié »."""
+        answer = (
+            "| Métrique | Opus 5.5 | Fable 5.1 |\n"
+            "| Entrée | $4.00 | $10.00 |"
+        )
+        grounded = ground_strict_answer(answer, "Tarif : $4.00 en entrée.")
+        self.assertIn("| Entrée | $4.00 | non vérifié |", grounded)
+        self.assertNotIn("chiffre fiable", grounded)
+
+    def test_unsupported_value_keeps_its_label(self):
+        """La puce garde son intitulé : c'est lui qui dit DE QUOI on ne sait rien.
+
+        Régression observée à l'écran : une puce dont toute la phrase portait un
+        chiffre non étayé était remplacée par la seule réserve, sans intitulé —
+        le lecteur voyait « …je n'ai pas de chiffre fiable… » sans savoir quel
+        point était concerné.
+        """
+        answer = (
+            "* **Version gratuite** : offre limitée à 100 % des tokens.\n"
+            "* **Sécurité** : garde-fous renforcés."
+        )
+        grounded = ground_strict_answer(answer, "Aucune preuve chiffrée.")
+        self.assertIn("* **Version gratuite** :", grounded)
+        self.assertIn("chiffre fiable", grounded)
+        self.assertNotIn("100 %", grounded)
+        # La puce suivante, sans chiffre, est intacte.
+        self.assertIn("* **Sécurité** : garde-fous renforcés.", grounded)
+
+    def test_softened_sentence_has_single_final_period(self):
+        """La ponctuation n'est jamais doublée (« affirmer.. »)."""
+        grounded = ground_strict_answer("Le tarif est de 30 USD", "Rien.")
+        self.assertNotIn("..", grounded)
+        self.assertTrue(grounded.rstrip().endswith("."))
+
+    def test_strict_grounding_without_evidence_does_not_assert_a_price(self):
+        grounded = ground_strict_answer(
+            "Le tarif est de 30 USD par million de jetons.",
+            "",
+        )
+        self.assertNotIn("30 USD", grounded)
+        self.assertIn("chiffre fiable", grounded)
+
+    def test_strict_grounding_without_page_evidence_keeps_clarification(self):
+        answer = "Quel benchmark veux-tu comparer ?"
+        self.assertEqual(ground_strict_answer(answer, ""), answer)
+
+        mixed = ground_strict_answer(
+            "Le prix est de 30 USD. Quel benchmark veux-tu comparer ?",
+            "",
+        )
+        self.assertNotIn("30 USD", mixed)
+        self.assertIn("Quel benchmark", mixed)
+
+    def test_conversation_evidence_keeps_numbers_verified_earlier(self):
+        """Une relance s'appuie sur les sources déjà citées dans le fil."""
+        conversation_sources = [
+            {
+                "title": "Anthropic — Claude Opus 5.5",
+                "snippet": "Opus 5.5 coûte 40 % de moins et est 30 % plus rapide.",
+                "url": "https://example.org/opus-5-5",
+            }
+        ]
+        evidence = grounding_evidence_text(
+            "",
+            [],
+            conversation_sources,
+        )
+        self.assertIn("40 %", evidence)
+        answer = "Il est environ 40 % moins cher et 30 % plus rapide."
+        self.assertEqual(ground_strict_answer(answer, evidence), answer)
+
+    def test_grounding_evidence_text_merges_blocks_and_bounds_size(self):
+        merged = grounding_evidence_text(
+            "page lue",
+            [{"title": "Titre", "snippet": "Extrait", "url": "https://a.test"}],
+            max_chars=1_000,
+        )
+        self.assertIn("page lue", merged)
+        self.assertIn("Titre Extrait https://a.test", merged)
+
+        bounded = grounding_evidence_text("x" * 5_000, max_chars=100)
+        self.assertEqual(len(bounded), 100)
 
     def test_comparison_refinement_keeps_the_root_topic(self):
         messages = [

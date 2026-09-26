@@ -1,264 +1,365 @@
+<div align="center">
+
+<img src="chat/web/favicon.svg" alt="" width="72" height="72">
+
 # Lasme LLM
 
-Plateforme de chat IA **locale et agentique**. Une seule interface
-(<http://127.0.0.1:8000>) sert à la fois de chat et d'agent : chaque message
-passe par une boucle d'orchestrateur qui raisonne, appelle des outils (recherche
-web, Python sandboxé, documents, images…), puis répond avec des citations
-vérifiables. L'inférence tourne intégralement en local via llama.cpp
-(RTX 4070 Ti SUPER 16 Go).
+**Votre IA, sur votre machine. Elle raisonne, cherche, lit, calcule — et cite.**
 
-<p align="center"><img src="docs/assets/lasme-llm-demo.gif" alt="Démonstration de Lasme LLM" width="960"></p>
+Chat agentique **100 % local** : chaque message traverse une boucle
+d'orchestrateur qui réfléchit, appelle ses outils, puis rédige une réponse
+sourcée. Aucun compte, aucune clé obligatoire, aucune donnée qui sort de
+votre disque.
+
+[![CI](https://github.com/lasme-ephrem/lasme-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/lasme-ephrem/lasme-llm/actions/workflows/ci.yml)
+[![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-5E8C72.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-5E8C72.svg)](pyproject.toml)
+[![Inférence locale](https://img.shields.io/badge/inf%C3%A9rence-100%25%20locale-12241C.svg)](#pourquoi-ce-projet)
+
+<p align="center"><img src="docs/assets/lasme-llm-demo.gif" alt="Démonstration : question posée, outils visibles, réponse sourcée" width="960"></p>
+
+</div>
+
+---
 
 ## Pourquoi ce projet
 
-- **Local et souverain** : modèle, conversations, fichiers et index
-  documentaire restent sur votre disque. La recherche web est optionnelle
-  et passe par des serveurs MCP (Exa, Brave, Tavily). La fraîcheur sport,
-  météo, actu tech et Wikipédia vient d'un serveur MCP local.
-- **Agentique** : pas de « mode agent » séparé — le chat est l'agent, chaque
-  message traverse une boucle d'orchestrateur déterministe.
-- **Rapide** : speculative decoding MTP, router multi-profils llama.cpp
-  (129 à 214 tok/s mesurés), et un affichage qui ne retient pas le texte
-  déjà produit.
+Trois convictions, et ce qu'elles impliquent concrètement.
+
+**1. Vos conversations ne regardent personne.** Le modèle tourne sur votre
+GPU, les conversations vivent dans un fichier SQLite sur votre disque, les
+documents indexés ne quittent pas la machine. La recherche web existe, mais
+elle est **optionnelle, visible et désactivable** — et lorsqu'elle est
+utilisée, vous voyez exactement quelles pages ont été lues. Aucun service
+tiers n'est contacté pour le fonctionnement de base.
+
+**2. Un chat qui ne cherche pas quand il faut est un chat qui invente.**
+Ce projet part d'un constat simple : un modèle local se trompe sur tout ce
+qui bouge — un prix, une version, un classement, un résultat de match. Le
+harnais détecte donc ces sujets et **force la recherche** avant de répondre.
+Il ne se contente pas de demander poliment : si le modèle affirme une valeur
+absente des preuves, cette valeur est retirée de la réponse.
+
+**3. L'interface ne doit jamais montrer un travail en cours comme s'il était
+fini.** Rien n'est plus déroutant qu'une réponse qui s'écrit, disparaît, puis
+réapparaît autrement. Ici, le brouillon est visible *comme brouillon*
+(« ✎ Rédaction en cours »), puis rangé dans une note dépliable ; la réponse
+finale est peinte d'un bloc, exactement telle qu'elle est enregistrée.
+
+## Ce qui distingue cette plateforme
+
+| | |
+|---|---|
+| **Le chat _est_ l'agent** | Pas de « mode agent » à activer. Chaque message passe par la boucle raisonnement → outils → réponse. |
+| **Citations vérifiables** | Les marqueurs `[n]` deviennent des puces favicon au fil du texte ; une URL jamais consultée par l'agent est **retirée** de la réponse. |
+| **Multi-chats parallèles** | Changez de conversation pendant une génération : elle continue en arrière-plan et se réaffiche intacte à la réouverture. |
+| **Hors ligne par construction** | KaTeX, Mermaid, marked et DOMPurify sont servis localement. Le rendu mathématique fonctionne sans Internet. |
+| **Le local ne veut pas dire lent** | Speculative decoding MTP, router multi-profils, jusqu'à **211 tok/s** mesurés sur une RTX 4070 Ti SUPER. |
 
 ## Fonctionnalités
 
-**Boucle d'agent**, avec garanties du harnais : raisonnement → appels
-d'outils → réponse, en 6 tours maximum ; budget de tokens par appel modèle
-calé sur l'effort choisi, doublé une fois — plafonné à 12 288 — si la
-réponse est tronquée ; un appel d'outil identique répété 3 fois est refusé ;
-après un `web_research`, lire au moins une page (`web_read`) est obligatoire —
-si le modèle répond depuis les extraits, l'orchestrateur récupère lui-même
-les URLs pertinentes, et répondre de mémoire alors que la demande exige une
-recherche est retoqué une fois.
+### Le harnais d'agent
 
-**Effort de raisonnement** : sélecteur standard **Low / Medium / High**
-(échelle `reasoning_effort`, passée telle quelle au modèle) sous forme de
-slider segmenté — navigation clavier aux flèches, **défaut Medium** au
-lancement. Budgets de réponse : Low 4 096 tokens, Medium 6 144, High le
-budget complet du profil (8 192 sur le 12B).
+Le cœur du projet n'est pas le modèle, c'est la boucle qui l'encadre. Six
+tours maximum, et des garanties couvertes par des tests :
 
-**Recherche web** :
+- **Outils d'abord, réponse ensuite.** Un tour qui appelle un outil ne doit
+  pas produire de réponse : son texte est classé comme note de travail, pas
+  comme réponse. Sans cette règle, le modèle rédige un brouillon, appelle ses
+  outils, puis réécrit tout — et l'utilisateur voit une réponse s'effacer.
+- **Budget mesuré, pas deviné.** Le plafond de tokens suit l'effort demandé
+  (Low 4 096, Medium 6 144, High le budget complet du profil). Une réponse
+  tronquée est relancée une fois avec un budget doublé, plafonné à 12 288 ;
+  le tour interrompu est *rangé*, jamais jeté en silence.
+- **Anti-boucle.** Un appel d'outil strictement identique répété trois fois
+  est refusé. Un modèle qui tourne en rond s'arrête au lieu de brûler le GPU.
+- **Lire avant de citer.** Après un `web_research`, au moins une page doit
+  être ouverte par `web_read`. Si le modèle répond depuis les extraits,
+  l'orchestrateur récupère lui-même les URLs pertinentes ; répondre de mémoire
+  alors que la demande exigeait une recherche est retoqué une fois.
+- **Chiffres non étayés assagis, pas la réponse entière.** Sur un sujet
+  sensible (prix, benchmark, disponibilité), une valeur absente des preuves
+  devient « je n'ai pas de chiffre fiable là-dessus dans mes sources » —
+  **phrase par phrase**. La mise en page (listes, tableaux) survit, et un
+  numéro de version n'est jamais coupé en deux.
+- **Relances traitées comme telles.** « Et par rapport à X ? » s'appuie sur
+  les faits et les **sources déjà citées dans le fil** : la réponse n'est pas
+  remplacée par un refus de vérification.
+- **Voix humaine.** Le modèle ne récite pas son prompt, n'annonce pas ses
+  règles, et pose une question de clarification concrète plutôt qu'un refus
+  administratif.
 
-- MCP **Exa**, **Brave** et **Tavily** combinés ; sans clé, le serveur
-  correspondant ne démarre pas ;
-- fraîcheur sport, météo, actu tech et Wikipédia via le serveur MCP local ;
-- autres MCP selon le modèle (e2b minimal, e4b intermédiaire, 12b complet) :
-  Context7, GitHub, Git, filesystem sandbox, SQLite, graphiques AntV,
-  fuseaux horaires ;
-- l'agent appelle `web_research`, puis lit les pages avec `web_read` ;
-  les citations d'URLs jamais consultées sont retirées ;
-- portail d'actualité : les questions sensibles au temps (superlatifs
-  temporels, données vivantes, années ≥ 2024) forcent la recherche —
-  la page lue prime sur la mémoire d'entraînement.
+### Effort de raisonnement
 
-**Interface** :
+Sélecteur **Low / Medium / High** (défaut *Medium*), transmis tel quel au
+modèle. Certains modèles refusent d'envoyer `reasoning.effort` et
+`reasoning.max_tokens` ensemble : la requête tente l'un puis se replie
+automatiquement sur l'autre.
 
-- **citations style ChatGPT** : les marqueurs `[n]` globaux (numérotation
-  cumulative par message) deviennent des puces favicon à l'endroit exact de
-  la citation — carte au survol (titre, domaine, pagination), tap mobile.
-  Pas de section « Sources » : la preuve vit dans le texte ;
-- **streaming multi-chats parallèle** : changer de conversation ou en créer
-  une pendant qu'une autre génère n'interrompt jamais le flux — il continue
-  en arrière-plan (points pulsants dans la sidebar) et la ré-entrée
-  reconstruit le tour en cours à l'identique (Réflexion, cartes d'outils,
-  étapes de recherche) puis rebranche le live ;
-- **édition d'un message envoyé = même fil** : le message est mis à jour en
-  place, la suite est tronquée et la réponse régénérée dans la même
-  conversation (`POST /api/sessions/{id}/messages/{id}/edit`) ; créer une
-  variante reste possible via le bouton Branche explicite ;
-- **titres de conversations générés par le modèle** : produits en parallèle
-  du premier flux, 3-6 mots dans la langue de l'utilisateur, première lettre
-  majuscule, apostrophes françaises préservées (budget 512 + retry) ;
-- **réflexion** : une ligne « Réflexion… », puis « A réfléchi pendant N s ».
-  Le texte s'ouvre au clic, sans cadre. La réponse n'apparaît qu'une fois
-  les outils et la réflexion terminés ;
-- **outils** : un seul bloc, une ligne par appel, icônes dans le vert du
-  thème ;
-- **rendu mathématique complet** : KaTeX avec `$...$`, `$$...$$`, `\(...\)`
-  et `\[...\]`, matrices `pmatrix` incluses — macros passées en copie
-  mutable (l'objet gelé faisait échouer le rendu) et boucle auto-render
-  jusqu'à stabilité ;
-- **statistiques honnêtes** : tok/s = décodage réellement mesuré par tour
-  de modèle (hors outils), avec TTFT et durée mur.
+### Recherche web
 
-**Outils natifs** : `calculate`, `current_time`, `python_run` (pool Docker
-chaud), RAG, fichiers projet, artefacts, `analyze_image` (vision Gemma 4).
-La recherche est `web_research` / `web_read` (MCP). Les autres MCP suivent
-le modèle, comme ci-dessus. **Mémoire et projets** : conversations persistées en
-SQLite avec compaction du contexte ; projets isolant instructions, fichiers,
-artefacts et mémoire ; RAG sur documents (PDF, Office, Markdown, images)
-avec classement hybride lexical + vectoriel local et citations fichier/page.
+- MCP **Exa**, **Brave** et **Tavily** combinés, dédupliqués et classés
+  (pertinence, autorité, fraîcheur). Sans clé, le moteur concerné ne démarre
+  pas — la disponibilité réelle est affichée, jamais supposée.
+- **Fraîcheur locale sans clé** : sport (TheSportsDB), météo (Open-Meteo),
+  actualité tech (Hacker News), Wikipédia.
+- Trois modes explicites : **off** (aucun outil web), **auto** (l'agent
+  juge), **always** (recherche obligatoire). Les questions sensibles au temps
+  déclenchent la recherche sans qu'on le demande.
+- Les résultats sont **numérotés globalement** : dans un même message, une
+  deuxième recherche continue la numérotation, donc `[3]` pointe toujours sur
+  la bonne source.
+
+### Interface
+
+- **Brouillons conservés** : tout texte écarté par le harnais est rangé dans
+  une note dépliable (« ✎ Brouillon non vérifié · 113 mots »), jamais supprimé.
+- **Déroulé agent** : les appels d'outils d'une réponse passée se rejouent
+  tour par tour, avec durées et sorties.
+- **Réflexion séparée** : une ligne discrète, le texte au clic, sans cadre.
+- **Édition en place** : corriger un message envoyé met à jour le fil et
+  tronque la suite ; le bouton *Branche* crée une variante quand c'est ce
+  qu'on veut.
+- **Titres générés** par le modèle, en parallèle du premier flux.
+- **Statistiques honnêtes** : tok/s mesurés sur le décodage réel du tour,
+  hors temps d'outillage, avec TTFT et durée mur.
+- **Maths complètes** : KaTeX avec `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, matrices
+  `pmatrix` incluses, et boucle de rendu jusqu'à stabilité.
+- **Thèmes clair et sombre**, sans flash blanc au chargement.
+
+<p align="center"><img src="docs/assets/lasme-llm-answer-dark.png" alt="Réponse sourcée en thème sombre : outils discrets, sources cliquables, statistiques de génération" width="900"></p>
+
+### Mémoire, projets et documents
+
+- Conversations persistées en SQLite avec compaction du contexte ; mémoire
+  personnelle contrôlable et désactivable.
+- Projets isolant instructions, fichiers, artefacts et mémoire.
+- RAG sur documents (PDF, Office, Markdown, images) avec classement hybride
+  lexical + vectoriel local, et citations fichier/page.
+
+### Outils natifs
+
+`calculate`, `current_time`, `python_run` (pool Docker chaud, sans réseau),
+`analyze_image` (vision), recherche documentaire, fichiers projet, artefacts,
+génération d'images (externe, **désactivée par défaut**). Les outils MCP
+supplémentaires (Context7, GitHub, Git, SQLite, graphiques) suivent le profil
+du modèle.
 
 ## Architecture
 
 ```
-Navigateur — chat/web (interface unique, http://127.0.0.1:8000)
-     │  SSE : reasoning_delta · content_delta · agent_tool_call/result ·
-     │        research_plan/step · generation_stats
+Navigateur — chat/web/  (aucun build : scripts classiques, découpés par domaine)
+     │  SSE : reasoning_delta · content_delta · content_reset · content_replace ·
+     │        agent_tool_call/result · research_plan/step · generation_stats
      ▼
-FastAPI — chat/server/main.py
+FastAPI — chat/server/  (create_app + dépendances à résolution tardive)
      ├─► Orchestrateur agentique — core/agent/
-     │     boucle THINK → outils → FINAL, budget, anti-boucle, nudges
-     ├─► Runtime llama.cpp — core/inference/ : superviseur du llama-server
-     │     en mode router (--models-preset), profils Gemma 4 QAT chargés à
-     │     la demande, MTP, KV quantifié, client OpenAI-compatible
-     ├─► Outils plateforme — core/runner/ (Python Docker), core/rag/,
+     │     boucle THINK → outils → FINAL, budget, anti-boucle, garde-fous
+     ├─► Runtime llama.cpp — core/inference/
+     │     superviseur du llama-server en mode router (--models-preset),
+     │     profils Gemma 4 QAT chargés à la demande, MTP, KV quantifié
+     ├─► Outils plateforme — core/runner/ (Python Docker isolé), core/rag/,
      │     core/files/, core/artifacts/, core/memory/
-     └─► Recherche — MCP Exa + Brave + Tavily ; fraîcheur locale
-           (sport, météo, actu tech, Wikipédia) ; autres MCP selon le modèle
+     └─► Recherche — MCP Exa + Brave + Tavily, fraîcheur locale sans clé
 ```
 
-## Prérequis
-
-- **Python ≥ 3.11**
-- **llama.cpp compilé avec CUDA** : le superviseur cherche `llama-server.exe`
-  dans `~/llama.cpp/build/bin/Release/` puis le `PATH` (`LLAMA_SERVER_PATH`)
-- **Docker Desktop** (optionnel) : uniquement pour le runner Python isolé
-- **Node.js** (`npx`) : Exa, Brave, Tavily, Context7, GitHub, fichiers
-  sandbox et graphiques. **uv** (`uvx`) : arXiv, lecture de pages de
-  repli, Git, SQLite et fuseaux. La fraîcheur locale (sport, météo, actu
-  tech, Wikipédia) est un serveur Python du dépôt, sans clé.
-- **Clés API optionnelles** : Exa, Brave, Tavily ; Context7 et GitHub si
-  ces MCP sont utilisés. Sans clé, le moteur correspondant ne démarre pas.
+Le serveur est un **monolithe modulaire** : une seule application FastAPI,
+découpée en contrats (`chat/contracts/`), services
+(`chat/server/services/`) et modules par domaine
+(`chat/server/modules/<domaine>/`). Les modules ne s'importent pas entre eux ;
+ils dépendent d'un conteneur de dépendances résolu à l'exécution. La matrice
+d'imports est vérifiée en CI (`scripts/check_imports.py`) : `core/` ne dépend
+jamais de `chat/`.
 
 ## Installation
+
+**Prérequis**
+
+- **Python ≥ 3.11**
+- **llama.cpp compilé avec CUDA** — le superviseur cherche `llama-server.exe`
+  dans `~/llama.cpp/build/bin/Release/` puis dans le `PATH`
+  (`LLAMA_SERVER_PATH` pour forcer un chemin)
+- **Node.js** (`npx`) et **uv** (`uvx`) — pour les serveurs MCP et la
+  fraîcheur locale
+- **Docker Desktop** *(optionnel)* — uniquement pour le bac à sable Python
+- Clés API *(toutes optionnelles)* : Exa, Brave, Tavily, Context7, GitHub
+
+**Mise en route**
 
 ```powershell
 git clone https://github.com/lasme-ephrem/lasme-llm.git
 cd lasme-llm
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
-```
-
-Renseigner dans `.env` uniquement les fournisseurs souhaités. Les modèles
-Gemma 4 QAT (`unsloth/gemma-4-*-it-qat-GGUF`, drafter MTP et projection
-vision inclus) sont téléchargés automatiquement depuis Hugging Face au
-premier démarrage du router. Pour le runner Python, construire l'image une
-fois (`scripts/start_local.ps1` le fait automatiquement) :
-`docker build -t lasme-python-runner:latest .\infra\runner`.
-
-## Configuration
-
-`core/config.py` charge `.env` au démarrage. Le catalogue MCP lit ensuite
-les clés dans l'environnement, sans les journaliser. Le modèle des variables
-est `.env.example` ; la copie locale, avec les vraies clés, est `.env`.
-
-```text
-# Runtime llama.cpp
-LLAMA_SERVER_PATH=            # vide = découverte auto (~/llama.cpp puis PATH)
-LLAMA_BASE_URL=http://127.0.0.1:8080   # (= LLAMA_HOST:LLAMA_PORT)
-LLAMA_MODELS_MAX=2            # modèles chargés simultanément par le router
-# Modèles = profils du router (gemma-4-12b / e4b / e2b / 12b-256k) ;
-# les alias Ollama historiques restent acceptés et routés sur ces profils
-CHAT_MODEL=gemma-4-12b
-FAST_MODEL=gemma-4-e4b
-REASONING_MODEL=gemma-4-12b
-CODING_MODEL=gemma-4-12b
-VISION_MODEL=gemma-4-12b
-# Recherche web MCP (toutes optionnelles)
-EXA_API_KEY=
-BRAVE_SEARCH_API_KEY=         # Brave MCP
-TAVILY_API_KEY=
-CONTEXT7_API_KEY=             # optionnel
-GITHUB_PERSONAL_ACCESS_TOKEN= # optionnel ; GITHUB_TOKEN accepté en secours
-LASME_MCP_ENABLED=            # vide = activé ; 0/false/off/no coupe tout
-LASME_MCP_DISABLED=           # ids à omettre, séparés par des virgules
-LASME_MCP_FS_ROOT=            # sandbox filesystem, pas la racine du dépôt
-LASME_MCP_SQLITE_PATH=
-LASME_MCP_GIT_REPO=
-# Sécurité / accès distant
-LASME_ACCESS_TOKEN=           # exigé pour toute API passant par un proxy
-LASME_ALLOW_REMOTE_CODING=false
-LASME_ALLOW_DESTRUCTIVE_AGENT_TOOLS=false
-LASME_ENABLE_AGENT_TERMINAL=false
-LASME_WORKSPACE_ROOT=         # confinement des outils de fichiers
-LASME_MAX_UPLOAD_BYTES=26214400
-LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false # Pollinations (externe) : opt-in
-# Runner Python
-LASME_RUNNER_POOL=            # 0 = force un conteneur froid par tâche
-LASME_DOCKER_BINARY=          # si Docker Desktop est absent du PATH
-```
-
-S'exposent aussi : `LASME_ALLOWED_COMMANDS`, `LASME_PUBLIC_BASE_URL`,
-`EXTRA_MODELS`, `HF_HOME`, et `LLAMA_HOST`/`LLAMA_PORT` (composent
-`LLAMA_BASE_URL` si elle est absente).
-
-## Démarrage
-
-Le plus simple — démarre le router llama.cpp, construit l'image du runner si
-besoin, lance l'API et attend le health check :
-
-```powershell
+Copy-Item .env.example .env   # ne renseigner que ce que vous voulez activer
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1
 ```
 
-Ou manuellement (le superviseur génère `.runtime/llama/router_models.ini`
-puis lance llama-server, de façon idempotente) :
+`start_local.ps1` démarre le router llama.cpp, construit l'image du bac à
+sable si besoin, lance l'API et attend le contrôle de santé. Ouvrir ensuite
+<http://127.0.0.1:8000/>.
+
+Les profils Gemma 4 QAT (`unsloth/gemma-4-*-it-qat-GGUF`, drafter MTP et
+projection vision inclus) sont téléchargés depuis Hugging Face au premier
+usage. **Aucun modèle n'est préchargé** : sur 16 Go de VRAM, tout profil
+résident fait échouer le placement du draft MTP — chaque profil charge donc
+à la demande, ce qui ajoute quelques secondes à la première question.
+
+**Démarrage manuel** (le superviseur est idempotent) :
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.serve start
 .\.venv\Scripts\python.exe -m uvicorn chat.server.main:app --host 127.0.0.1 --port 8000
 ```
 
-Arrêt : `python -m scripts.serve stop` (router) et `.\scripts\stop_local.ps1`
-(API). Pilotage : `status`, `metrics --model <profil>`, `info`. Ouvrir
-ensuite <http://127.0.0.1:8000/>.
+Arrêt : `python -m scripts.serve stop` et `.\scripts\stop_local.ps1`.
+Pilotage : `status`, `metrics --model <profil>`, `info`.
+
+## Configuration
+
+`core/config.py` charge `.env` au démarrage. Le catalogue MCP lit ensuite les
+clés dans l'environnement, **sans jamais les journaliser**.
+
+```text
+# --- Runtime llama.cpp (router) ---
+LLAMA_SERVER_PATH=            # vide = découverte auto (~/llama.cpp puis PATH)
+LLAMA_BASE_URL=http://127.0.0.1:8080
+LLAMA_MODELS_MAX=2            # profils chargés simultanément
+CHAT_MODEL=gemma-4-12b        # profils : gemma-4-12b / e4b / e2b / 12b-256k
+FAST_MODEL=gemma-4-e4b
+REASONING_MODEL=gemma-4-12b
+CODING_MODEL=gemma-4-12b
+VISION_MODEL=gemma-4-12b
+
+# --- Recherche web (toutes optionnelles) ---
+EXA_API_KEY=
+BRAVE_SEARCH_API_KEY=
+TAVILY_API_KEY=
+CONTEXT7_API_KEY=
+GITHUB_PERSONAL_ACCESS_TOKEN= # GITHUB_TOKEN accepté en secours
+LASME_MCP_ENABLED=            # vide = activé ; 0/false/off/no coupe tout
+LASME_MCP_DISABLED=           # ids à omettre, séparés par des virgules
+LASME_MCP_FS_ROOT=            # racine du bac à sable fichiers
+LASME_MCP_SQLITE_PATH=
+LASME_MCP_GIT_REPO=
+
+# --- Sécurité / accès distant ---
+LASME_ACCESS_TOKEN=           # exigé dès que l'API passe par un proxy
+LASME_ALLOW_REMOTE_CODING=false
+LASME_ALLOW_DESTRUCTIVE_AGENT_TOOLS=false
+LASME_ENABLE_AGENT_TERMINAL=false
+LASME_WORKSPACE_ROOT=         # confinement des outils de fichiers
+LASME_MAX_UPLOAD_BYTES=26214400
+LASME_ENABLE_EXTERNAL_IMAGE_GENERATION=false  # Pollinations : opt-in explicite
+
+# --- Bac à sable Python ---
+LASME_RUNNER_POOL=            # 0 = conteneur froid par tâche
+LASME_DOCKER_BINARY=
+
+# --- Divers ---
+LASME_DATABASE_PATH=          # base SQLite alternative (tests, instance isolée)
+```
+
+Autres variables reconnues : `LASME_ALLOWED_COMMANDS`, `LASME_PUBLIC_BASE_URL`,
+`EXTRA_MODELS`, `HF_HOME`, `LLAMA_HOST` / `LLAMA_PORT`.
 
 ## Modèles et performances
 
 Quatre profils Gemma 4 QAT servis par un seul llama-server en mode router,
-présentés dans l'interface du plus faible au plus fort : E2B → E4B → 12B
-(défaut) → 12B 256K. **Aucun modèle n'est préchargé au démarrage** : sur
-16 Go, le 12B seul demande 12,9 GiB et tout profil résident faisait crasher
-le fitting du draft MTP — chaque profil charge donc à la demande
-(`LLAMA_MODELS_MAX` instances simultanées), ce qui ajoute quelques secondes
-à la première question. Mesures Phase 0 sur RTX 4070 Ti SUPER 16 Go :
+présentés du plus léger au plus capable. Mesures sur **RTX 4070 Ti SUPER
+16 Go** :
 
 | Profil | Contexte | Rôle | Débit mesuré |
 | --- | --- | --- | ---: |
-| `gemma-4-12b` (défaut) | 128K | qualité/agent, vision native | 211 tok/s |
-| `gemma-4-e4b` | 64K | rapide | 129 tok/s |
 | `gemma-4-e2b` | 32K | minimal | 214 tok/s |
+| `gemma-4-e4b` | 64K | rapide | 129 tok/s |
+| `gemma-4-12b` *(défaut)* | 128K | qualité, agent, vision native | 211 tok/s |
 | `gemma-4-12b-256k` | 256K | très longs documents, KV q8_0 | 162 tok/s |
 
-- **Speculative decoding MTP** (`draft-mtp`, n=4) sur tous les profils
-  (×3,4 sur le 12B vs sans MTP) ; **KV cache quantifié** q8_0 sur le profil
-  256K — le q4_0 est écarté (dégradation documentée du tool calling).
-- Budgets de non-régression dans `.models/logs/perf_baseline.json`
-  (193 tok/s 12B, 136 tok/s E4B, 214 tok/s E2B), appliqués par
-  `scripts/check_perf`.
+- **Speculative decoding MTP** (`draft-mtp`, n=4) sur tous les profils —
+  ×3,4 sur le 12B par rapport à sans MTP.
+- **KV cache quantifié** q8_0 sur le profil 256K ; le q4_0 est écarté
+  (dégradation documentée du *tool calling*).
+- Des budgets de non-régression sont versionnés dans
+  `.models/logs/perf_baseline.json` et appliqués par `scripts/check_perf`
+  (tolérance −10 %).
 
 ## Tests et validation
 
+La CI locale et la CI GitHub exécutent **la même commande** :
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.validate_all          # 6 étapes
+.\.venv\Scripts\python.exe -m scripts.validate_all --live   # + évals et budgets (router requis)
+```
+
+Elle enchaîne : compilation Python, syntaxe de **tous** les modules du front
+(la liste est découverte, jamais écrite en dur — une liste figée survit à la
+suppression d'un fichier et fait échouer la CI sur un vestige), tests
+`node:test`, matrice d'imports entre couches, `pytest`, `pip check`.
+
+Commandes ciblées :
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
-node --test tests\js\math-renderer.test.cjs tests\js\progressive-renderer.test.cjs
-
-# Tout en une commande ; --live ajoute évals agent + budgets perf (router requis)
-.\.venv\Scripts\python.exe -m scripts.validate_all [--live]
+node --test tests\js
 .\.venv\Scripts\python.exe -m scripts.check_perf --model gemma-4-12b
 .\.venv\Scripts\python.exe -m scripts.eval_agents --model gemma-4-e4b
 ```
 
+**Deux garde-fous de contrat** méritent d'être connus, parce qu'ils
+empêchent des régressions invisibles :
+
+- `tests/snapshots/api_routes.json` + `tests/test_api_contract.py` figent la
+  surface HTTP : ajouter, renommer ou retirer une route sans mettre le fichier
+  à jour fait échouer la CI. Sans cela, un renommage de route casse
+  silencieusement le front, qui construit ses URL par concaténation.
+- `tests/js/module-load.test.cjs` concatène les scripts du front dans l'ordre
+  de chargement et les évalue dans une portée unique avec un DOM factice : un
+  doublon de déclaration, une variable utilisée avant sa définition ou un appel
+  anticipé est attrapé **sans navigateur**.
+
 ## Sécurité
 
-- clé API jamais journalisée ni commitée (redaction dans les logs, `.env`
-  gitignoré) ;
-- exécution Python durcie : conteneur Docker sans réseau, racine en lecture
-  seule, utilisateur non privilégié, limites mémoire/CPU/processus/durée ;
-  pool chaud (`docker exec`) avec balayage des processus errants ;
-- arguments d'outils validés contre un sous-ensemble JSON strict
-  (`core/agent/tools.py`) ; routes de codage et outils destructifs
-  désactivés par défaut ; toute API passant par un proxy exige
-  `LASME_ACCESS_TOKEN`.
+- **Clé API jamais journalisée ni versionnée** : `.env` est ignoré par Git,
+  les journaux passent par une fonction de masquage.
+- **Exécution Python durcie** : conteneur Docker sans réseau, racine en
+  lecture seule, utilisateur non privilégié, limites mémoire / CPU /
+  processus / durée, avec un pool chaud et un balayage des processus errants.
+- **Entrées du modèle non fiables** : arguments d'outils validés contre un
+  sous-ensemble JSON strict ; HTML du modèle nettoyé par DOMPurify ; Canvas
+  dans une iframe `sandbox` sans accès à l'origine de l'application ; Mermaid
+  en `securityLevel: strict`.
+- **Désactivé par défaut** : terminal d'agent, outils destructifs, routes de
+  codage à distance, génération d'images externe.
+- **Accès distant** : toute API passant par un proxy exige
+  `LASME_ACCESS_TOKEN` (comparaison à temps constant).
 
-Détails : [docs/SECURITY.md](docs/SECURITY.md).
+Détails et modèle de menaces : [`docs/SECURITY.md`](docs/SECURITY.md).
+
+## Documentation
+
+| Document | Contenu |
+| --- | --- |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Frontières de confiance, jeton distant, contenu non fiable, durcissement de l'exécution |
+| [`docs/ADR-001-stockage-donnees.md`](docs/ADR-001-stockage-donnees.md) | Pourquoi une base SQLite unique avec un seul écrivain, et la règle du journal WAL |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Règles de contribution, conventions, recette réelle |
+| [`CHANGELOG.md`](CHANGELOG.md) | Historique détaillé des versions |
+| [`NOTICE`](NOTICE) | Attributions des bibliothèques navigateur redistribuées |
+
+## Dépannage
+
+| Symptôme | Cause la plus fréquente |
+| --- | --- |
+| « llama-server introuvable » | `LLAMA_SERVER_PATH` vide et binaire absent de `~/llama.cpp/build/bin/Release/` |
+| La première réponse met 30 s | Normal : aucun profil n'est préchargé, le modèle se charge à la demande |
+| « Recherche Web non configurée » | Aucune clé Exa / Brave / Tavily dans `.env` |
+| Le bac à sable Python ne répond pas | Docker Desktop arrêté, ou image `lasme-python-runner:latest` absente |
+| Une réponse semble tronquée à l'écran | Recharger la page : le texte affiché est toujours celui enregistré en base |
 
 ## Licence
 
-Lasme LLM est distribué sous [Apache License 2.0](LICENSE). Voir
-[NOTICE](NOTICE) pour les attributions des ressources navigateur (DOMPurify,
-highlight.js, KaTeX, marked, Mermaid) et [CHANGELOG.md](CHANGELOG.md) pour
-l'historique des versions.
+Distribué sous [**Apache License 2.0**](LICENSE). Voir [NOTICE](NOTICE) pour
+les attributions des bibliothèques navigateur (DOMPurify, highlight.js, KaTeX,
+marked, Mermaid), dont les textes de licence accompagnent chaque composant
+sous `chat/web/vendor/`.

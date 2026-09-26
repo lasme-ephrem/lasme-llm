@@ -4,6 +4,12 @@ Usage :
   python -m scripts.validate_all            # statique + tests (sans runtime)
   python -m scripts.validate_all --live     # + évals agent + budget perf
                                               (nécessite le router démarré)
+
+Sept étapes : compilation Python, contrôle des annotations (un nom de typing
+utilisé sans import passe inaperçu sur Python 3.14 où les annotations ne sont
+plus évaluées, mais casse la collecte de pytest sur 3.11/3.12), syntaxe de
+tous les modules du front, tests node:test, matrice d'imports entre couches,
+pytest, pip check.
 """
 
 from __future__ import annotations
@@ -27,16 +33,26 @@ def run(name: str, command: list[str], cwd: Path = ROOT) -> bool:
 
 def main() -> None:
     live = "--live" in sys.argv
+    # Les listes de fichiers sont DÉCOUVERTES, jamais écrites en dur : une
+    # liste figée devient fausse dès qu'un module est ajouté ou retiré (cas
+    # réel : `node --check chat/web/agent.js` a continué de tourner après la
+    # suppression du fichier et la CI échouait sur un vestige).
+    web_scripts = sorted(
+        str(path.relative_to(ROOT))
+        for path in (ROOT / "chat" / "web").rglob("*.js")
+        if "vendor" not in path.parts and "generated_images" not in path.parts
+    )
+    js_tests = sorted(
+        str(path.relative_to(ROOT))
+        for path in (ROOT / "tests" / "js").glob("*.test.cjs")
+    )
     steps: list[tuple[str, list[str]]] = [
         ("compileall", [PYTHON, "-m", "compileall", "-q",
                         "chat", "core", "coding", "scripts", "tests"]),
-        ("js agent", ["node", "--check", "chat/web/agent.js"]),
-        ("js app", ["node", "--check", "chat/web/app.js"]),
-        ("js workspace", ["node", "--check", "chat/web/workspace.js"]),
-        ("js tests", ["node", "--test",
-                      "tests/js/math-renderer.test.cjs",
-                      "tests/js/progressive-renderer.test.cjs",
-                      "tests/js/answer-stream.test.cjs"]),
+        ("annotations", [PYTHON, "-m", "scripts.check_annotations"]),
+        ("js syntaxe", ["node", "--check", *web_scripts]),
+        ("js tests", ["node", "--test", *js_tests]),
+        ("imports", [PYTHON, "-m", "scripts.check_imports"]),
         ("pytest", [PYTHON, "-m", "pytest", "-p", "no:cacheprovider"]),
         ("pip check", [PYTHON, "-m", "pip", "check"]),
     ]

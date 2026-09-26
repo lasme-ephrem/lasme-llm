@@ -97,6 +97,15 @@ class QueryScriptedClient(ScriptedMcpClient):
 
 
 class ResearchWebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_unconfigured_search_servers_are_reported(self):
+        client = ScriptedMcpClient(available_servers=())
+        result = await research_web(client, "prix API LLM")
+        self.assertEqual(result["results"], [])
+        self.assertTrue(result["errors"])
+        self.assertTrue(any("non configuré" in error for error in result["errors"]))
+        self.assertIn("exa", result["attempted_servers"])
+        self.assertEqual(result["available_servers"], [])
+
     async def test_sports_query_calls_lookup_and_a_search_engine(self):
         client = ScriptedMcpClient(
             {

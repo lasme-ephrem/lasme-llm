@@ -217,7 +217,7 @@ async def _run_job(
 ) -> tuple[list[SearchHit], str | None]:
     try:
         if not client.available(job.server):
-            return [], None
+            return [], f"{job.server}.{job.tool}: serveur non configuré ou indisponible"
     except Exception as exc:
         return [], f"{job.server}.{job.tool}: {type(exc).__name__}: {exc}"
     last_error = "échec"
@@ -299,6 +299,14 @@ async def research_web(
         "engines": _engines_used(jobs, merged),
         "intent": INTENT_LABELS.get(resolved, "général"),
         "errors": errors,
+        "attempted_servers": list(dict.fromkeys(job.server for job in jobs)),
+        "available_servers": list(
+            dict.fromkeys(
+                job.server
+                for job in jobs
+                if client.available(job.server)
+            )
+        ),
     }
 
 
@@ -473,4 +481,5 @@ async def research_report(client: McpClient, query: str) -> dict[str, Any]:
         "results": list(payload.get("results") or []),
         "engine": "+".join(engines),
         "provider_answer": "",
+        "errors": list(payload.get("errors") or []),
     }

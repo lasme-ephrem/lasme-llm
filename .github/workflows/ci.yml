@@ -1,0 +1,67 @@
+name: CI
+
+# Trois déclencheurs, pas plus :
+#  - push sur main : garde la branche principale verte en permanence ;
+#  - pull_request : contrôle AVANT fusion ;
+#  - manuel : permet de rejouer la CI sur n'importe quel commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Un seul run actif par référence : un nouveau push annule le précédent sur la
+# même PR (inutile de gaspiller des minutes sur un commit déjà dépassé).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Le dépôt est un projet Python + un front sans build. Une seule matrice
+  # suffit ; on ne duplique pas les runners pour rien.
+  qualite:
+    name: Qualité (${{ matrix.os }} · Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux : la cible de production (llama.cpp, Docker, CI standard).
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+          # Windows : la plateforme de développement réelle de ce projet
+          # (scripts PowerShell, chemins, runner Docker local). La CI doit le
+          # couvrir, sinon les régressions Windows ne sont vues qu'à la main.
+          - os: windows-latest
+            python: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Installer les dépendances Python
+        run: python -m pip install --upgrade pip -r requirements.txt
+
+      # validate_all est LA CI du projet en une commande : compilation, syntaxe
+      # JS découverte, tests node:test, matrice d'imports, pytest, pip check.
+      # La faire tourner ici garantit que la commande locale et la CI
+      # exécutent EXACTEMENT la même chose.
+      - name: Validation complète
+        run: python -m scripts.validate_all
+
+      - name: Vérifier que la surface HTTP n'a pas bougé sans le dire
+        run: python -m pytest tests/test_api_contract.py -p no:cacheprovider

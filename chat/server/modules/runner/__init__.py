@@ -1,0 +1,1 @@
+"""Runner Python isolé."""

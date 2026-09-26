@@ -1,6 +1,7 @@
 """Le chat principal est agentique : SSE outillé + persistance liée."""
 
 import json
+import re
 import unittest
 from unittest.mock import patch
 
@@ -215,6 +216,30 @@ class AgenticChatStreamTests(unittest.TestCase):
         finally:
             self.db.delete_session(session_id)
 
+    def test_citation_directive_lives_in_the_system_prompt(self):
+        # Les consignes de rédaction/citation ne doivent JAMAIS être collées
+        # au message utilisateur : le modèle les prenait pour des instructions
+        # émanant de l'utilisateur et perdait la demande réelle de vue.
+        scripted = ScriptedChatClient([list(FINAL_TURN)])
+        session_id, _events = self._run_chat(scripted)
+        try:
+            seen = scripted.seen_messages[0]
+            system_content = "\n".join(
+                str(message.get("content") or "")
+                for message in seen
+                if message.get("role") == "system"
+            )
+            user_content = "\n".join(
+                str(message.get("content") or "")
+                for message in seen
+                if message.get("role") == "user"
+            )
+            self.assertIn("marqueurs numériques", system_content)
+            self.assertNotIn("marqueurs numériques", user_content)
+            self.assertIn("Combien font 6*7", user_content)
+        finally:
+            self.db.delete_session(session_id)
+
     def test_budget_retry_ranges_draft_without_duplicating(self):
         # Un tour tronqué (budget dépassé) est RE-STREAMÉ par l'orchestrateur :
         # le brouillon tronqué doit être rangé (reason budget_retried), sinon
@@ -267,6 +292,130 @@ class AgenticChatStreamTests(unittest.TestCase):
             )
         finally:
             self.db.delete_session(session_id)
+
+    def test_system_prompt_rules_are_numbered_in_order(self):
+        """Un harnais propre se lit dans l'ordre : consignes uniques, croissantes.
+
+        Les patches successifs avaient produit des numéros dupliqués
+        (trois « 11 », deux « 13 ») et une règle « 18 » placée avant
+        « 15 » — le modèle devait deviner où finit une consigne. Certaines
+        consignes sont conditionnelles (image jointe, grounding strict) :
+        un trou dans la suite est donc légitime, pas un doublon ni un
+        retour en arrière.
+        """
+        scripted = ScriptedChatClient([list(FINAL_TURN)])
+        session_id, _events = self._run_chat(scripted)
+        try:
+            system = "\n".join(
+                str(message.get("content") or "")
+                for message in scripted.seen_messages[0]
+                if message.get("role") == "system"
+            )
+            numbers = [
+                int(value)
+                for value in re.findall(r"(?m)^\s*(\d{1,2})\.\s+\S", system)
+            ]
+            self.assertTrue(numbers, "aucune consigne numérotée trouvée")
+            self.assertEqual(numbers[0], 1, "la première consigne doit être 1.")
+            self.assertEqual(
+                numbers,
+                sorted(set(numbers)),
+                "les consignes du prompt système doivent être uniques et "
+                "numérotées dans l'ordre croissant",
+            )
+        finally:
+            self.db.delete_session(session_id)
+
+    def test_follow_up_uses_thread_sources_and_is_not_replaced(self):
+        """Régression : une relance sourcée dans le fil ne doit pas être effacée.
+
+        Cas réel : après une réponse sourcée sur Claude Opus 5.5, la relance
+        « tu peux me sortir ces performances par rapport à Fable 5.1 ? » a vu
+        sa réponse remplacée par un refus (« Je n'ai pas pu vérifier… ») —
+        parce que le harnais n'acceptait comme preuve que les pages lues
+        pendant le tour courant, ignorant les sources déjà citées.
+        """
+        session = self.db.create_session(title="relance sourcée")
+        self.db.add_message(
+            session_id=session["id"],
+            role="assistant",
+            content="Claude Opus 5.5 est environ 40 % moins cher [1].",
+            metadata={
+                "web_results": [
+                    {
+                        "title": "Anthropic — Claude Opus 5.5",
+                        "snippet": (
+                            "Opus 5.5 coûte 40 % de moins et est 30 % plus "
+                            "rapide que Opus 5."
+                        ),
+                        "url": "https://example.org/opus-5-5",
+                        "number": 1,
+                    }
+                ]
+            },
+        )
+        answer = (
+            "Par rapport à Fable 5.1, il vise la parité de performance :\n"
+            "*   **Coût** : environ 40 % moins cher.\n"
+            "*   **Vitesse** : environ 30 % plus rapide."
+        )
+        scripted = ScriptedChatClient(
+            [
+                [
+                    {"message": {"content": answer}},
+                    {
+                        "message": {"role": "assistant", "content": ""},
+                        "done": True,
+                        "done_reason": "stop",
+                        "eval_count": 20,
+                        "prompt_eval_count": 40,
+                    },
+                ]
+            ]
+        )
+        with patch("chat.server.main.client", scripted):
+            response = self.client.post(
+                "/api/chat/stream",
+                headers=self.headers,
+                json={
+                    "session_id": session["id"],
+                    "model": "gemma-4-e4b",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "tu peux me sortir ces performances par "
+                                "rapport à Fable 5.1 ?"
+                            ),
+                        }
+                    ],
+                    "web_search_enabled": True,
+                    "web_search_mode": "auto",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            events = []
+            for line in response.text.splitlines():
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    events.append(json.loads(line[6:]))
+        try:
+            replace = next(
+                event
+                for event in events
+                if event.get("type") == "content_replace"
+            )
+            self.assertNotIn("Je n’ai pas pu vérifier", replace["text"])
+            self.assertIn("parité de performance", replace["text"])
+            self.assertIn("40 %", replace["text"])
+            self.assertIn("30 %", replace["text"])
+            messages = self.db.get_session_messages(session["id"])
+            assistant = [
+                item for item in messages if item["role"] == "assistant"
+            ][-1]
+            self.assertNotIn("Je n’ai pas pu vérifier", assistant["content"])
+            self.assertIn("parité de performance", assistant["content"])
+        finally:
+            self.db.delete_session(session["id"])
 
 
 if __name__ == "__main__":

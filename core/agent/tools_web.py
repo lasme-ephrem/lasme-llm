@@ -161,12 +161,13 @@ def _format_search_results(
         errors = payload.get("errors") or []
         if not isinstance(errors, list):
             errors = [errors]
-        detail = (
-            f" erreurs: {'; '.join(str(item) for item in errors[:2])}"
-            if errors
-            else ""
-        )
-        return f"Aucun résultat.{detail}"
+        if errors:
+            detail = "; ".join(str(item) for item in errors[:3])
+            return (
+                "Recherche Web indisponible ou en échec : "
+                f"{detail}. N'invente pas de résultats."
+            )
+        return "Aucun résultat Web trouvé. Essaie une requête plus précise."
     if numbering is None:
         numbering = SearchResultNumbering()
     numbers = numbering.allocate(len(results))
@@ -223,6 +224,11 @@ def register_web_tools(
             intent=str(args.get("intent") or "auto"),
             max_results=8,
         )
+        if not payload.get("results") and payload.get("errors"):
+            raise RuntimeError(
+                "Recherche Web indisponible : "
+                + "; ".join(str(item) for item in payload["errors"][:3])
+            )
         return _format_search_results(payload, counter)
 
     async def _read(args: dict[str, Any]) -> str:

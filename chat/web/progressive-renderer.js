@@ -121,8 +121,21 @@
             if (state.frameId !== null || state.timeoutId !== null) return;
             const elapsed = now() - state.lastPaint;
             const delay = Math.max(0, MIN_FRAME_MS - elapsed);
-            state.frameId = requestFrame(() => {
-                state.frameId = null;
+            // DEUX armements pour un seul rendu : la frame ET une minuterie.
+            // Le premier arrivé annule l'autre. Un requestAnimationFrame armé
+            // alors que l'onglet était VISIBLE ne se déclenche JAMAIS si
+            // l'onglet devient masqué ensuite (cas réel : réponse tronquée à
+            // l'écran — 199 caractères affichés pour 700 écrits en base — le
+            // rendu restant figé au milieu de la phrase).
+            const fire = () => {
+                if (state.frameId !== null) {
+                    cancelFrame(state.frameId);
+                    state.frameId = null;
+                }
+                if (state.timeoutId !== null) {
+                    global.clearTimeout(state.timeoutId);
+                    state.timeoutId = null;
+                }
                 if (delay <= 1) {
                     paint(container, state);
                     return;
@@ -131,7 +144,9 @@
                     state.timeoutId = null;
                     paint(container, state);
                 }, delay);
-            });
+            };
+            state.frameId = requestFrame(fire);
+            state.timeoutId = global.setTimeout(fire, delay + MIN_FRAME_MS);
         }
 
         function paint(container, state) {
@@ -154,10 +169,53 @@
             notifyComplete(container, state);
         }
 
+        function revealNow(container, state, targetText, render, options) {
+            // Affichage immédiat du texte définitif : on coupe tout travail
+            // de révélation en attente avant de peindre.
+            if (state.frameId !== null) {
+                cancelFrame(state.frameId);
+                state.frameId = null;
+            }
+            if (state.timeoutId !== null) {
+                global.clearTimeout(state.timeoutId);
+                state.timeoutId = null;
+            }
+            state.targetText = targetText;
+            state.renderedText = targetText;
+            state.render = render;
+            state.onPaint = options.onPaint || state.onPaint;
+            if (options.onComplete) state.onComplete = options.onComplete;
+            if (options.final) state.final = true;
+            state.completionNotified = false;
+            if (typeof state.render === "function") {
+                state.render(container, targetText);
+            }
+            if (typeof state.onPaint === "function") {
+                state.onPaint(container, targetText);
+            }
+            notifyComplete(container, state);
+        }
+
         function schedule(container, text, render, options = {}) {
             if (!container || typeof render !== "function") return;
             const state = stateFor(container);
             const targetText = String(text || "");
+
+            if (options.replace || options.final) {
+                // CORRECTION serveur (content_replace) ou FIN de flux : le
+                // texte définitif s'affiche d'un bloc, sans être retapé ni
+                // étalé dans le temps. Trois pièges se cumulaient ici :
+                // (1) les navigateurs ÉTRANGLENT les minuteurs d'un onglet
+                //     masqué (1/s, puis 1/min après quelques minutes) ;
+                // (2) un requestAnimationFrame armé onglet VISIBLE ne se
+                //     déclenche JAMAIS une fois l'onglet masqué ;
+                // (3) retaper le texte corrigé donnait l'impression que la
+                //     réponse s'effaçait puis se réécrivait.
+                // Résultat observé : réponse tronquée à l'écran (199
+                // caractères affichés pour 700 écrits en base).
+                revealNow(container, state, targetText, render, options);
+                return;
+            }
 
             if (!targetText.startsWith(state.renderedText)) {
                 state.renderedText = "";
