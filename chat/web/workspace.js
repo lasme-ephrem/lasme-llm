@@ -276,13 +276,20 @@ function syncProjectSelector() {
         activeProjectMeta.textContent = `${sessionCount} conversation${sessionCount > 1 ? "s" : ""} · ${memoryLabel}`;
     }
     renderProjectMenu();
-    if (project?.default_model && inputModelSelect) {
-        inputModelSelect.value = project.default_model;
-        const option = document.querySelector(
-            `#modelPickerDropdown [data-model="${CSS.escape(project.default_model)}"]`
-        );
-        option?.click();
-    }
+}
+
+// Applique le modèle par défaut du projet UNIQUEMENT lors d'un changement
+// de projet explicite. Jamais à l'actualisation : sinon le choix de modèle
+// de l'utilisateur est écrasé après chaque message (loadSessions →
+// refreshProjectSessionCounts → syncProjectSelector).
+function applyProjectDefaultModel() {
+    const project = chatProjects.find(item => item.id === currentProjectId);
+    if (!project?.default_model || !inputModelSelect) return;
+    inputModelSelect.value = project.default_model;
+    const option = document.querySelector(
+        `#modelPickerDropdown [data-model="${CSS.escape(project.default_model)}"]`
+    );
+    option?.click();
 }
 
 function closeProjectSwitcher() {
@@ -307,6 +314,7 @@ async function activateChatProject(projectId) {
     localStorage.setItem("active_project_id", currentProjectId);
     if (chatProjectSelect) chatProjectSelect.value = currentProjectId;
     syncProjectSelector();
+    applyProjectDefaultModel();
     closeProjectSwitcher();
     await startNewChat();
     await loadSessions();

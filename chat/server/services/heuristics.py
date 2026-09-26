@@ -81,6 +81,13 @@ _SOCIAL_FILLERS = _CONTACT_ANCHORS | frozenset({
     "presente", "qui", "rencontre", "rencontrer", "salutations",
     "sil", "soiree", "stp", "svp", "te", "there", "toi", "tous",
     "tout", "tu", "un", "une", "va", "vas", "vous", "you",
+    # Mots d'adresse et d'affection : « yo mon gars », « salut mon pote »
+    # sont des salutations, pas des demandes de travail.
+    "mon", "ma", "mes", "ton", "ta", "tes", "notre", "votre", "nos", "vos",
+    "gars", "gros", "grosse", "mec", "mecs", "pote", "potes", "poto",
+    "bro", "frere", "freres", "frerot", "soeur", "belle", "beau", "vieux",
+    "vieille", "chef", "captain", "capitaine", "team", "famille", "bg",
+    "meuf", "cousin", "cousine", "copain", "copine", "mate",
 })
 _TASK_WORDS = frozenset({
     "aide", "aider", "analyse", "calcule", "calcul", "cherche",
@@ -108,6 +115,14 @@ def is_social_turn(query: str) -> bool:
     words = re.findall(r"[a-z0-9]+", text.casefold())
     if not words or len(words) > 16 or any(word.isdigit() for word in words):
         return False
+    # Signaux de connexion courts (« ping », « test ») : pas une demande
+    # de travail quand ils sont le message entier. « lance un test » reste
+    # une demande, car il contient d'autres mots.
+    if len(words) == 1 and words[0] in {
+        "ping", "pong", "test", "ok", "okay", "top", "cool", "super",
+        "parfait", "impec", "impeccable", "genial", "sympa",
+    }:
+        return True
     vocabulary = set(words)
     how_are_you = (
         "comment" in vocabulary

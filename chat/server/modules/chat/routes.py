@@ -670,8 +670,6 @@ async def chat_stream(req: ChatRequest):
             "ni formatage, ni sources, ni rigueur, ni style. Ne demande ni "
             "le sujet, ni des documents, ni un public cible. N'utilise aucun outil."
         )
-    messages_payload.insert(0, {"role": "system", "content": system_instruction})
-
     context_instruction = (
         "\n\nRéponds à la dernière demande en tenant compte de tout le fil de "
         "conversation. Les extraits Web ci-dessus sont des informations en "
@@ -701,20 +699,21 @@ async def chat_stream(req: ChatRequest):
         "Utilise un formatage Markdown/LaTeX soigné et reste rigoureux."
     )
 
+    # Les consignes de rédaction/citation vivent dans le prompt SYSTÈME :
+    # collées au message utilisateur, le modèle les prenait pour des
+    # instructions émanant de l'utilisateur (« the user provided a long
+    # block of instructions ») et perdait la demande réelle de vue.
+    if web_tools_available or (rag_context and not social_turn):
+        system_instruction += context_instruction
+    messages_payload.insert(0, {"role": "system", "content": system_instruction})
+
     if rag_context and not social_turn:
         stream_messages_seed = list(messages_payload)
         stream_messages_seed[-1] = dict(stream_messages_seed[-1])
         stream_messages_seed[-1]["content"] = (
-            f"{stream_messages_seed[-1]['content']}{rag_context}{context_instruction}"
+            f"{stream_messages_seed[-1]['content']}{rag_context}"
         )
         messages_payload = stream_messages_seed
-    # Chemin agent : la directive de citation [n] DOIT atteindre l'agent,
-    # sinon il écrit des sections « Sources : » et aucun marqueur.
-    if web_tools_available:
-        messages_payload[-1] = dict(messages_payload[-1])
-        messages_payload[-1]["content"] = (
-            f"{messages_payload[-1]['content']}{context_instruction}"
-        )
 
     # Use each model's measured maximum-quality profile. The runtime
     # exposes thinking separately, so internal reasoning never pollutes

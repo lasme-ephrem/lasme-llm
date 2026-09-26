@@ -109,6 +109,7 @@ if (modelPickerTrigger && modelPickerDropdown) {
             if (selectedModelName) selectedModelName.textContent = labelVal;
             if (inputModelSelect) inputModelSelect.value = modelVal;
             updateModelIdentity(modelVal);
+            try { localStorage.setItem("lasme_model_choice", modelVal); } catch (_) {}
             
             document.querySelectorAll("#modelPickerDropdown .intel-option").forEach(b => {
                 b.classList.remove("intel-active");
@@ -123,6 +124,17 @@ if (modelPickerTrigger && modelPickerDropdown) {
         });
     });
 }
+
+// Choix persistant : le modèle choisi par l'utilisateur survit aux
+// rechargements de page (au lieu de revenir au défaut du HTML).
+try {
+    const savedModel = localStorage.getItem("lasme_model_choice");
+    if (savedModel) {
+        document.querySelector(
+            `#modelPickerDropdown .intel-option[data-model="${CSS.escape(savedModel)}"]`
+        )?.click();
+    }
+} catch (_) {}
 
 updateModelIdentity(inputModelSelect?.value || "gemma-4-12b");
 
@@ -151,6 +163,7 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
     window.setEffortLevel = function setEffortLevel(level) {
         const safe = EFFORT_LEVELS.includes(level) ? level : "high";
         reasoningLevelSelect.value = safe;
+        try { localStorage.setItem("lasme_effort_choice", safe); } catch (_) {}
         if (selectedReasoningName) {
             selectedReasoningName.textContent = safe.charAt(0).toUpperCase() + safe.slice(1);
         }
@@ -184,8 +197,14 @@ if (reasoningPickerTrigger && reasoningPickerDropdown && reasoningLevelSelect) {
                 setEffortLevel(EFFORT_LEVELS[index - 1]);
             }
         });
-        // Défaut au lancement : Medium (standard mondial).
-        setEffortLevel("medium");
+        // Défaut au lancement : le dernier choix de l'utilisateur, sinon
+        // Medium (standard mondial).
+        let savedEffort = "medium";
+        try {
+            const stored = localStorage.getItem("lasme_effort_choice");
+            if (EFFORT_LEVELS.includes(stored)) savedEffort = stored;
+        } catch (_) {}
+        setEffortLevel(savedEffort);
     }
 }
 

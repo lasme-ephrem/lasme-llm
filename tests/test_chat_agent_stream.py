@@ -215,6 +215,30 @@ class AgenticChatStreamTests(unittest.TestCase):
         finally:
             self.db.delete_session(session_id)
 
+    def test_citation_directive_lives_in_the_system_prompt(self):
+        # Les consignes de rédaction/citation ne doivent JAMAIS être collées
+        # au message utilisateur : le modèle les prenait pour des instructions
+        # émanant de l'utilisateur et perdait la demande réelle de vue.
+        scripted = ScriptedChatClient([list(FINAL_TURN)])
+        session_id, _events = self._run_chat(scripted)
+        try:
+            seen = scripted.seen_messages[0]
+            system_content = "\n".join(
+                str(message.get("content") or "")
+                for message in seen
+                if message.get("role") == "system"
+            )
+            user_content = "\n".join(
+                str(message.get("content") or "")
+                for message in seen
+                if message.get("role") == "user"
+            )
+            self.assertIn("marqueurs numériques", system_content)
+            self.assertNotIn("marqueurs numériques", user_content)
+            self.assertIn("Combien font 6*7", user_content)
+        finally:
+            self.db.delete_session(session_id)
+
     def test_budget_retry_ranges_draft_without_duplicating(self):
         # Un tour tronqué (budget dépassé) est RE-STREAMÉ par l'orchestrateur :
         # le brouillon tronqué doit être rangé (reason budget_retried), sinon

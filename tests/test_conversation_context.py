@@ -52,6 +52,23 @@ class ConversationContextTests(unittest.TestCase):
         ):
             self.assertFalse(is_social_turn(message), message)
 
+    def test_address_words_and_short_checkins_stay_social(self):
+        for message in (
+            "yo mon gars",
+            "salut mon pote",
+            "wesh frérot",
+            "ping",
+            "test",
+            "yo gros",
+        ):
+            self.assertTrue(is_social_turn(message), message)
+        for message in (
+            "lance un test",
+            "calcule mon total",
+            "salut, quel est le cours du bitcoin ?",
+        ):
+            self.assertFalse(is_social_turn(message), message)
+
     def test_follow_up_keeps_previous_topic(self):
         messages = [
             ChatMessage(

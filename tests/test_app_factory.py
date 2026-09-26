@@ -74,12 +74,19 @@ class AppFactoryTests(unittest.TestCase):
         import asyncio
         from unittest.mock import patch
 
+        from core.config import settings
+
         # La couture historique patch("chat.server.main.client") doit être
         # vue par les services (résolution tardive de Deps.client).
         with patch("chat.server.main.client", FakeClient()):
             caps = asyncio.run(build_capabilities(_fake_deps()))
         self.assertTrue(caps["vision_enabled"])
-        self.assertFalse(caps["external_image_generation_enabled"])
+        # La capacité doit refléter la CONFIG effective (le .env peut activer
+        # explicitement la génération d'images externe), pas un défaut figé.
+        self.assertEqual(
+            caps["external_image_generation_enabled"],
+            bool(settings.external_image_generation_enabled),
+        )
         self.assertIn("md", caps["supported_project_files"])
 
 
