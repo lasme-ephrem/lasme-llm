@@ -1,0 +1,70 @@
+name: Rapport de bug
+description: Quelque chose ne fonctionne pas comme attendu.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de prendre le temps de décrire le problème. Les trois premières
+        rubriques sont celles qui font gagner le plus de temps : sans elles,
+        un bug d'affichage et un bug de génération se ressemblent.
+
+  - type: textarea
+    id: attendu
+    attributes:
+      label: Ce que vous attendiez
+      placeholder: Je m'attendais à ce que la réponse cite ses sources.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observe
+    attributes:
+      label: Ce que vous observez
+      description: Ajoutez une capture ou une courte vidéo si c'est visuel.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduire
+    attributes:
+      label: Étapes pour reproduire
+      placeholder: |
+        1. Ouvrir une nouvelle conversation
+        2. Choisir le modèle gemma-4-12b
+        3. Poser la question « … »
+        4. Observer …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: zone
+    attributes:
+      label: Zone concernée
+      options:
+        - Interface (affichage, disposition)
+        - Réponse du modèle (contenu, style, refus)
+        - Outils (recherche web, Python, fichiers)
+        - Démarrage / installation
+        - Autre
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version ou commit
+      description: Le hash du commit (ou la date) sur lequel le bug apparaît.
+      placeholder: e1b1a48
+
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Éléments de diagnostic
+      description: |
+        Facultatif, mais précieux. Selon la zone :
+        - réponse : le contenu exact du message, et le journal serveur ;
+        - affichage : le journal de la console du navigateur (F12) ;
+        - démarrage : la sortie de `python -m scripts.serve status` et
+          `http://127.0.0.1:8000/api/health`.
+      render: text

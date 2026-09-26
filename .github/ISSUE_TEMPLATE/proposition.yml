@@ -1,0 +1,34 @@
+name: Proposition
+description: Une idée d'amélioration, une fonctionnalité, un changement de comportement.
+labels: ["amélioration"]
+body:
+  - type: textarea
+    id: probleme
+    attributes:
+      label: Le problème à résoudre
+      description: |
+        Commencez par le besoin, pas par la solution. « Je perds le fil quand
+        une réponse cite huit sources » est plus utile que « ajoutez un
+        sélecteur de sources ».
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Ce que vous imaginez
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contrainte
+    attributes:
+      label: Contrainte à respecter
+      description: Ce projet tient à deux promesses ; dites si la proposition les touche.
+      options:
+        - Aucune en particulier
+        - Doit rester 100 % local (aucun envoi à un service externe)
+        - Doit rester hors ligne (fonctionner sans Internet)
+        - Les deux
+    validations:
+      required: true

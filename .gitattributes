@@ -1,0 +1,36 @@
+# Attributs Git — normalisation des fins de ligne.
+#
+# Sans cette table, un fichier écrit sous Windows (CRLF) apparaît comme
+# entièrement modifié dès qu'il est ouvert sous Linux, et inversement : le
+# diff devient illisible et les relectures ratent les vrais changements.
+#
+# Règle : le dépôt stocke du LF ; le texte est converti selon la plateforme
+# au moment de l'extraction. Les binaires ne sont jamais touchés.
+
+* text=auto eol=lf
+
+# Scripts Windows : ils doivent garder leurs CRLF, sinon PowerShell 5.1
+# peut refuser de les exécuter (signature de bloc et retour chariot).
+*.ps1 text eol=crlf
+
+# Binaires — jamais convertis.
+*.gif binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.gguf binary
+*.safetensors binary
+*.exe binary
+*.dll binary
+
+# Verrouillages et fichiers générés : pas de fusion de diff, on prend une
+# version entière plutôt qu'un mélange incohérent.
+package-lock.json -diff
+*.min.js -diff -merge
+*.min.css -diff -merge
