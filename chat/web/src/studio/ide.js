@@ -1,4 +1,4 @@
-// Extrait verbatim de app.js (découpage modulaire — voir ROADMAP.md, C1).
+// Extrait verbatim de app.js (découpage modulaire).
 // Script classique : les déclarations de top-level restent globales.
 let activeIdeFilePath = "README.md";
 

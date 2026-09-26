@@ -1,5 +1,5 @@
 "use strict";
-// app.js — noyau d'état partagé (découpage modulaire, ROADMAP C1).
+// app.js — noyau d'état partagé (découpage modulaire).
 // Tout le reste vit dans chat/web/src/**, chargé APRÈS ce fichier.
 let API_BASE = "/api";
 const LASME_FAST_MODEL = "lasme-smol-fast";

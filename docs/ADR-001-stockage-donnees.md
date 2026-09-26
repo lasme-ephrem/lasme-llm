@@ -1,6 +1,6 @@
 # ADR-001 — Stockage des données : SQLite unique, un seul écrivain
 
-**Statut** : accepté · **Date** : 2026-09-25 · **Phase** : D3 de la ROADMAP
+**Statut** : accepté · **Date** : 2026-09-25
 
 ## Contexte
 

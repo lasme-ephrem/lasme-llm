@@ -1,4 +1,4 @@
-// Extrait verbatim de app.js (découpage modulaire — voir ROADMAP.md, C1).
+// Extrait verbatim de app.js (découpage modulaire).
 // Script classique : les déclarations de top-level restent globales.
 const TOOL_ICONS = {
     web_research: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10.2" r="6.2"></circle><path d="m14.6 14.8 4.9 4.7"></path><circle cx="7.7" cy="9.2" r="0.9"></circle><circle cx="11.8" cy="8.6" r="0.9"></circle><circle cx="10" cy="12.3" r="0.9"></circle></svg>`,
