@@ -1804,12 +1804,22 @@ img.agent-tool-chart {
 
 .work-note-text {
     margin: 0;
-    padding: 0.6rem 0.7rem;
+    padding: 0.55rem 0.9rem 0.65rem 1.05rem;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: inherit;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    color: var(--text-secondary, #5f6b7a);
+    font-style: italic;
+    font-size: 0.855rem;
+    line-height: 1.55;
+    opacity: 0.85;
     max-height: 18rem;
     overflow-y: auto;
+    border-left: 2px solid var(--border);
 }
 
 /* Rédaction en cours : le texte affiché est PROVISOIRE (brouillon de tour),

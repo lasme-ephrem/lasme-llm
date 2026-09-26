@@ -146,6 +146,64 @@ def unsupported_grounded_numbers(
     return list(dict.fromkeys(unsupported))
 
 
+_CLARIFICATION_MARKERS = re.compile(
+    r"[?]|peux-tu|pourrais-tu|pourriez-vous|tu parles de|"
+    r"de quel|laquelle|lequel|quel test|quelle année|quelle version|"
+    r"quelle référence|précise|préciser|dis-moi",
+    flags=re.IGNORECASE,
+)
+
+
+def is_clarification_question(text: str) -> bool:
+    """True si la réponse est surtout une demande de clarification.
+
+    Une clarification n'affirme pas de fait numérique vif : le harnais de
+    grounding ne doit donc pas l'écraser. Cas réel : face aux « scores d'Opus
+    5.5 », le brouillon reposait la bonne question (« quel benchmark ? ») et
+    l'intégralité de la réponse était remplacée par un refus administratif —
+    la bonne question disparaissant de l'écran.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(_CLARIFICATION_MARKERS.search(value))
+
+
+# Courtes réserves employées en remplacement d'une phrase inventée.
+# Un ton de conversation — jamais une formule de refus administratif.
+_NUMBER_RESERVE = (
+    "…je n'ai pas de chiffre fiable là-dessus dans mes sources, "
+    "je préfère ne rien affirmer."
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def soften_unsupported_numbers(answer: str, evidence: str) -> str:
+    """Retire les chiffres inventés sans jeter la réponse à la poubelle.
+
+    Cas réel qui a motivé cette fonction : face aux « scores d'Opus 5.5 »,
+    une seule phrase bâtie sur un chiffre non étayé faisait remplacer
+    L'INTÉGRALITÉ de la réponse par un refus administratif — y compris la
+    question de clarification qui la suivait et qui était pourtant la bonne
+    chose à dire. Ici : seules les phrases incriminées sont assagies, le
+    reste de la réponse est conservé tel quel.
+    """
+    text = str(answer or "")
+    if not text:
+        return text
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    kept: List[str] = []
+    for sentence in sentences:
+        unsupported = unsupported_grounded_numbers(sentence, evidence)
+        if unsupported:
+            kept.append(_NUMBER_RESERVE)
+        else:
+            kept.append(sentence)
+    softened = " ".join(part for part in kept if part).strip()
+    return softened or str(_NUMBER_RESERVE).strip()
+
+
+
 def compact_web_source_metadata(
     results: List[Dict[str, Any]],
 ) -> Dict[str, Any]:

@@ -43,8 +43,10 @@ from chat.server.services.stats import build_generation_stats
 from chat.server.services.text import (
     clean_model_text,
     compact_web_source_metadata,
+    is_clarification_question,
     iter_stream_text_chunks,
     sanitize_citation_markers,
+    soften_unsupported_numbers,
     unsupported_grounded_numbers,
 )
 from core.agent.grounding import (
@@ -52,7 +54,7 @@ from core.agent.grounding import (
     requires_strict_grounding,
 )
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
-from core.agent.prompts import TURN_DISCIPLINE_RULE
+from core.agent.prompts import CLARIFICATION_RULE, HUMAN_VOICE_RULE, TURN_DISCIPLINE_RULE
 from core.agent.registry import build_agent_registry
 from core.agent.tools import ToolRegistry
 from core.agent.tools_web import (
@@ -597,6 +599,10 @@ async def chat_stream(req: ChatRequest):
     # le modèle rédige un brouillon avant d'outiller — brouillon que
     # l'utilisateur verrait streamer puis être rangé (voir bug.mp4).
     system_instruction += TURN_DISCIPLINE_RULE
+    # Voix humaine : interdiction de réciter son rôle, anti-tics de traduction,
+    # clarification concrète plutôt que refus administratif.
+    system_instruction += HUMAN_VOICE_RULE
+    system_instruction += CLARIFICATION_RULE
 
     if strict_grounding:
         system_instruction += (
@@ -1018,8 +1024,14 @@ async def chat_stream(req: ChatRequest):
             )
             if strict_grounding and web_results_data:
                 # Preuve d'abord : sur une demande à grounding strict, une
-                # valeur numérique non étayée par les sources réellement
-                # lues fait remplacer la synthèse par un refus honnête.
+                # valeur numérique inventée (prix, score, benchmark) est
+                # affaiblie en conversation (« je n'ai pas de chiffre fiable
+                # là-dessus »), sans jamais sacrifier le RESTE de la réponse.
+                # Deux exceptions : si la réponse est surtout une question de
+                # clarification (« quel benchmark ? »), on ne la touche pas ;
+                # si un score est au présent dans les sources, c'est qu'elle
+                # affirme bien cette valeur, donc on ne la supprime pas non
+                # plus.
                 evidence_text = "\n".join(
                     " ".join(
                         [
@@ -1029,17 +1041,9 @@ async def chat_stream(req: ChatRequest):
                     )
                     for item in web_results_data
                 )
-                unsupported_numbers = unsupported_grounded_numbers(
-                    full_assistant_reply,
-                    evidence_text,
-                )
-                if unsupported_numbers:
-                    full_assistant_reply = (
-                        "Les sources trouvées ne permettent pas de confirmer toutes "
-                        "les valeurs numériques de la réponse générée. Je préfère "
-                        "retirer cette synthèse plutôt que d’afficher des prix ou "
-                        "des scores non étayés. Relance la recherche pour obtenir "
-                        "un nouveau jeu de sources vérifiées."
+                if not is_clarification_question(full_assistant_reply):
+                    full_assistant_reply = soften_unsupported_numbers(
+                        full_assistant_reply, evidence_text
                     )
             # Le flux brut a été diffusé en direct ; content_replace sert ici
             # la version assainie pour que le texte visible soit exactement
