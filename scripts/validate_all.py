@@ -4,6 +4,12 @@ Usage :
   python -m scripts.validate_all            # statique + tests (sans runtime)
   python -m scripts.validate_all --live     # + évals agent + budget perf
                                               (nécessite le router démarré)
+
+Sept étapes : compilation Python, contrôle des annotations (un nom de typing
+utilisé sans import passe inaperçu sur Python 3.14 où les annotations ne sont
+plus évaluées, mais casse la collecte de pytest sur 3.11/3.12), syntaxe de
+tous les modules du front, tests node:test, matrice d'imports entre couches,
+pytest, pip check.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ def main() -> None:
     steps: list[tuple[str, list[str]]] = [
         ("compileall", [PYTHON, "-m", "compileall", "-q",
                         "chat", "core", "coding", "scripts", "tests"]),
+        ("annotations", [PYTHON, "-m", "scripts.check_annotations"]),
         ("js syntaxe", ["node", "--check", *web_scripts]),
         ("js tests", ["node", "--test", *js_tests]),
         ("imports", [PYTHON, "-m", "scripts.check_imports"]),

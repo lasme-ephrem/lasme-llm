@@ -1,5 +1,10 @@
+"""Boucle d'orchestrateur : tours d'outils, budgets, garde-fous."""
+
+from __future__ import annotations
+
 import asyncio
 import unittest
+from typing import Any, Dict, List
 
 from core.agent.builtin import build_default_registry
 from core.agent.events import EventLog
