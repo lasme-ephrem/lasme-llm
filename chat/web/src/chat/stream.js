@@ -571,6 +571,7 @@ async function sendChatMessage(options = {}) {
                 project_id: currentProjectId,
                 question: userPromptText,
                 model: selectedModel,
+                intelligence_level: reasoningLevelSelect ? reasoningLevelSelect.value : "high",
                 selected_file_ids: requestSelectedFileIds,
                 temporary: requestIsTemporary
             }
@@ -778,6 +779,21 @@ async function sendChatMessage(options = {}) {
                                 : parsed.search_query || ""
                         );
                     }
+                    if (parsed.type === "session" && parsed.web_search) {
+                        // « ready » et « disabled » sont des états normaux :
+                        // outils prêts, ou volontairement absents (salutation,
+                        // mode Web off). Seul « unavailable » demande une
+                        // action de l'utilisateur (aucun moteur configuré) —
+                        // c'est le seul cas qui mérite un bandeau.
+                        if (parsed.web_search.status === "unavailable") {
+                            trackAssistantActivity(
+                                assistantBubble,
+                                "web",
+                                "warning",
+                                "Recherche Web non configurée"
+                            );
+                        }
+                    }
                     if (parsed.type === "reasoning_start") {
                         if (live.reasoningText) live.reasoningText += "\n\n";
                         live.reasoningState = "streaming";
@@ -820,11 +836,12 @@ async function sendChatMessage(options = {}) {
                         }
                     }
                     if (parsed.type === "content_replace") {
-                        // Version de service assainie (citations [n]
-                        // vérifiées, section « Sources » retirée) : elle
-                        // remplace le flux brut déjà affiché pour que le
-                        // texte visible soit exactement celui qui est
-                        // persisté.
+                        // Version de service assainie (chiffres non étayés
+                        // assagis, citations [n] vérifiées, section
+                        // « Sources » retirée) : elle remplace le flux brut
+                        // déjà affiché pour que le texte visible soit
+                        // exactement celui qui est persisté. Affichage d'un
+                        // bloc : une correction ne se retape pas.
                         fullResponse = cleanModelText(String(parsed.text || ""));
                         live.answerText = fullResponse;
                         if (isStreamVisible()) {
@@ -834,6 +851,7 @@ async function sendChatMessage(options = {}) {
                                 webResultsMeta,
                                 reasoningDuration,
                                 {
+                                    replace: true,
                                     onPaint: () => followStreamingResponse(
                                         userMessage,
                                         assistantMessage
@@ -862,6 +880,7 @@ async function sendChatMessage(options = {}) {
                     }
                     if (parsed.type === "error") {
                         const message = parsed.message || "La génération a été interrompue.";
+                        live.error = message;
                         fullResponse = fullResponse
                             ? `${fullResponse}\n\n*${message}*`
                             : `*${message}*`;
@@ -934,6 +953,19 @@ async function sendChatMessage(options = {}) {
         const remaining = decoder.decode();
         if (remaining) {
             sseBuffer += remaining;
+        }
+
+        if (!fullResponse.trim() && !live.imageLoading && !live.error) {
+            fullResponse = "Je n’ai pas réussi à produire une réponse. Tu peux réessayer ou reformuler ta demande.";
+            live.answerText = fullResponse;
+            if (isStreamVisible()) {
+                renderFullAssistantMessage(
+                    assistantBubble,
+                    fullResponse,
+                    webResultsMeta,
+                    reasoningDuration
+                );
+            }
         }
 
         // Le titre est généré en parallèle côté serveur dès le début du

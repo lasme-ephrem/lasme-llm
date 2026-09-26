@@ -11,6 +11,7 @@ import unittest
 
 from chat.server.main import (
     compact_web_source_metadata,
+    extract_agent_page_evidence,
     extract_agent_sources,
     merge_dedup_sources,
     normalize_source_url,
@@ -117,6 +118,7 @@ class ExtractAgentSourcesTests(unittest.TestCase):
         # Le titre réel du web_research est conservé face au titre déduit
         # de l'URL (« Releases »).
         self.assertEqual(github["title"], "Releases · ggml-org/llama.cpp · GitHub")
+        self.assertIn("Navigation Menu", github["snippet"])
         # La page fetchée en plus reçoit son titre ; la section ERREUR
         # (page non lue) n'est pas une source.
         self.assertEqual(sources[2]["url"], "https://hf.co/docs")
@@ -130,6 +132,30 @@ class ExtractAgentSourcesTests(unittest.TestCase):
         sources = extract_agent_sources([fetch_first, search_after])
         self.assertEqual(len(sources), 1)
         self.assertEqual(sources[0]["title"], "Transformers : documentation")
+
+    def test_page_evidence_uses_only_successfully_read_page_bodies(self):
+        events = [
+            search_event(SEARCH_OUTPUT),
+            fetch_event(FETCH_OUTPUT),
+            {
+                "type": "tool_result",
+                "name": "web_read",
+                "ok": False,
+                "output": "## https://bad.example/page (500 caractères)\nPrix 999 €",
+            },
+        ]
+        evidence = extract_agent_page_evidence(events)
+        self.assertIn("Navigation Menu", evidence)
+        self.assertIn("Transformers documentation", evidence)
+        self.assertNotIn("ERREUR: HTTPError", evidence)
+        self.assertNotIn("Prix 999 €", evidence)
+
+    def test_page_evidence_is_bounded(self):
+        output = "## https://example.org/page (5000 caractères)\n" + "x" * 5_000
+        evidence = extract_agent_page_evidence(
+            [fetch_event(output)], max_chars=120
+        )
+        self.assertLessEqual(len(evidence), 120)
 
     def test_legacy_tool_names_still_parse(self):
         sources = extract_agent_sources(

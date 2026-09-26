@@ -36,6 +36,7 @@ from chat.server.services.heuristics import (
     should_enable_reasoning,
 )
 from chat.server.services.sources import (
+    extract_agent_page_evidence,
     extract_agent_sources,
     merge_dedup_sources,
 )
@@ -43,18 +44,22 @@ from chat.server.services.stats import build_generation_stats
 from chat.server.services.text import (
     clean_model_text,
     compact_web_source_metadata,
-    is_clarification_question,
+    ground_strict_answer,
+    grounding_evidence_text,
     iter_stream_text_chunks,
     sanitize_citation_markers,
-    soften_unsupported_numbers,
-    unsupported_grounded_numbers,
 )
 from core.agent.grounding import (
     is_commercial_comparison,
     requires_strict_grounding,
 )
 from core.agent.orchestrator import AgentConfig, AgentOrchestrator
-from core.agent.prompts import CLARIFICATION_RULE, HUMAN_VOICE_RULE, TURN_DISCIPLINE_RULE
+from core.agent.prompts import (
+    CLARIFICATION_RULE,
+    FOLLOW_UP_RULE,
+    HUMAN_VOICE_RULE,
+    TURN_DISCIPLINE_RULE,
+)
 from core.agent.registry import build_agent_registry
 from core.agent.tools import ToolRegistry
 from core.agent.tools_web import (
@@ -73,6 +78,7 @@ from core.tools.image_generator import (
     generate_image_from_prompt,
     save_base64_image,
 )
+from core.mcp.catalog import configured_server_ids
 
 router = APIRouter()
 
@@ -516,7 +522,7 @@ async def chat_stream(req: ChatRequest):
             "[recency] recherche forcée (motif sensible au temps)"
         )
     strict_grounding = bool(
-        user_toggle
+        (user_toggle or explicit_web_intent or recency_sensitive)
         and not has_images
         and requires_strict_grounding(last_user_msg)
     )
@@ -531,7 +537,7 @@ async def chat_stream(req: ChatRequest):
     )
 
     system_instruction = (
-        f"Tu es LasmeLLMChat, un assistant IA de premier ordre.\n"
+        f"Tu aides l'utilisateur dans cette conversation.\n"
         f"Date actuelle de référence : {current_date_str}.\n\n"
         f"Consignes de réponse :\n"
         f"1. Langue & Style : Réponds dans la langue de l'utilisateur, en français clair et naturel lorsqu'il écrit en français. Adapte spontanément le ton et le niveau de détail à la conversation.\n"
@@ -554,7 +560,7 @@ async def chat_stream(req: ChatRequest):
     )
     if force_web_search:
         system_instruction += (
-            "\n11. Recherche Web obligatoire : la demande nécessite des "
+            "\n10. Recherche Web obligatoire : la demande nécessite des "
             "informations actuelles. Utilise web_research, puis web_read "
             "sur les URLs pertinentes AVANT de répondre, et ne cite que ce "
             "que tu as réellement lu dans les pages récupérées. Si un "
@@ -565,7 +571,7 @@ async def chat_stream(req: ChatRequest):
         )
     elif web_tools_available:
         system_instruction += (
-            "\n11. Outils Web disponibles : utilise web_research UNIQUEMENT si "
+            "\n10. Outils Web disponibles : utilise web_research UNIQUEMENT si "
             "la question porte sur une information actuelle, récente ou "
             "vérifiable en ligne — jamais pour un calcul, du code ou une "
             "question de connaissance générale. Après web_research, lis les "
@@ -582,18 +588,18 @@ async def chat_stream(req: ChatRequest):
             break
     if prebound_chat_image:
         system_instruction += (
-            "\n12. Une image est jointe à cette conversation : utilise "
+            "\n11. Une image est jointe à cette conversation : utilise "
             "l'outil analyze_image avec ta question pour l'examiner avant "
             "de répondre, et base ton analyse sur ce que tu y vois."
         )
     system_instruction += (
-        "\n10. Qualité du livrable : Vérifie silencieusement avant de répondre que "
+        "\n12. Qualité du livrable : Vérifie silencieusement avant de répondre que "
         "tu as traité chaque partie de la demande, que les nombres et unités sont "
         "cohérents, que les exemples n’introduisent pas de faits inventés et que "
         "la conclusion découle réellement du contenu.\n"
-        f"11. Présentation adaptative ({presentation_mode}) : "
+        f"13. Présentation adaptative ({presentation_mode}) : "
         f"{presentation_instruction}\n"
-        f"12. Profondeur adaptative : {depth_instruction}"
+        f"14. Profondeur adaptative : {depth_instruction}"
     )
     # Règle de déroulement : outils d'abord, réponse ensuite. Sans elle,
     # le modèle rédige un brouillon avant d'outiller — brouillon que
@@ -603,10 +609,11 @@ async def chat_stream(req: ChatRequest):
     # clarification concrète plutôt que refus administratif.
     system_instruction += HUMAN_VOICE_RULE
     system_instruction += CLARIFICATION_RULE
+    system_instruction += FOLLOW_UP_RULE
 
     if strict_grounding:
         system_instruction += (
-            "\n13. Grounding strict : cette demande porte sur des faits "
+            "\n19. Grounding strict : cette demande porte sur des faits "
             "susceptibles de changer. N'utilise jamais ta mémoire d'entraînement "
             "pour compléter un prix, une version, une disponibilité, un benchmark "
             "ou une caractéristique produit. Chaque valeur factuelle doit être "
@@ -618,7 +625,7 @@ async def chat_stream(req: ChatRequest):
 
     if has_images:
         system_instruction += (
-            "\n13. Analyse d'Image : Une image est fournie avec le message. Décris et analyse ses éléments visuels avec précision (sujet principal, textes/inscriptions visibles, détails et contexte)."
+            "\n20. Analyse d'Image : Une image est fournie avec le message. Décris et analyse ses éléments visuels avec précision (sujet principal, textes/inscriptions visibles, détails et contexte)."
         )
 
     memory_settings = deps.db.get_memory_settings()
@@ -843,7 +850,16 @@ async def chat_stream(req: ChatRequest):
         full_assistant_reply = ""
         web_results_data: List[Dict[str, Any]] = []
         answer_mode = None
-        web_status = "agent" if web_tools_available else "disabled"
+        search_servers = {"exa", "brave", "tavily", "freshness"}
+        web_status = (
+            "disabled"
+            if not web_tools_available
+            else (
+                "ready"
+                if configured_server_ids().intersection(search_servers)
+                else "unavailable"
+            )
+        )
 
         context_percentage = min(
             100,
@@ -967,18 +983,50 @@ async def chat_stream(req: ChatRequest):
         if agent_task.done() and not agent_task.cancelled():
             agent_result = agent_task.exception() is None and agent_task.result() or None
 
+        agent_page_evidence = ""
         if agent_result is not None:
             # Sources trouvées par les outils de l'agent (web_research /
             # web_read pendant le run) : dédup par URL normalisée.
+            agent_events = agent_result.log.to_list()
+            agent_page_evidence = extract_agent_page_evidence(agent_events)
             sources_before_agent = len(web_results_data)
             web_results_data = merge_dedup_sources(
                 web_results_data,
-                extract_agent_sources(agent_result.log.to_list()),
+                extract_agent_sources(agent_events),
             )
             if len(web_results_data) > sources_before_agent:
                 # C'est l'agent qui a découvert les sources : on émet
                 # web_search_done pour que le drawer les affiche.
                 yield f"data: {json.dumps({'type': 'web_search_done', 'status': 'ok', 'engine': 'agent', 'answer_mode': answer_mode, 'message': f'{len(web_results_data)} sources Web consultées', 'web_results': web_results_data, 'result_count': len(web_results_data)})}\n\n"
+            else:
+                tool_search_events = [
+                    event
+                    for event in agent_events
+                    if event.get("type") == "tool_result"
+                    and event.get("name") in {"web_research", "web_search"}
+                ]
+                search_calls = [
+                    event
+                    for event in agent_events
+                    if event.get("type") == "tool_call"
+                    and event.get("name") in {"web_research", "web_search"}
+                ]
+                if tool_search_events or search_calls or force_web_search:
+                    failed = (
+                        force_web_search
+                        or not tool_search_events
+                        or all(
+                            event.get("ok") is False
+                            for event in tool_search_events
+                        )
+                    )
+                    status = "error" if failed else "no_results"
+                    message = (
+                        "La recherche Web a échoué. Consulte le détail de l’outil."
+                        if failed
+                        else "Aucun résultat Web exploitable n’a été trouvé."
+                    )
+                    yield f"data: {json.dumps({'type': 'web_search_done', 'status': status, 'engine': 'agent', 'message': message, 'web_results': [], 'result_count': 0})}\n\n"
             if agent_tool_names:
                 # W5 : une URL citée doit avoir été vue par l'agent
                 # (résultats de recherche ou pages réellement fetchées).
@@ -1018,37 +1066,38 @@ async def chat_stream(req: ChatRequest):
             # dont l'ordre correspond exactement à cette numérotation) ;
             # les hors plage, ceux sans source, et une éventuelle section
             # « Sources » finale partent. Les blocs de code sont intacts.
-            full_assistant_reply = sanitize_citation_markers(
+            sanitized_reply = sanitize_citation_markers(
                 clean_model_text(full_assistant_reply),
                 len(web_results_data),
             )
-            if strict_grounding and web_results_data:
-                # Preuve d'abord : sur une demande à grounding strict, une
-                # valeur numérique inventée (prix, score, benchmark) est
-                # affaiblie en conversation (« je n'ai pas de chiffre fiable
-                # là-dessus »), sans jamais sacrifier le RESTE de la réponse.
-                # Deux exceptions : si la réponse est surtout une question de
-                # clarification (« quel benchmark ? »), on ne la touche pas ;
-                # si un score est au présent dans les sources, c'est qu'elle
-                # affirme bien cette valeur, donc on ne la supprime pas non
-                # plus.
-                evidence_text = "\n".join(
-                    " ".join(
-                        [
-                            str(item.get("title") or ""),
-                            str(item.get("snippet") or ""),
-                        ]
-                    )
-                    for item in web_results_data
+            if strict_grounding or force_web_search:
+                # Preuves disponibles : pages réellement lues par l'agent,
+                # résultats de recherche du tour, et sources déjà citées
+                # plus tôt dans la conversation (une relance s'appuie sur ce
+                # qui a été vérifié avant). Politique : assagir les chiffres
+                # non étayés, ne JAMAIS remplacer la réponse en bloc — le
+                # lecteur voyait sinon sa réponse s'écrire puis disparaître,
+                # remplacée par un refus administratif.
+                conversation_sources = (
+                    deps.db.get_recent_assistant_sources(session_id)
+                    if (session_id and not temporary)
+                    else []
                 )
-                if not is_clarification_question(full_assistant_reply):
-                    full_assistant_reply = soften_unsupported_numbers(
-                        full_assistant_reply, evidence_text
-                    )
+                sanitized_reply = ground_strict_answer(
+                    sanitized_reply,
+                    grounding_evidence_text(
+                        agent_page_evidence,
+                        web_results_data,
+                        conversation_sources,
+                    ),
+                )
+            streamed_reply = full_assistant_reply
+            full_assistant_reply = sanitized_reply
             # Le flux brut a été diffusé en direct ; content_replace sert ici
             # la version assainie pour que le texte visible soit exactement
-            # celui qui est persisté (idem après un refus).
-            yield f"data: {json.dumps({'type': 'content_replace', 'text': full_assistant_reply})}\n\n"
+            # celui qui est persisté (idem après un refus). Le front le
+            # réaffiche d'un bloc, sans le retaper.
+            yield f"data: {json.dumps({'type': 'content_replace', 'text': full_assistant_reply, 'changed': full_assistant_reply != streamed_reply})}\n\n"
 
             if not temporary:
                 message_metadata = compact_web_source_metadata(

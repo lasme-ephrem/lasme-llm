@@ -251,8 +251,9 @@ async function startNewChat(options = {}) {
                     </svg>
                 `
                 : `
-                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+                        <path fill-rule="evenodd" fill="currentColor"
+                              d="M9.5 3h13A6.5 6.5 0 0 1 29 9.5v13a6.5 6.5 0 0 1-6.5 6.5h-13A6.5 6.5 0 0 1 3 22.5v-13A6.5 6.5 0 0 1 9.5 3zM10 9.5h4.2v9h7.3v4.2H10z"/>
                     </svg>
                 `
             }

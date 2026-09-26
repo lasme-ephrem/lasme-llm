@@ -92,8 +92,19 @@ class WebToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_empty_results_message(self):
         text = _format_search_results({"results": [], "errors": ["quota"]})
-        self.assertIn("Aucun résultat", text)
+        self.assertIn("Recherche Web indisponible", text)
         self.assertIn("quota", text)
+
+    async def test_unconfigured_search_is_a_failed_tool_not_empty_success(self):
+        client = ScriptedMcpClient(available_servers=())
+        registry = _registry(mcp_client=client)
+        result = await registry.execute(
+            "web_research",
+            json.dumps({"query": "prix API LLM"}),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "execution_error")
+        self.assertIn("Recherche Web indisponible", result.error)
 
 
 class FakeRagStore:

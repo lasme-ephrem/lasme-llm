@@ -62,6 +62,7 @@ from chat.server.services.heuristics import (  # noqa: F401
     should_enable_reasoning,
 )
 from chat.server.services.sources import (  # noqa: F401
+    extract_agent_page_evidence,
     extract_agent_sources,
     merge_dedup_sources,
     normalize_source_url,
@@ -70,6 +71,8 @@ from chat.server.services.stats import build_generation_stats  # noqa: F401
 from chat.server.services.text import (  # noqa: F401
     clean_model_text,
     compact_web_source_metadata,
+    ground_strict_answer,
+    grounding_evidence_text,
     iter_stream_text_chunks,
     sanitize_citation_markers,
     strip_web_citation_markers,

@@ -146,62 +146,168 @@ def unsupported_grounded_numbers(
     return list(dict.fromkeys(unsupported))
 
 
-_CLARIFICATION_MARKERS = re.compile(
-    r"[?]|peux-tu|pourrais-tu|pourriez-vous|tu parles de|"
-    r"de quel|laquelle|lequel|quel test|quelle année|quelle version|"
-    r"quelle référence|précise|préciser|dis-moi",
-    flags=re.IGNORECASE,
-)
-
-
-def is_clarification_question(text: str) -> bool:
-    """True si la réponse est surtout une demande de clarification.
-
-    Une clarification n'affirme pas de fait numérique vif : le harnais de
-    grounding ne doit donc pas l'écraser. Cas réel : face aux « scores d'Opus
-    5.5 », le brouillon reposait la bonne question (« quel benchmark ? ») et
-    l'intégralité de la réponse était remplacée par un refus administratif —
-    la bonne question disparaissant de l'écran.
-    """
-    value = str(text or "").strip()
-    if not value:
-        return False
-    return bool(_CLARIFICATION_MARKERS.search(value))
-
-
 # Courtes réserves employées en remplacement d'une phrase inventée.
 # Un ton de conversation — jamais une formule de refus administratif.
+# Écrite SANS point final : la ponctuation de la phrase d'origine est
+# conservée par le découpage, sinon on obtenait « …affirmer.. ».
 _NUMBER_RESERVE = (
-    "…je n'ai pas de chiffre fiable là-dessus dans mes sources, "
-    "je préfère ne rien affirmer."
+    "je n'ai pas de chiffre fiable là-dessus dans mes sources, "
+    "je préfère ne rien affirmer"
 )
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+# Variante employée quand la phrase portait un intitulé (« **Sécurité** : … »).
+# Jeter l'intitulé avec le chiffre donnait une puce muette, réduite à la
+# réserve : le lecteur perdait le SUJET dont on ne savait rien.
+_LABEL_RE = re.compile(
+    r"^(?:\*\*[^*]{2,80}\*\*|\*\*[^*]{2,80}\*\*[^:\n]{0,40}|"
+    r"[A-Za-zÀ-ÿ0-9][^:\n]{1,80})\s*:\s*"
+)
+_LABEL_UNVERIFIED = "je n'ai pas de chiffre fiable dans mes sources"
+
+# Découpage par PHRASE à l'intérieur d'une ligne, séparateurs CONSERVÉS
+# (re.split avec un groupe capturant : la concaténation redonne la ligne
+# exacte). Deux garde-fous appris en réel :
+#   - les sauts de ligne ne sont jamais franchis : une liste markdown doit
+#     rester une liste (l'ancien découpage sur tout blanc réunissait les
+#     puces en un seul paragraphe) ;
+#   - un point ne termine une phrase que s'il est suivi d'un blanc ou de la
+#     fin de ligne, sinon « Terminal-Bench 4.0 » était coupé en deux et la
+#     réserve s'insérait AU MILIEU du nombre.
+_SENTENCE_SPLIT_RE = re.compile(r"([.!?…]+(?:\s+|$))")
+# Préfixe markdown conservé lorsqu'une phrase doit être remplacée.
+_LINE_PREFIX_RE = re.compile(r"^\s*(?:(?:[-*+•]|\d+[.)]|>)\s+)*")
+# Ligne de tableau markdown : la réserve longue y casserait la grille, on
+# remplace la valeur fautive par la mention prévue par le prompt strict.
+_TABLE_ROW_RE = re.compile(r"\|")
+_TABLE_RESERVE = "non vérifié"
+
+
+def _evidence_numbers(evidence: str) -> set:
+    return {
+        match.replace(",", ".")
+        for match in re.findall(r"\d+(?:[.,]\d+)?", evidence or "")
+    }
+
+
+def _soften_table_row(line: str, evidence: str) -> str:
+    evidence_numbers = _evidence_numbers(evidence)
+
+    def _replace(match: Match[str]) -> str:
+        claim = match.group(0)
+        claim_numbers = {
+            value.replace(",", ".")
+            for value in re.findall(r"\d+(?:[.,]\d+)?", claim)
+        }
+        if claim_numbers and not claim_numbers.issubset(evidence_numbers):
+            return _TABLE_RESERVE
+        return claim
+
+    return _SENSITIVE_NUMBER_PATTERN.sub(_replace, line)
+
+
+def _soften_line(line: str, evidence: str) -> str:
+    if _TABLE_ROW_RE.search(line):
+        return _soften_table_row(line, evidence)
+    pieces = _SENTENCE_SPLIT_RE.split(line)
+    for index in range(0, len(pieces), 2):
+        sentence = pieces[index]
+        if not sentence.strip():
+            continue
+        if not unsupported_grounded_numbers(sentence, evidence):
+            continue
+        bullet = _LINE_PREFIX_RE.match(sentence).group(0)
+        body = sentence[len(bullet):]
+        # Un intitulé (« **Sécurité** : … ») est conservé : c'est lui qui dit
+        # DE QUOI on ne sait rien. Seul le contenu chiffré disparaît.
+        label = _LABEL_RE.match(body)
+        if label:
+            # Après un intitulé, la minuscule est correcte en français et se
+            # lit mieux : « **Sécurité** : je n'ai pas de chiffre fiable… ».
+            pieces[index] = f"{bullet}{label.group(0)}{_LABEL_UNVERIFIED}"
+        else:
+            reserve = _NUMBER_RESERVE[0].upper() + _NUMBER_RESERVE[1:]
+            pieces[index] = f"{bullet}{reserve}"
+    softened = "".join(pieces)
+    # Le découpage conserve la ponctuation de l'original : quand la phrase
+    # remplacée était la dernière et n'en portait aucune, on en ajoute une.
+    if softened.rstrip() and not softened.rstrip().endswith(
+        (".", "!", "?", "…", ":", ";", ",")
+    ):
+        softened = f"{softened.rstrip()}."
+    return softened
 
 
 def soften_unsupported_numbers(answer: str, evidence: str) -> str:
-    """Retire les chiffres inventés sans jeter la réponse à la poubelle.
+    """Assagit les chiffres non étayés, phrase par phrase, sans rien jeter.
 
     Cas réel qui a motivé cette fonction : face aux « scores d'Opus 5.5 »,
     une seule phrase bâtie sur un chiffre non étayé faisait remplacer
     L'INTÉGRALITÉ de la réponse par un refus administratif — y compris la
     question de clarification qui la suivait et qui était pourtant la bonne
-    chose à dire. Ici : seules les phrases incriminées sont assagies, le
-    reste de la réponse est conservé tel quel.
+    chose à dire. Ici, seules les phrases incriminées sont assagies.
+
+    La mise en page est conservée OCTET POUR OCTET (sauts de ligne, puces,
+    numérotation) : le texte n'est jamais réassemblé différemment.
     """
     text = str(answer or "")
     if not text:
         return text
-    sentences = _SENTENCE_SPLIT_RE.split(text)
-    kept: List[str] = []
-    for sentence in sentences:
-        unsupported = unsupported_grounded_numbers(sentence, evidence)
-        if unsupported:
-            kept.append(_NUMBER_RESERVE)
-        else:
-            kept.append(sentence)
-    softened = " ".join(part for part in kept if part).strip()
-    return softened or str(_NUMBER_RESERVE).strip()
+    return "\n".join(_soften_line(line, evidence) for line in text.split("\n"))
 
+
+def ground_strict_answer(answer: str, evidence: str) -> str:
+    """Politique stricte : assagir la réponse, jamais l'effacer.
+
+    Une réponse n'est JAMAIS remplacée en bloc. L'ancienne politique, sans
+    page lue, jetait tout et ne laissait qu'un refus administratif — y
+    compris sur une RELANCE portant sur des faits déjà sourcés dans le fil
+    (« et par rapport à Fable 5.1 ? ») et alors que l'agent venait de bien
+    répondre. Le lecteur voyait sa réponse s'écrire puis disparaître.
+
+    On ne retire ici que les valeurs numériques (prix, pourcentages)
+    absentes des preuves : le raisonnement, les comparaisons qualitatives,
+    les listes et les questions de clarification restent intacts.
+    """
+    text = str(answer or "")
+    if not text:
+        return text
+    return soften_unsupported_numbers(text, evidence)
+
+
+def grounding_evidence_text(*blocks: Any, max_chars: int = 24_000) -> str:
+    """Réunit des blocs de preuve hétérogènes en un seul texte borné.
+
+    Accepte des chaînes (pages réellement lues par l'agent) et des listes de
+    sources (``{"title", "snippet", "url"}``) : résultats de recherche du
+    tour courant et sources déjà citées plus tôt dans la conversation.
+
+    Une relance s'appuie sur ce qui a été vérifié avant : sans les sources du
+    fil, les chiffres déjà sourcés passaient pour des inventions et la
+    réponse était dégradée.
+    """
+    parts: List[str] = []
+    remaining = max(0, int(max_chars))
+    for block in blocks:
+        if remaining <= 0:
+            break
+        if isinstance(block, str):
+            text = block.strip()
+        else:
+            entries = []
+            for item in block or []:
+                if not isinstance(item, dict):
+                    continue
+                entries.append(
+                    " ".join(
+                        str(item.get(field) or "")
+                        for field in ("title", "snippet", "url")
+                    ).strip()
+                )
+            text = "\n".join(entry for entry in entries if entry)
+        if not text:
+            continue
+        parts.append(text[:remaining])
+        remaining -= len(parts[-1])
+    return "\n".join(parts)
 
 
 def compact_web_source_metadata(

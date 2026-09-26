@@ -73,20 +73,66 @@ def _iter_search_output_entries(output: str):
                 yield number, header.group(2).strip(), url_match.group(1)
 
 
-def _iter_fetch_output_urls(output: str):
-    """URLs réellement lues par web_read (« ## url (n caractères) »).
-    Les sections en ERREUR (page non lue) ne sont pas des sources."""
+def _iter_fetch_output_pages(output: str):
+    """Pages réellement lues par web_read : URL et contenu utile.
+
+    Les titres/extraits de recherche ne sont pas une preuve suffisante pour
+    le contrôle de grounding : on conserve ici un extrait de la page lue.
+    Les sections en ERREUR (page non lue) sont exclues.
+    """
     lines = str(output or "").splitlines()
-    urls: List[str] = []
     for index, line in enumerate(lines):
         match = _AGENT_FETCH_URL_RE.match(line)
         if not match:
             continue
-        body = lines[index + 1] if index + 1 < len(lines) else ""
-        if body.lstrip().startswith("ERREUR"):
+        end = index + 1
+        while end < len(lines) and not _AGENT_FETCH_URL_RE.match(lines[end]):
+            end += 1
+        body = "\n".join(lines[index + 1:end]).strip()
+        if body.startswith("ERREUR"):
             continue
-        urls.append(match.group(1))
-    return urls
+        snippet = re.sub(r"\s+", " ", body).strip()[:1_200]
+        if snippet:
+            yield match.group(1), snippet
+
+
+def _iter_fetch_output_urls(output: str):
+    """Compatibilité : URLs des pages réellement lues, hors erreurs."""
+    for url, _snippet in _iter_fetch_output_pages(output):
+        yield url
+
+
+def extract_agent_page_evidence(
+    events: List[Dict[str, Any]],
+    *,
+    max_chars: int = 14_000,
+) -> str:
+    """Retourne le texte de pages lues avec succès, borné en taille.
+
+    Les résultats de recherche ne sont volontairement pas considérés comme
+    preuve : seuls les ``tool_result`` réussis de ``web_read`` comptent.
+    """
+    pages: List[str] = []
+    remaining = max(0, int(max_chars))
+    for event in events or []:
+        if (
+            not isinstance(event, dict)
+            or event.get("type") != "tool_result"
+            or event.get("name") not in {"web_read", "fetch_pages"}
+            or event.get("ok") is False
+        ):
+            continue
+        output = str(event.get("output") or "")
+        for url, body in _iter_fetch_output_pages(output):
+            if remaining <= 0:
+                break
+            prefix = f"{url}\n"
+            if len(prefix) >= remaining:
+                break
+            page = f"{prefix}{body[:remaining - len(prefix)]}"
+            pages.append(page)
+            remaining -= len(page)
+    return "\n\n".join(pages)
 
 
 def extract_agent_sources(
@@ -142,15 +188,20 @@ def extract_agent_sources(
             unnumbered.remove(entry)
         # Sinon : premier numéro (plus petite position) conservé.
 
-    def _register_fetch(url: str) -> None:
+    def _register_fetch(url: str, snippet: str) -> None:
         key = normalize_source_url(url)
-        if not key or key in by_key:
+        if not key:
+            return
+        existing = by_key.get(key)
+        if existing is not None:
+            if snippet and not existing.get("snippet"):
+                existing["snippet"] = snippet
             return
         entry = {
             "title": _title_from_url(url)[:300],
             "url": url[:2_000],
             "engine": "agent",
-            "snippet": "",
+            "snippet": snippet,
         }
         by_key[key] = entry
         unnumbered.append(entry)
@@ -158,14 +209,16 @@ def extract_agent_sources(
     for event in events or []:
         if not isinstance(event, dict) or event.get("type") != "tool_result":
             continue
+        if event.get("ok") is False:
+            continue
         name = str(event.get("name") or "")
         output = str(event.get("output") or "")
         if name in {"web_research", "web_search"}:
             for number, title, url in _iter_search_output_entries(output):
                 _register_search(number, title, url)
         elif name in {"web_read", "fetch_pages"}:
-            for url in _iter_fetch_output_urls(output):
-                _register_fetch(url)
+            for url, snippet in _iter_fetch_output_pages(output):
+                _register_fetch(url, snippet)
 
     if not numbered and not unnumbered:
         return []

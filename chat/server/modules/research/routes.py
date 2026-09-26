@@ -89,6 +89,12 @@ async def deep_research_stream(req: DeepResearchRequest):
             yield f"data: {json.dumps({'type': 'research_step', 'step_id': step['id'], 'index': index, 'status': 'done', 'label': step['label'], 'result_count': len(report.get('results', [])), 'engine': report.get('engine')})}\n\n"
 
         evidence = merge_research_results(reports)
+        search_errors = [
+            str(error)
+            for report in reports
+            for error in report.get("errors") or []
+            if str(error).strip()
+        ]
         selected_file_ids = _resolve_selected_rag_file_ids(
             req.selected_file_ids,
             req.project_id,
@@ -99,7 +105,10 @@ async def deep_research_stream(req: DeepResearchRequest):
             top_k=10,
             file_ids=selected_file_ids or None,
         )
-        yield f"data: {json.dumps({'type': 'research_synthesis', 'status': 'running', 'result_count': len(evidence), 'web_results': evidence})}\n\n"
+        web_status = "ok" if evidence else (
+            "error" if search_errors else "no_results"
+        )
+        yield f"data: {json.dumps({'type': 'research_synthesis', 'status': 'running', 'result_count': len(evidence), 'web_status': web_status, 'web_errors': search_errors[:5], 'web_results': evidence})}\n\n"
         evidence_context = format_search_results(evidence)
         provider_context = "\n\n".join(provider_notes)
         document_context = "\n\n".join(
@@ -112,6 +121,25 @@ async def deep_research_stream(req: DeepResearchRequest):
             )
             for chunk in document_evidence
         )
+        if not evidence and not document_evidence:
+            message = (
+                "La recherche Web a échoué : " + "; ".join(search_errors[:3])
+                if search_errors
+                else "Aucune source Web ou donnée de projet n’a été trouvée."
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': message, 'error_type': 'research_unavailable' if search_errors else 'no_research_results'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        if not evidence:
+            message = (
+                "Aucune source Web exploitable n’a été trouvée."
+                if not search_errors
+                else "La recherche Web n’a pas abouti : "
+                + "; ".join(search_errors[:3])
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': message, 'error_type': 'research_unavailable' if search_errors else 'no_research_results'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         prompt = [
             {
                 "role": "system",
@@ -140,6 +168,13 @@ async def deep_research_stream(req: DeepResearchRequest):
             },
         ]
         profile = get_model_profile(selected_model)
+        requested_effort = (req.intelligence_level or "high").strip().lower()
+        if requested_effort in {"low", "medium", "high"}:
+            think = requested_effort
+        elif requested_effort in {"off", "none", "fast", "minimal"}:
+            think = False
+        else:
+            think = profile.think
         full_report = ""
         async for chunk in deps.client.stream_chat(
             model=selected_model,
@@ -148,7 +183,7 @@ async def deep_research_stream(req: DeepResearchRequest):
             num_ctx=profile.num_ctx,
             num_predict=min(profile.num_predict, 7_000),
             options=profile.options,
-            think=profile.think,
+            think=think,
         ):
             if chunk.get("_error"):
                 yield f"data: {json.dumps({'type': 'error', 'message': 'La synthèse locale a échoué.', 'error_type': chunk['_error']})}\n\n"

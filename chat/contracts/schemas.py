@@ -276,6 +276,7 @@ class DeepResearchRequest(BaseModel):
     project_id: str = Field(default=DEFAULT_PROJECT_ID, max_length=100)
     question: str = Field(min_length=3, max_length=20_000)
     model: Optional[str] = settings.reasoning_model
+    intelligence_level: Optional[str] = "high"
     selected_file_ids: List[str] = Field(default_factory=list, max_length=20)
     temporary: bool = False
 
