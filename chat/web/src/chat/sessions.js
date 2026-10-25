@@ -26,7 +26,8 @@ function renderSessions(sessions) {
     sessions.forEach(sess => {
         const item = document.createElement("div");
         const isActive = (sess.id === currentSessionId);
-        item.className = `session-item ${isActive ? "active" : ""}`;
+        const isPinned = Boolean(sess.pinned);
+        item.className = `session-item ${isActive ? "active" : ""} ${isPinned ? "is-pinned" : ""}`.trim();
         
         const titleSpan = document.createElement("span");
         titleSpan.style.flex = "1";
@@ -35,6 +36,15 @@ function renderSessions(sessions) {
         titleSpan.style.whiteSpace = "nowrap";
         titleSpan.style.display = "inline-flex";
         titleSpan.style.alignItems = "center";
+        titleSpan.style.gap = "6px";
+
+        if (isPinned) {
+            const pinBadge = document.createElement("span");
+            pinBadge.className = "session-pin-badge";
+            pinBadge.title = "Conversation épinglée";
+            pinBadge.textContent = "📌";
+            titleSpan.appendChild(pinBadge);
+        }
         
         const titleTextNode = document.createTextNode(sess.title || "Conversation");
         titleSpan.appendChild(titleTextNode);
@@ -46,6 +56,23 @@ function renderSessions(sessions) {
             loader.innerHTML = `<span></span><span></span><span></span>`;
             titleSpan.appendChild(loader);
         }
+
+        const pinBtn = document.createElement("button");
+        pinBtn.type = "button";
+        pinBtn.className = `pin-session-btn ${isPinned ? "pinned" : ""}`.trim();
+        pinBtn.title = isPinned ? "Désépingler la conversation" : "Épingler la conversation";
+        pinBtn.setAttribute("aria-label", pinBtn.title);
+        pinBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="${isPinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m12 17 5 5"></path>
+                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path>
+            </svg>
+        `;
+        pinBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            void togglePinSession(sess.id, !isPinned);
+        });
 
         const delBtn = document.createElement("button");
         delBtn.type = "button";
@@ -64,6 +91,7 @@ function renderSessions(sessions) {
         });
 
         item.appendChild(titleSpan);
+        item.appendChild(pinBtn);
         item.appendChild(delBtn);
 
         item.addEventListener("click", () => {
@@ -73,6 +101,21 @@ function renderSessions(sessions) {
 
         sessionsList.appendChild(item);
     });
+}
+
+async function togglePinSession(sessionId, pinned) {
+    if (!sessionId) return;
+    try {
+        const resp = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pinned: Boolean(pinned) }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await loadSessions();
+    } catch (err) {
+        console.error("Erreur épinglage session :", err);
+    }
 }
 
 async function selectSession(sessionId) {
@@ -135,6 +178,14 @@ async function selectSession(sessionId) {
                 msg.id,
                 msg.metadata?.generation_stats || null
             );
+            if (
+                msg.role === "assistant"
+                && Array.isArray(msg.metadata?.runner_files)
+                && msg.metadata.runner_files.length
+                && typeof renderRunnerOutputs === "function"
+            ) {
+                renderRunnerOutputs(bubble, msg.metadata.runner_files);
+            }
             if (msg.role === "assistant" && msg.metadata?.agent?.run_id) {
                 addAgentReplayAction(
                     bubble.closest(".message"),

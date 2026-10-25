@@ -125,6 +125,28 @@ automatiquement sur l'autre.
   hors temps d'outillage, avec TTFT et durée mur.
 - **Maths complètes** : KaTeX avec `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, matrices
   `pmatrix` incluses, et boucle de rendu jusqu'à stabilité.
+- **Recherche plein texte instantanée (`Ctrl+K` + SQLite FTS5) & Épinglage (`📌`)** :
+  palette de commande cherchant instantanément dans les conversations, les
+  messages (extraits surlignés) et les artefacts Canvas, avec épinglage des
+  sessions prioritaires en tête de barre latérale.
+- **Pont visuel direct `python_run` → Chat & Canvas** : les graphiques
+  (`.png`, `.svg`) et fichiers de données (`.csv`, `.tsv`, `.json`) produits
+  dans le bac à sable Python s'affichent automatiquement sous la réponse et
+  s'ouvrent en un clic dans le **Canvas** (avec ré-exécution interactive).
+- **Mode « Duel » de modèles & d'efforts (`⚔️ Duel`)** : comparaison côte à
+  côte entre deux profils (ex. `Gemma 4 E4B · Low` vs `Gemma 4 12B · High`),
+  exécutés séquentiellement pour respecter le budget de 16 Go de VRAM, avec
+  métriques de vitesse (`tok/s`), durée et bouton pour retenir la meilleure
+  réponse.
+- **Audio 100 % local (STT & TTS)** : dictée vocale dans la barre de saisie
+  et lecture vocale (`🔊 Écouter`) sur chaque réponse de l'assistant.
+- **Export & Import souverain de conversations** : archivage et partage d'une
+  session complète en **HTML autonome hors-ligne** (thème *Forêt & sauge*,
+  sources, outils et figures intégrées), **PDF A4**, **Markdown sourcé** ou
+  **archive JSON réimportable**.
+- **Veilles & Missions planifiées d'Agent (`⏰ Missions`)** : tâches
+  récurrentes ou à la demande exécutées par le Worker SQLite et livrées sous
+  forme de dossiers de recherche dans le **Canvas**.
 - **Thèmes clair et sombre**, sans flash blanc au chargement.
 
 <p align="center"><img src="docs/assets/lasme-llm-answer-dark.png" alt="Réponse sourcée en thème sombre : outils discrets, sources cliquables, statistiques de génération" width="900"></p>
@@ -289,11 +311,12 @@ présentés du plus léger au plus capable. Mesures sur **RTX 4070 Ti SUPER
 La CI locale et la CI GitHub exécutent **la même commande** :
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.validate_all          # 6 étapes
+.\.venv\Scripts\python.exe -m scripts.validate_all          # 7 étapes
 .\.venv\Scripts\python.exe -m scripts.validate_all --live   # + évals et budgets (router requis)
 ```
 
-Elle enchaîne : compilation Python, syntaxe de **tous** les modules du front
+Elle enchaîne : compilation Python, contrôle des annotations de typage
+(`scripts/check_annotations.py`), syntaxe de **tous** les modules du front
 (la liste est découverte, jamais écrite en dur — une liste figée survit à la
 suppression d'un fichier et fait échouer la CI sur un vestige), tests
 `node:test`, matrice d'imports entre couches, `pytest`, `pip check`.

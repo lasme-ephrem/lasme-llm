@@ -178,18 +178,26 @@ function renderRichContent(container, text, webResults) {
     });
 
     // ── STEP 7: Generated image cards ─────────────────────────────────────
-    const genImgs = container.querySelectorAll("img[src*='/generated_images/']");
+    const genImgs = container.querySelectorAll(
+        "img[src*='/generated_images/'], img[src*='/api/runner/jobs/']"
+    );
     genImgs.forEach(img => {
         if (!img.closest(".generated-image-card") && !img.classList.contains("user-attached-image")) {
             const src = img.getAttribute("src");
-            const alt = img.getAttribute("alt") || "Image générée";
+            const isRunnerImg = String(src || "").includes("/api/runner/jobs/");
+            const defaultLabel = isRunnerImg
+                ? decodeURIComponent(String(src || "").split("/").pop() || "Graphique Python")
+                : "Image générée";
+            const alt = img.getAttribute("alt") || defaultLabel;
             const safeSrc = safeHttpUrl(src);
             if (!safeSrc) {
                 img.remove();
                 return;
             }
             const cardDiv = document.createElement("div");
-            cardDiv.className = "generated-image-card";
+            cardDiv.className = isRunnerImg
+                ? "generated-image-card runner-chart-card"
+                : "generated-image-card";
             cardDiv.innerHTML = sanitizeHtml(`
                 <img src="${escapeHtml(safeSrc)}" alt="${escapeHtml(alt)}">
                 <div class="generated-image-overlay">
@@ -198,6 +206,7 @@ function renderRichContent(container, text, webResults) {
                         <button type="button" class="img-action-btn image-zoom-btn">
                             🔍 Zoom
                         </button>
+                        ${isRunnerImg ? '<button type="button" class="img-action-btn image-canvas-btn">🎨 Canvas</button>' : ""}
                         <a href="${escapeHtml(safeSrc)}" download class="img-action-btn">
                             📥 Télécharger HD
                         </a>
@@ -206,8 +215,18 @@ function renderRichContent(container, text, webResults) {
             `);
             const cardImage = cardDiv.querySelector("img");
             const cardZoom = cardDiv.querySelector(".image-zoom-btn");
+            const cardCanvas = cardDiv.querySelector(".image-canvas-btn");
             if (cardImage) cardImage.addEventListener("click", () => openImageViewer(safeSrc));
             if (cardZoom) cardZoom.addEventListener("click", () => openImageViewer(safeSrc));
+            if (cardCanvas && typeof openRunnerFileInCanvas === "function") {
+                cardCanvas.addEventListener("click", () => {
+                    void openRunnerFileInCanvas({
+                        name: defaultLabel,
+                        url: safeSrc,
+                        size_bytes: 0,
+                    });
+                });
+            }
             if (img.parentNode && img.parentNode.tagName === "P" && img.parentNode.childNodes.length === 1) {
                 img.parentNode.replaceWith(cardDiv);
             } else {

@@ -374,17 +374,20 @@ class AgentOrchestrator:
                         result = await self.registry.execute(name, arguments)
                     if name == "web_research" and result.ok:
                         last_search_output = result.output
+                    result_payload: Dict[str, Any] = {
+                        "id": call.get("id"),
+                        "name": name,
+                        "ok": result.ok,
+                        "output": result.output,
+                        "error": result.error,
+                        "error_code": result.error_code,
+                        "duration_ms": result.duration_ms,
+                    }
+                    if result.meta and result.meta.get("files"):
+                        result_payload["files"] = result.meta["files"]
                     await emit(
                         ev.TOOL_RESULT,
-                        {
-                            "id": call.get("id"),
-                            "name": name,
-                            "ok": result.ok,
-                            "output": result.output,
-                            "error": result.error,
-                            "error_code": result.error_code,
-                            "duration_ms": result.duration_ms,
-                        },
+                        result_payload,
                     )
                     results.append((call, result))
 

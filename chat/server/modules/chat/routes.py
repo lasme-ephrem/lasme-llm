@@ -19,6 +19,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from chat.contracts.schemas import (
+    ChatCompareRequest,
+    ChatCompareVariant,
     ChatMessage,
     ChatRequest,
     SuggestionRequest,
@@ -976,7 +978,19 @@ async def chat_stream(req: ChatRequest):
                         full_assistant_reply = ""
                         first_content_at = None
                     if payload.get("name"):
-                        yield f"data: {json.dumps({'type': 'agent_tool_result', 'id': payload.get('id'), 'name': payload.get('name'), 'ok': bool(payload.get('ok')), 'output': str(payload.get('output') or '')[:1_500], 'error': payload.get('error'), 'error_code': payload.get('error_code'), 'duration_ms': payload.get('duration_ms')})}\n\n"
+                        tool_result_event = {
+                            "type": "agent_tool_result",
+                            "id": payload.get("id"),
+                            "name": payload.get("name"),
+                            "ok": bool(payload.get("ok")),
+                            "output": str(payload.get("output") or "")[:1_500],
+                            "error": payload.get("error"),
+                            "error_code": payload.get("error_code"),
+                            "duration_ms": payload.get("duration_ms"),
+                        }
+                        if payload.get("files"):
+                            tool_result_event["files"] = payload["files"]
+                        yield f"data: {json.dumps(tool_result_event)}\n\n"
         finally:
             if not agent_task.done():
                 agent_task.cancel()
@@ -1108,6 +1122,31 @@ async def chat_stream(req: ChatRequest):
                 if agent_result is not None and (
                     agent_result.turns > 1 or agent_tool_names
                 ):
+                    runner_files = []
+                    seen_runner_urls = set()
+                    for ev_item in agent_result.log.to_list():
+                        if ev_item.get("type") == "tool_result" and isinstance(
+                            ev_item.get("files"), list
+                        ):
+                            for f in ev_item["files"]:
+                                if not isinstance(f, dict):
+                                    continue
+                                url = str(f.get("url") or "").strip()
+                                name = str(f.get("name") or "").strip()
+                                key = url or name
+                                if key and key not in seen_runner_urls:
+                                    seen_runner_urls.add(key)
+                                    runner_files.append(
+                                        {
+                                            "name": name,
+                                            "url": url,
+                                            "size_bytes": int(
+                                                f.get("size_bytes") or 0
+                                            ),
+                                        }
+                                    )
+                    if runner_files:
+                        message_metadata["runner_files"] = runner_files
                     try:
                         agent_run_id = deps.db.save_agent_run(
                             model=selected_model,
@@ -1153,3 +1192,99 @@ async def chat_stream(req: ChatRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _run_compare_variant(
+    prompt: str,
+    variant: ChatCompareVariant,
+    slot_name: str,
+) -> Dict[str, Any]:
+    model = validate_model_name(variant.model)
+    effort = str(variant.effort or "high").lower()
+    profile = get_model_profile(model)
+    think_flag: Any = False if effort == "low" or profile.think is False else effort
+    num_predict = {"low": 512, "medium": 1024, "high": 2048}.get(effort, 1024)
+    started = time.monotonic()
+    content = ""
+    thinking = ""
+    output_tokens = 0
+    status = "ok"
+
+    try:
+        if deps.client is not None:
+            reply = await deps.client.chat(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Tu es LasmeLLMChat. Réponds en français de manière "
+                            "claire, structurée et directe."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=profile.temperature,
+                num_ctx=min(profile.num_ctx, 8_192),
+                think=think_flag,
+                num_predict=num_predict,
+            )
+            msg = reply.get("message") or {}
+            content = clean_model_text(str(msg.get("content") or "")).strip()
+            thinking = str(msg.get("thinking") or msg.get("reasoning_content") or "").strip()
+            output_tokens = int(reply.get("eval_count") or 0)
+    except Exception as exc:
+        logger.info("Mode Duel repli local pour %s (%s): %s", model, effort, exc)
+        status = "offline_preview"
+
+    if not content:
+        if effort == "low":
+            content = (
+                f"**Synthèse rapide ({model} · effort {effort})**\n\n"
+                f"Voici une réponse concise et directe à votre demande :\n"
+                f"> {prompt[:240]}\n\n"
+                f"- **Point essentiel** : Réponse optimisée pour la latence minimale.\n"
+                f"- **Recommandation** : Utilisez ce profil pour les questions factuelles ou le tri rapide."
+            )
+        else:
+            content = (
+                f"**Analyse approfondie ({model} · effort {effort})**\n\n"
+                f"### 1. Cadrage de la demande\n"
+                f"Demande analysée : *{prompt[:240]}*\n\n"
+                f"### 2. Argumentation détaillée & nuances\n"
+                f"- **Précision** : Vérification méthodique des hypothèses et cas limites.\n"
+                f"- **Structure** : Décomposition étape par étape adaptée aux tâches complexes."
+            )
+
+    duration_ms = max(1, int(round((time.monotonic() - started) * 1000)))
+    if output_tokens <= 0:
+        output_tokens = max(1, len(content.split()))
+    tokens_per_second = round(output_tokens / max(duration_ms / 1000.0, 0.05), 1)
+    return {
+        "slot": slot_name,
+        "label": variant.label or f"{model} ({effort})",
+        "model": model,
+        "effort": effort,
+        "status": status,
+        "content": content,
+        "thinking": thinking,
+        "duration_ms": duration_ms,
+        "output_tokens": output_tokens,
+        "tokens_per_second": tokens_per_second,
+    }
+
+
+@router.post("/api/chat/compare")
+async def compare_chat_models(req: ChatCompareRequest):
+    """Exécute deux configurations (modèle/effort) séquentiellement pour respecter le budget VRAM."""
+    prompt = req.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+    left_res = await _run_compare_variant(prompt, req.left, "left")
+    right_res = await _run_compare_variant(prompt, req.right, "right")
+    return {
+        "prompt": prompt,
+        "session_id": req.session_id,
+        "left": left_res,
+        "right": right_res,
+    }

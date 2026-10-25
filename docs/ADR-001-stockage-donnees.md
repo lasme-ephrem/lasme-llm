@@ -15,7 +15,9 @@ passer à Postgres ?
 l'application reste locale et mono-machine.**
 
 - Le schéma est déjà séparé par tables : le découpage logique existe
-  (repositories par domaine, voir `core/memory/repos.py`). Le découpage
+  (repositories par domaine, voir `core/memory/repos.py` : `SessionRepo`,
+  `MissionRepo`, `ProjectRepo`, `MemoryRepo`, `AgentRunRepo`, ainsi que
+  l'index plein texte SQLite FTS5 `messages_fts`). Le découpage
   *physique* n'apporte rien tant qu'il n'y a pas de scaling horizontal.
 - Le worker de jobs tourne **dans le process API** par défaut (mode
   « in-process » du lifespan) : il partage donc le même fichier sans

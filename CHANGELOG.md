@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.2.0 — Productivité souveraine : Recherche FTS5, Pont Python → Canvas, Duel, Audio, Export & Missions (2026-10-25)
+
+### Six nouvelles fonctionnalités intégrées de bout en bout
+
+- **Recherche plein texte instantanée (`Ctrl+K` + SQLite FTS5) & Conversations épinglées (`📌`)** :
+  table virtuelle `messages_fts` synchronisée par triggers SQLite, recherche
+  unifiée sur les titres de sessions, le corps des messages (extraits `<mark>`)
+  et les artefacts Canvas (`GET /api/sessions/search`), et épinglage des
+  conversations prioritaires (`PUT /api/sessions/{session_id}`).
+- **Pont visuel direct `python_run` → Chat & Canvas** :
+  récolte automatique des graphiques et fichiers générés dans le répertoire de
+  travail du sandbox Python (`SubprocessPythonRunner` et pool Docker),
+  propagation temps réel dans `agent_tool_result.files` et persistance dans
+  `message_metadata["runner_files"]`. Affichage d'une galerie interactive sous
+  la réponse avec ouverture directe des figures et tableaux CSV/TSV dans le
+  panneau **Canvas**.
+- **Export & Import souverain de conversations (`.html`, `.pdf`, `.md`, `.json`)** :
+  nouvel exportateur `export_session_conversation` (`GET /api/sessions/{id}/export`)
+  générant une page HTML autonome hors-ligne (thème *Forêt & sauge*, sources et
+  figures), un rapport PDF A4, un fichier Markdown sourcé ou une archive JSON
+  réimportable (`POST /api/sessions/import`).
+- **Mode « Duel / Comparaison » de modèles et d'efforts (`⚔️ Duel`)** :
+  route `POST /api/chat/compare` exécutant séquentiellement deux configurations
+  (ex. `gemma-4-e4b · low` vs `gemma-4-12b · high`) dans le respect du budget
+  de 16 Go de VRAM, avec affichage côte à côte des métriques (`tok/s`, durée,
+  tokens) et adoption en un clic dans le Chat ou le Canvas.
+- **Audio 100 % local : Dictée vocale (STT) & Lecture des réponses (TTS)** :
+  synthèse vocale locale (`🔊 Écouter`) sur chaque message assistant avec
+  nettoyage Markdown, bouton microphone de dictée vocale dans le compositeur
+  et point d'entrée `POST /api/media/transcribe`.
+- **Veilles & Missions planifiées d'Agent (`⏰ Missions`)** :
+  table `scheduled_missions`, job durable `"agent_mission"` dans `JobStore` /
+  `chat.worker.loop`, routes CRUD `/api/missions` + exécution immédiate
+  `POST /api/missions/{id}/run` déposant automatiquement un dossier de
+  recherche dans le **Canvas**.
+
 ## 1.1.0 — Harnais de réponse fiable et identité visuelle (2026-09-26)
 
 ### Le harnais ne sacrifie plus la réponse

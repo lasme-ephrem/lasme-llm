@@ -145,7 +145,21 @@ test("tous les scripts du front se chargent dans l'ordre sans erreur", () => {
     const combined = parts.join("\n;\n");
     assert.doesNotThrow(() => {
         // eslint-disable-next-line no-new-func
-        new Function(combined)();
+        new Function(
+            `${combined}\n;`
+            + "if (typeof extractRunnerFiles !== 'function') throw new Error('extractRunnerFiles missing');\n"
+            + "if (typeof renderRunnerOutputs !== 'function') throw new Error('renderRunnerOutputs missing');\n"
+            + "if (typeof openRunnerFileInCanvas !== 'function') throw new Error('openRunnerFileInCanvas missing');\n"
+            + "if (typeof togglePinSession !== 'function') throw new Error('togglePinSession missing');\n"
+            + "if (typeof openSearchModal !== 'function') throw new Error('openSearchModal missing');\n"
+            + "if (typeof openExportSessionModal !== 'function') throw new Error('openExportSessionModal missing');\n"
+            + "if (typeof openDuelModal !== 'function') throw new Error('openDuelModal missing');\n"
+            + "if (typeof openMissionsModal !== 'function') throw new Error('openMissionsModal missing');\n"
+            + "const speechClean = stripMarkdownForSpeech('**Bonjour** `code`');\n"
+            + "if (!speechClean.includes('Bonjour')) throw new Error('stripMarkdownForSpeech broken');\n"
+            + "const md = csvToMarkdownTable('a,b\\n1,2');\n"
+            + "if (!md.includes('| a | b |')) throw new Error('csvToMarkdownTable broken');\n"
+        )();
     });
 });
 

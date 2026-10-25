@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import datetime
 import html
 import io
+import json
 import re
-from typing import List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 from docx import Document
 from docx.shared import Inches, Pt
@@ -397,3 +399,215 @@ def export_artifact(
     if format_name == "pdf":
         return export_pdf(title, content), "application/pdf", safe_filename(title, "pdf")
     return export_csv(content), "text/csv; charset=utf-8", safe_filename(title, "csv")
+
+
+SESSION_EXPORT_FORMATS = {"html", "md", "pdf", "json"}
+
+
+def _build_session_markdown(
+    session: Dict[str, Any],
+    messages: Sequence[Dict[str, Any]],
+) -> str:
+    title = str(session.get("title") or "Conversation").strip() or "Conversation"
+    created_at = str(session.get("created_at") or "")
+    lines: List[str] = [f"# {title}", ""]
+    if created_at:
+        lines.extend([f"Date : {created_at}", ""])
+
+    for msg in messages:
+        role = str(msg.get("role") or "user").lower()
+        role_label = "Utilisateur" if role == "user" else "Assistant"
+        lines.append(f"## {role_label}")
+        lines.append("")
+        content = str(msg.get("content") or "").strip()
+        if content:
+            lines.append(content)
+            lines.append("")
+        metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+        tool_events = metadata.get("tool_events") if isinstance(metadata, dict) else None
+        if isinstance(tool_events, list) and tool_events:
+            lines.append("### Outils exécutés")
+            for ev in tool_events:
+                if not isinstance(ev, dict):
+                    continue
+                t_name = str(ev.get("tool") or "outil")
+                t_summary = str(ev.get("summary") or ev.get("status") or "").strip()
+                lines.append(f"- {t_name} : {t_summary}")
+            lines.append("")
+        sources = metadata.get("sources") if isinstance(metadata, dict) else None
+        if isinstance(sources, list) and sources:
+            lines.append("### Sources")
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                s_title = str(src.get("title") or src.get("url") or "Source").strip()
+                s_url = str(src.get("url") or "").strip()
+                if s_url:
+                    lines.append(f"- [{s_title}]({s_url})")
+                else:
+                    lines.append(f"- {s_title}")
+            lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_session_html(
+    session: Dict[str, Any],
+    messages: Sequence[Dict[str, Any]],
+) -> bytes:
+    title = str(session.get("title") or "Conversation").strip() or "Conversation"
+    created_at = str(session.get("created_at") or "")
+    cards: List[str] = []
+
+    for msg in messages:
+        role = str(msg.get("role") or "user").lower()
+        is_user = role == "user"
+        role_label = "Utilisateur" if is_user else "Assistant Lasme"
+        role_class = "msg-user" if is_user else "msg-assistant"
+        content = str(msg.get("content") or "").strip()
+        metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+
+        body_fragments: List[str] = []
+        thinking = str((metadata or {}).get("thinking") or "").strip()
+        if thinking:
+            body_fragments.append(
+                f'<details class="thinking-box"><summary>Raisonnement</summary>'
+                f'<pre>{html.escape(thinking)}</pre></details>'
+            )
+
+        tool_events = (metadata or {}).get("tool_events")
+        if isinstance(tool_events, list) and tool_events:
+            items: List[str] = []
+            for ev in tool_events:
+                if not isinstance(ev, dict):
+                    continue
+                t_name = html.escape(str(ev.get("tool") or "outil"))
+                t_summary = html.escape(str(ev.get("summary") or ev.get("status") or ""))
+                items.append(f"<li><strong>{t_name}</strong> — {t_summary}</li>")
+                for gf in ev.get("generated_files") or []:
+                    if isinstance(gf, dict) and str(gf.get("data_url") or "").startswith("data:image/"):
+                        g_name = html.escape(str(gf.get("name") or "figure.png"))
+                        g_url = html.escape(str(gf.get("data_url") or ""))
+                        items.append(
+                            f'<li class="tool-figure"><img src="{g_url}" alt="{g_name}" />'
+                            f'<div><small>{g_name}</small></div></li>'
+                        )
+            if items:
+                body_fragments.append(
+                    f'<div class="tools-box"><strong>Outils exécutés</strong><ul>{"".join(items)}</ul></div>'
+                )
+
+        for kind, value in _markdown_blocks(content):
+            if kind == "heading":
+                level, text = value  # type: ignore[misc]
+                lvl = min(int(level) + 1, 4)
+                body_fragments.append(f"<h{lvl}>{html.escape(str(text))}</h{lvl}>")
+            elif kind == "code":
+                language, code = value  # type: ignore[misc]
+                body_fragments.append(
+                    f'<pre data-language="{html.escape(str(language))}"><code>{html.escape(str(code))}</code></pre>'
+                )
+            elif kind in {"bullet", "number"}:
+                body_fragments.append(f'<p class="list-item">• {html.escape(str(value))}</p>')
+            else:
+                body_fragments.append(f"<p>{html.escape(str(value))}</p>")
+
+        sources = (metadata or {}).get("sources")
+        if isinstance(sources, list) and sources:
+            src_links: List[str] = []
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                s_title = html.escape(str(src.get("title") or src.get("url") or "Source"))
+                s_url = html.escape(str(src.get("url") or ""))
+                if s_url:
+                    src_links.append(f'<a href="{s_url}" target="_blank" rel="noopener">{s_title}</a>')
+                else:
+                    src_links.append(f"<span>{s_title}</span>")
+            if src_links:
+                body_fragments.append(
+                    f'<div class="sources-box"><strong>Sources :</strong> {" · ".join(src_links)}</div>'
+                )
+
+        cards.append(
+            f'<article class="msg-card {role_class}">'
+            f'<header class="msg-role">{html.escape(role_label)}</header>'
+            f'<div class="msg-body">{"".join(body_fragments)}</div>'
+            f"</article>"
+        )
+
+    doc = f"""<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{html.escape(title)} — Export Lasme LLM</title>
+  <style>
+    :root{{--accent:#0bae83;--ink:#102a26;--muted:#5f6f6c;--line:#dbe5e2;--bg:#f5f9f7}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,-apple-system,sans-serif}}
+    main{{max-width:920px;margin:40px auto;padding:40px;background:#fff;border:1px solid var(--line);border-radius:22px;box-shadow:0 18px 48px rgba(16,42,38,0.08)}}
+    header.doc-header{{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:28px}}
+    header.doc-header h1{{margin:0 0 6px 0;font-size:1.9rem}}
+    header.doc-header .meta{{color:var(--muted);font-size:0.9rem}}
+    .msg-card{{border:1px solid var(--line);border-radius:16px;padding:18px 22px;margin-bottom:18px;background:#fff}}
+    .msg-card.msg-user{{background:#f0f8f5;border-color:#bce6d8}}
+    .msg-role{{font-weight:700;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--accent);margin-bottom:8px}}
+    .msg-user .msg-role{{color:#0b7a5c}}
+    pre{{overflow:auto;padding:14px;border-radius:12px;background:#151820;color:#e6edf3;font-size:0.9rem}}
+    .thinking-box,.tools-box,.sources-box{{margin:10px 0;padding:10px 14px;border-radius:10px;background:#f7faf9;border:1px solid var(--line);font-size:0.9rem}}
+    .tool-figure img{{max-width:100%;border-radius:10px;margin-top:8px;border:1px solid var(--line)}}
+    .sources-box a{{color:var(--accent);text-decoration:none;font-weight:500}}
+  </style>
+</head>
+<body>
+  <main>
+    <header class="doc-header">
+      <h1>{html.escape(title)}</h1>
+      <div class="meta">Export souverain Lasme LLM · {html.escape(created_at)} · {len(messages)} message(s)</div>
+    </header>
+    {"".join(cards)}
+  </main>
+</body>
+</html>"""
+    return doc.encode("utf-8")
+
+
+def export_session_conversation(
+    session: Dict[str, Any],
+    messages: Sequence[Dict[str, Any]],
+    *,
+    output_format: str = "html",
+) -> Tuple[bytes, str, str]:
+    format_name = (output_format or "html").lower().strip()
+    if format_name not in SESSION_EXPORT_FORMATS:
+        raise ValueError(f"Unsupported session export format: {format_name}")
+
+    title = str(session.get("title") or "conversation").strip() or "conversation"
+    if format_name == "json":
+        bundle = {
+            "version": 1,
+            "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session": dict(session),
+            "messages": [dict(m) for m in messages],
+        }
+        payload = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
+        return payload, "application/json; charset=utf-8", safe_filename(title, "json")
+
+    markdown_text = _build_session_markdown(session, messages)
+    if format_name == "md":
+        return (
+            markdown_text.encode("utf-8"),
+            "text/markdown; charset=utf-8",
+            safe_filename(title, "md"),
+        )
+    if format_name == "pdf":
+        return (
+            export_pdf(title, markdown_text),
+            "application/pdf",
+            safe_filename(title, "pdf"),
+        )
+    return (
+        _build_session_html(session, messages),
+        "text/html; charset=utf-8",
+        safe_filename(title, "html"),
+    )

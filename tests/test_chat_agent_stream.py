@@ -417,6 +417,87 @@ class AgenticChatStreamTests(unittest.TestCase):
         finally:
             self.db.delete_session(session["id"])
 
+    def test_python_run_files_streamed_in_sse_and_persisted_in_metadata(self):
+        python_turn = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_py_1",
+                            "type": "function",
+                            "function": {
+                                "name": "python_run",
+                                "arguments": '{"code": "import matplotlib.pyplot as plt\\nplt.savefig(\\"courbe.png\\")"}',
+                            },
+                        }
+                    ],
+                },
+                "done": True,
+                "done_reason": "tool_calls",
+                "eval_count": 12,
+                "prompt_eval_count": 20,
+            }
+        ]
+
+        class FakePythonRunner:
+            class _Res:
+                job_id = "jobabc123"
+                status = "success"
+                exit_code = 0
+                duration_ms = 85
+                stdout = "Graphique prêt\n"
+                stderr = ""
+                files = [
+                    {
+                        "name": "courbe.png",
+                        "size_bytes": 4096,
+                        "url": "/api/runner/jobs/jobabc123/files/courbe.png",
+                    }
+                ]
+
+            async def run(self, code, *, timeout_seconds=30, inputs=None):
+                return self._Res()
+
+        scripted = ScriptedChatClient([list(python_turn), list(FINAL_TURN)])
+        with patch("chat.server.main.python_runner", FakePythonRunner()):
+            session_id, events = self._run_chat(scripted)
+        try:
+            tool_result = next(
+                e for e in events if e.get("type") == "agent_tool_result"
+            )
+            self.assertEqual(tool_result["name"], "python_run")
+            self.assertTrue(tool_result["ok"])
+            self.assertEqual(
+                tool_result.get("files"),
+                [
+                    {
+                        "name": "courbe.png",
+                        "url": "/api/runner/jobs/jobabc123/files/courbe.png",
+                        "size_bytes": 4096,
+                    }
+                ],
+            )
+            messages = self.db.get_session_messages(session_id)
+            assistant = [m for m in messages if m["role"] == "assistant"][-1]
+            metadata = assistant.get("metadata") or {}
+            self.assertEqual(
+                metadata.get("runner_files"),
+                [
+                    {
+                        "name": "courbe.png",
+                        "url": "/api/runner/jobs/jobabc123/files/courbe.png",
+                        "size_bytes": 4096,
+                    }
+                ],
+            )
+            agent_meta = metadata.get("agent") or {}
+            if agent_meta.get("run_id"):
+                self.db.delete_agent_run(agent_meta["run_id"])
+        finally:
+            self.db.delete_session(session_id)
+
 
 if __name__ == "__main__":
     unittest.main()

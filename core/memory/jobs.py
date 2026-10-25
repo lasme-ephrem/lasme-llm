@@ -19,6 +19,7 @@ JOB_KINDS = {
     "session_memory",
     "personal_memory",
     "document_index",
+    "agent_mission",
 }
 
 _SCHEMA = """

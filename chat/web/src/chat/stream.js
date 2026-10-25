@@ -102,6 +102,12 @@ function paintLiveAssistantState(bubble, live) {
             live.reasoningDuration
         );
     }
+    const toolEvents = live.decorations
+        .filter((item) => item.kind === "tool" && item.event)
+        .map((item) => item.event);
+    if (toolEvents.length && typeof extractRunnerFilesFromEvents === "function") {
+        renderRunnerOutputs(bubble, extractRunnerFilesFromEvents(toolEvents));
+    }
     if (live.generationStats) {
         renderGenerationPerformance(bubble, live.generationStats);
     }

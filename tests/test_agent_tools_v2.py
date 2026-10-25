@@ -120,12 +120,13 @@ class FakeRagStore:
 
 class FakeRunner:
     class _Result:
+        job_id = "job123"
         status = "ok"
         exit_code = 0
         duration_ms = 120
         stdout = "8638\n"
         stderr = ""
-        files = [{"name": "plot.png"}]
+        files = [{"name": "plot.png", "size_bytes": 2048}]
 
     async def run(self, code, *, timeout_seconds=15, inputs=None):
         self.code = code
@@ -174,6 +175,17 @@ class PlatformToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stdout", result.output)
         self.assertIn("8638", result.output)
         self.assertIn("plot.png", result.output)
+        self.assertIn("/api/runner/jobs/job123/files/plot.png", result.output)
+        self.assertEqual(
+            result.meta.get("files"),
+            [
+                {
+                    "name": "plot.png",
+                    "url": "/api/runner/jobs/job123/files/plot.png",
+                    "size_bytes": 2048,
+                }
+            ],
+        )
 
     async def test_files_tools(self):
         registry = self._registry()

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sqlite3
 import uuid
 import datetime
@@ -274,6 +276,10 @@ class DatabaseManager:
                 cursor.execute(
                     "ALTER TABLE sessions ADD COLUMN branch_from_message_id TEXT"
                 )
+            if "pinned" not in session_columns:
+                cursor.execute(
+                    "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+                )
             cursor.execute(
                 "UPDATE sessions SET model = 'gemma-4-chat' "
                 "WHERE model = 'gemma-4-fable'"
@@ -293,6 +299,78 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_sessions_project "
                 "ON sessions(project_id, updated_at)"
             )
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS scheduled_missions (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL DEFAULT '{DEFAULT_PROJECT_ID}',
+                    title TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '{DEFAULT_MODEL}',
+                    schedule_preset TEXT NOT NULL DEFAULT 'daily',
+                    interval_minutes INTEGER NOT NULL DEFAULT 1440,
+                    output_mode TEXT NOT NULL DEFAULT 'canvas',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_at TIMESTAMP,
+                    next_run_at TIMESTAMP,
+                    last_status TEXT NOT NULL DEFAULT 'idle',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    last_artifact_id TEXT,
+                    last_session_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            try:
+                cursor.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                        message_id UNINDEXED,
+                        session_id UNINDEXED,
+                        content
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_messages_fts_ai
+                    AFTER INSERT ON messages BEGIN
+                        INSERT INTO messages_fts(message_id, session_id, content)
+                        VALUES (new.id, new.session_id, new.content);
+                    END
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_messages_fts_au
+                    AFTER UPDATE OF content ON messages BEGIN
+                        DELETE FROM messages_fts WHERE message_id = old.id;
+                        INSERT INTO messages_fts(message_id, session_id, content)
+                        VALUES (new.id, new.session_id, new.content);
+                    END
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_messages_fts_ad
+                    AFTER DELETE ON messages BEGIN
+                        DELETE FROM messages_fts WHERE message_id = old.id;
+                    END
+                    """
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO messages_fts(message_id, session_id, content)
+                    SELECT m.id, m.session_id, m.content
+                    FROM messages m
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM messages_fts f WHERE f.message_id = m.id
+                    )
+                    """
+                )
+            except sqlite3.OperationalError:
+                pass
             cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
 
@@ -793,8 +871,15 @@ class DatabaseManager:
             "project_id": resolved_project_id,
             "parent_session_id": parent_session_id,
             "branch_from_message_id": branch_from_message_id,
+            "pinned": False,
             "created_at": now,
         }
+
+    @staticmethod
+    def _serialize_session(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(row)
+        item["pinned"] = bool(item.get("pinned"))
+        return item
 
     def list_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._connection() as conn:
@@ -802,13 +887,15 @@ class DatabaseManager:
             if project_id:
                 cursor.execute(
                     "SELECT * FROM sessions WHERE project_id = ? "
-                    "ORDER BY updated_at DESC",
+                    "ORDER BY pinned DESC, updated_at DESC",
                     (project_id,),
                 )
             else:
-                cursor.execute("SELECT * FROM sessions ORDER BY updated_at DESC")
+                cursor.execute(
+                    "SELECT * FROM sessions ORDER BY pinned DESC, updated_at DESC"
+                )
             rows = cursor.fetchall()
-            return [dict(r) for r in rows]
+            return [self._serialize_session(r) for r in rows]
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         with self._connection() as conn:
@@ -816,7 +903,7 @@ class DatabaseManager:
                 "SELECT * FROM sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
-        return dict(row) if row else None
+        return self._serialize_session(row) if row else None
 
     def get_session_messages(self, session_id: str) -> List[Dict[str, Any]]:
         with self._connection() as conn:
@@ -1101,6 +1188,7 @@ class DatabaseManager:
         title: Optional[str] = None,
         project_id: Optional[str] = None,
         model: Optional[str] = None,
+        pinned: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         updates: List[str] = []
         values: List[Any] = []
@@ -1115,9 +1203,14 @@ class DatabaseManager:
         if model is not None:
             updates.append("model = ?")
             values.append(model)
+        if pinned is not None:
+            updates.append("pinned = ?")
+            values.append(1 if pinned else 0)
         if updates:
-            updates.append("updated_at = ?")
-            values.extend([datetime.datetime.now().isoformat(), session_id])
+            if title is not None or project_id is not None or model is not None:
+                updates.append("updated_at = ?")
+                values.append(datetime.datetime.now().isoformat())
+            values.append(session_id)
             with self._connection() as conn:
                 cursor = conn.execute(
                     f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
@@ -1127,6 +1220,461 @@ class DatabaseManager:
                 if cursor.rowcount == 0:
                     return None
         return self.get_session(session_id)
+
+    @staticmethod
+    def _build_search_snippet(text: str, query: str, radius: int = 85) -> str:
+        clean = " ".join(str(text or "").split())
+        if not clean:
+            return ""
+        idx = clean.casefold().find(query.casefold())
+        if idx < 0:
+            tokens = [t for t in re.split(r"\W+", query) if len(t) >= 2]
+            for token in tokens:
+                idx = clean.casefold().find(token.casefold())
+                if idx >= 0:
+                    break
+        if idx < 0:
+            return clean[: radius * 2] + ("…" if len(clean) > radius * 2 else "")
+        start = max(0, idx - radius)
+        end = min(len(clean), idx + len(query) + radius)
+        prefix = "…" if start > 0 else ""
+        suffix = "…" if end < len(clean) else ""
+        return f"{prefix}{clean[start:end]}{suffix}"
+
+    def search_workspace(
+        self,
+        query: str,
+        *,
+        project_id: Optional[str] = None,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        cleaned = (query or "").strip()
+        if not cleaned:
+            return []
+        cap = max(1, min(int(limit), 50))
+        results: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        like_pattern = f"%{cleaned}%"
+
+        with self._connection() as conn:
+            # 1. Matching session titles
+            session_sql = (
+                "SELECT id, title, project_id, pinned, updated_at "
+                "FROM sessions WHERE title LIKE ?"
+            )
+            session_params: List[Any] = [like_pattern]
+            if project_id:
+                session_sql += " AND project_id = ?"
+                session_params.append(project_id)
+            session_sql += " ORDER BY pinned DESC, updated_at DESC LIMIT ?"
+            session_params.append(cap)
+            for row in conn.execute(session_sql, tuple(session_params)).fetchall():
+                key = f"session:{row['id']}"
+                seen_keys.add(key)
+                results.append(
+                    {
+                        "type": "session",
+                        "session_id": row["id"],
+                        "message_id": None,
+                        "project_id": row["project_id"],
+                        "title": row["title"],
+                        "snippet": "Titre de conversation",
+                        "role": "session",
+                        "pinned": bool(row["pinned"]),
+                        "updated_at": row["updated_at"],
+                    }
+                )
+
+            # 2. Matching messages via FTS5 (with LIKE fallback)
+            tokens = [
+                re.sub(r'["\'*^~():-]', "", tok)
+                for tok in cleaned.split()
+                if re.sub(r'["\'*^~():-]', "", tok)
+            ]
+            fts_rows = []
+            if tokens:
+                fts_query = " AND ".join(f'"{tok}"*' for tok in tokens[:8])
+                try:
+                    fts_sql = """
+                        SELECT m.id AS message_id, m.session_id, m.role, m.content,
+                               m.timestamp, s.title, s.project_id, s.pinned
+                        FROM messages_fts f
+                        JOIN messages m ON m.id = f.message_id
+                        JOIN sessions s ON s.id = m.session_id
+                        WHERE messages_fts MATCH ?
+                    """
+                    fts_params: List[Any] = [fts_query]
+                    if project_id:
+                        fts_sql += " AND s.project_id = ?"
+                        fts_params.append(project_id)
+                    fts_sql += " ORDER BY rank LIMIT ?"
+                    fts_params.append(cap)
+                    fts_rows = conn.execute(fts_sql, tuple(fts_params)).fetchall()
+                except sqlite3.OperationalError:
+                    fts_rows = []
+
+            if not fts_rows:
+                like_sql = """
+                    SELECT m.id AS message_id, m.session_id, m.role, m.content,
+                           m.timestamp, s.title, s.project_id, s.pinned
+                    FROM messages m
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE m.content LIKE ?
+                """
+                like_params: List[Any] = [like_pattern]
+                if project_id:
+                    like_sql += " AND s.project_id = ?"
+                    like_params.append(project_id)
+                like_sql += " ORDER BY m.timestamp DESC LIMIT ?"
+                like_params.append(cap)
+                fts_rows = conn.execute(like_sql, tuple(like_params)).fetchall()
+
+            for row in fts_rows:
+                if len(results) >= cap:
+                    break
+                key = f"msg:{row['message_id']}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                results.append(
+                    {
+                        "type": "message",
+                        "session_id": row["session_id"],
+                        "message_id": row["message_id"],
+                        "project_id": row["project_id"],
+                        "title": row["title"],
+                        "session_title": row["title"],
+                        "snippet": self._build_search_snippet(
+                            row["content"], cleaned
+                        ),
+                        "role": row["role"],
+                        "pinned": bool(row["pinned"]),
+                        "updated_at": row["timestamp"],
+                    }
+                )
+
+            # 3. Matching Canvas artifacts if table exists
+            has_artifacts = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
+            ).fetchone()
+            if has_artifacts and len(results) < cap:
+                art_sql = """
+                    SELECT a.id, a.project_id, a.session_id, a.title, a.kind,
+                           a.updated_at, v.content
+                    FROM artifacts a
+                    LEFT JOIN artifact_versions v
+                      ON v.artifact_id = a.id
+                     AND v.version_number = (
+                         SELECT MAX(v2.version_number)
+                         FROM artifact_versions v2
+                         WHERE v2.artifact_id = a.id
+                     )
+                    WHERE (a.title LIKE ? OR v.content LIKE ?)
+                """
+                art_params: List[Any] = [like_pattern, like_pattern]
+                if project_id:
+                    art_sql += " AND a.project_id = ?"
+                    art_params.append(project_id)
+                art_sql += " ORDER BY a.updated_at DESC LIMIT ?"
+                art_params.append(cap - len(results))
+                try:
+                    for row in conn.execute(art_sql, tuple(art_params)).fetchall():
+                        results.append(
+                            {
+                                "type": "artifact",
+                                "artifact_id": row["id"],
+                                "session_id": row["session_id"],
+                                "message_id": None,
+                                "project_id": row["project_id"],
+                                "title": row["title"],
+                                "kind": row["kind"],
+                                "snippet": self._build_search_snippet(
+                                    row["content"] or row["title"], cleaned
+                                ),
+                                "role": f"canvas:{row['kind']}",
+                                "pinned": False,
+                                "updated_at": row["updated_at"],
+                            }
+                        )
+                except sqlite3.OperationalError:
+                    pass
+
+        return results[:cap]
+
+    def import_session_bundle(
+        self,
+        bundle: Dict[str, Any],
+        *,
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session_info = bundle.get("session") if isinstance(bundle, dict) else {}
+        if not isinstance(session_info, dict):
+            session_info = {}
+        raw_messages = bundle.get("messages") if isinstance(bundle, dict) else []
+        if not isinstance(raw_messages, list) or not raw_messages:
+            raise ValueError("Le fichier d'import ne contient aucun message.")
+        title = str(
+            session_info.get("title")
+            or bundle.get("title")
+            or "Conversation importée"
+        ).strip()[:120]
+        model = str(session_info.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        target_project = (
+            project_id
+            or str(session_info.get("project_id") or "").strip()
+            or DEFAULT_PROJECT_ID
+        )
+        created = self.create_session(
+            title=title,
+            model=model,
+            project_id=target_project,
+        )
+        for item in raw_messages[:500]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(item.get("content") or "")
+            if not content.strip():
+                continue
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            self.add_message(
+                created["id"],
+                role,
+                content,
+                metadata=metadata,
+            )
+        if session_info.get("pinned"):
+            self.update_session(created["id"], pinned=True)
+        return self.get_session(created["id"]) or created
+
+    # ------------------------------------------------------------ scheduled missions
+
+    @staticmethod
+    def _compute_next_run_iso(
+        schedule_preset: str,
+        interval_minutes: int,
+        now: Optional[datetime.datetime] = None,
+    ) -> Optional[str]:
+        base = now or datetime.datetime.now(datetime.timezone.utc)
+        if schedule_preset == "manual":
+            return None
+        minutes = max(5, int(interval_minutes or 1440))
+        return (base + datetime.timedelta(minutes=minutes)).isoformat()
+
+    @staticmethod
+    def _serialize_mission(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(row)
+        item["enabled"] = bool(item.get("enabled"))
+        interval = int(item.get("interval_minutes") or 1440)
+        item["interval_minutes"] = interval
+        label_map = {
+            60: "Toutes les heures",
+            360: "Toutes les 6 heures",
+            1440: "Quotidien · 08:00",
+            10080: "Hebdomadaire · Lundi",
+        }
+        item["schedule_label"] = label_map.get(
+            interval,
+            f"Toutes les {interval} min",
+        )
+        return item
+
+    def list_missions(
+        self,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._connection() as conn:
+            if project_id:
+                rows = conn.execute(
+                    "SELECT * FROM scheduled_missions WHERE project_id = ? "
+                    "ORDER BY enabled DESC, updated_at DESC",
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM scheduled_missions "
+                    "ORDER BY enabled DESC, updated_at DESC"
+                ).fetchall()
+        return [self._serialize_mission(r) for r in rows]
+
+    def get_mission(self, mission_id: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_missions WHERE id = ?",
+                (mission_id,),
+            ).fetchone()
+        return self._serialize_mission(row) if row else None
+
+    def create_mission(
+        self,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
+        title: str,
+        prompt: str,
+        model: str = DEFAULT_MODEL,
+        schedule_preset: str = "daily",
+        interval_minutes: Optional[int] = None,
+        output_mode: str = "canvas",
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        mission_id = str(uuid.uuid4())
+        preset_map = {
+            "manual": 0,
+            "hourly": 60,
+            "daily": 1440,
+            "weekly": 10080,
+        }
+        preset = schedule_preset if schedule_preset in preset_map else "daily"
+        resolved_interval = (
+            int(interval_minutes)
+            if interval_minutes is not None and int(interval_minutes) > 0
+            else preset_map[preset]
+        )
+        mode = output_mode if output_mode in {"canvas", "session", "both"} else "canvas"
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_iso = now_utc.isoformat()
+        next_run = (
+            self._compute_next_run_iso(preset, resolved_interval, now_utc)
+            if enabled
+            else None
+        )
+        project = self.get_project(project_id) or self.get_project(DEFAULT_PROJECT_ID)
+        resolved_project_id = str(project["id"]) if project else DEFAULT_PROJECT_ID
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO scheduled_missions (
+                    id, project_id, title, prompt, model, schedule_preset,
+                    interval_minutes, output_mode, enabled, next_run_at,
+                    last_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
+                """,
+                (
+                    mission_id,
+                    resolved_project_id,
+                    title.strip()[:120] or "Mission d'agent",
+                    prompt.strip(),
+                    model,
+                    preset,
+                    resolved_interval,
+                    mode,
+                    1 if enabled else 0,
+                    next_run,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+        return self.get_mission(mission_id) or {}
+
+    def update_mission(
+        self,
+        mission_id: str,
+        **changes: Any,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_mission(mission_id)
+        if not existing:
+            return None
+        updates: List[str] = []
+        values: List[Any] = []
+        preset_map = {
+            "manual": 0,
+            "hourly": 60,
+            "daily": 1440,
+            "weekly": 10080,
+        }
+        for key in (
+            "title",
+            "prompt",
+            "model",
+            "schedule_preset",
+            "interval_minutes",
+            "output_mode",
+            "enabled",
+            "last_run_at",
+            "next_run_at",
+            "last_status",
+            "last_error",
+            "last_artifact_id",
+            "last_session_id",
+        ):
+            if key in changes and changes[key] is not None:
+                val = changes[key]
+                if key == "enabled":
+                    val = 1 if bool(val) else 0
+                elif key == "interval_minutes":
+                    val = max(0, int(val))
+                updates.append(f"{key} = ?")
+                values.append(val)
+        if "schedule_preset" in changes and "next_run_at" not in changes:
+            new_preset = str(changes["schedule_preset"])
+            new_interval = int(
+                changes.get("interval_minutes")
+                or preset_map.get(new_preset, existing["interval_minutes"])
+            )
+            next_run = self._compute_next_run_iso(new_preset, new_interval)
+            updates.append("next_run_at = ?")
+            values.append(next_run)
+        if not updates:
+            return existing
+        updates.append("updated_at = ?")
+        values.extend([datetime.datetime.now(datetime.timezone.utc).isoformat(), mission_id])
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE scheduled_missions SET {', '.join(updates)} WHERE id = ?",
+                tuple(values),
+            )
+            conn.commit()
+        return self.get_mission(mission_id)
+
+    def delete_mission(self, mission_id: str) -> bool:
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM scheduled_missions WHERE id = ?",
+                (mission_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def claim_due_missions(self) -> List[Dict[str, Any]]:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_iso = now_utc.isoformat()
+        due: List[Dict[str, Any]] = []
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM scheduled_missions
+                WHERE enabled = 1
+                  AND schedule_preset != 'manual'
+                  AND next_run_at IS NOT NULL
+                  AND next_run_at <= ?
+                  AND last_status != 'running'
+                """,
+                (now_iso,),
+            ).fetchall()
+            for row in rows:
+                mission = self._serialize_mission(row)
+                next_run = self._compute_next_run_iso(
+                    mission["schedule_preset"],
+                    mission["interval_minutes"],
+                    now_utc,
+                )
+                conn.execute(
+                    """
+                    UPDATE scheduled_missions
+                    SET last_status = 'running', next_run_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (next_run, now_iso, mission["id"]),
+                )
+                due.append(mission)
+            if due:
+                conn.commit()
+        return due
 
     def delete_session(self, session_id: str):
         with self._connection() as conn:

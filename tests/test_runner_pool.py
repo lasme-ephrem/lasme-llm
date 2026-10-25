@@ -511,6 +511,33 @@ class PoolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runner.output_path(job_id, "../escape.png"))
         self.assertIsNone(runner.output_path(uuid.uuid4().hex, "chart.png"))
 
+    async def test_pooled_outputs_persist_after_workspace_reset_and_harvest_workdir(self):
+        runner = make_runner(self.temp_dir)
+        harness = PoolHarness(runner)
+        self.addCleanup(runner.stop)
+
+        result = await runner.run(
+            "import os, pathlib\n"
+            "open(os.path.join(os.environ['LASME_OUTPUT_DIR'], 'chart.png'), 'wb').write(b'PNGDATA')\n"
+            "job_dir = pathlib.Path(os.environ['LASME_INPUT_FILE']).parent\n"
+            "(job_dir / 'summary.csv').write_text('a,b\\n1,2\\n', encoding='utf-8')\n"
+        )
+
+        self.assertEqual(result.status, "success")
+        names = [item["name"] for item in result.files]
+        self.assertIn("chart.png", names)
+        self.assertIn("summary.csv", names)
+        # Pool workspace is completely clean after the job finishes.
+        self.assertEqual(list(runner.pool_workspace.iterdir()), [])
+        # Yet output_path still resolves the persisted files for HTTP serving.
+        chart_path = runner.output_path(result.job_id, "chart.png")
+        csv_path = runner.output_path(result.job_id, "summary.csv")
+        self.assertIsNotNone(chart_path)
+        self.assertEqual(chart_path.read_bytes(), b"PNGDATA")
+        self.assertIsNotNone(csv_path)
+        self.assertIn("a,b", csv_path.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(harness.exec_commands()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

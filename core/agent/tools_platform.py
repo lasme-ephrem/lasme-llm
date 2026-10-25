@@ -14,6 +14,7 @@ from core.agent.tools import (
     CATEGORY_WRITE,
     ToolDefinition,
     ToolRegistry,
+    ToolResult,
 )
 
 MAX_RAG_OUTPUT = 6_000
@@ -91,7 +92,7 @@ def register_platform_tools(
         )
 
     if python_runner is not None:
-        async def _python_run(args: Dict[str, Any]) -> str:
+        async def _python_run(args: Dict[str, Any]) -> ToolResult:
             result = await python_runner.run(
                 str(args["code"]),
                 timeout_seconds=int(args.get("timeout_seconds") or 30),
@@ -104,13 +105,35 @@ def register_platform_tools(
                 parts.append(f"stdout:\n{result.stdout}")
             if result.stderr:
                 parts.append(f"stderr:\n{result.stderr}")
+            job_id = str(getattr(result, "job_id", "") or "").strip()
+            normalized_files: List[Dict[str, Any]] = []
             if result.files:
-                names = ", ".join(
-                    str(f.get("name") or f.get("path") or "?")
-                    for f in result.files[:10]
-                )
-                parts.append(f"fichiers produits: {names}")
-            return "\n".join(parts)
+                file_labels: List[str] = []
+                for f in result.files[:10]:
+                    name = str(f.get("name") or f.get("path") or "?").strip()
+                    url = str(f.get("url") or "").strip()
+                    if not url and job_id and name and name != "?":
+                        url = f"/api/runner/jobs/{job_id}/files/{name}"
+                    size_bytes = int(f.get("size_bytes") or 0)
+                    normalized_files.append(
+                        {
+                            "name": name,
+                            "url": url,
+                            "size_bytes": size_bytes,
+                        }
+                    )
+                    file_labels.append(f"{name} ({url})" if url else name)
+                parts.append(f"fichiers produits: {', '.join(file_labels)}")
+            meta: Dict[str, Any] = {}
+            if normalized_files:
+                meta["files"] = normalized_files
+            if job_id:
+                meta["job_id"] = job_id
+            return ToolResult(
+                ok=True,
+                output="\n".join(parts),
+                meta=meta,
+            )
 
         registry.register(
             ToolDefinition(
@@ -118,9 +141,12 @@ def register_platform_tools(
                 description=(
                     "Exécute du code Python dans un bac à sable Docker "
                     "isolé (sans réseau). Le sandbox a déjà pandas, numpy "
-                    "et matplotlib (MPLBACKEND Agg) ; les figures se "
-                    "sauvegardent sous /workspace. openpyxl disponible. "
-                    "Retourne stdout, stderr et les fichiers produits."
+                    "et matplotlib (MPLBACKEND Agg) ; les figures et fichiers "
+                    "(PNG, SVG, CSV, JSON, Markdown…) sauvegardés dans le "
+                    "répertoire courant ou sous LASME_OUTPUT_DIR sont "
+                    "collectés et affichés directement dans le chat et "
+                    "Canvas. openpyxl disponible. Retourne stdout, stderr "
+                    "et les fichiers produits."
                 ),
                 parameters={
                     "type": "object",

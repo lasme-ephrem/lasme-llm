@@ -6,6 +6,7 @@ import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 
 from chat.contracts.schemas import (
     BranchRequest,
@@ -14,14 +15,19 @@ from chat.contracts.schemas import (
     MemoryUpdateRequest,
     MessageEditRequest,
     MessageUpdateRequest,
+    MissionCreateRequest,
+    MissionUpdateRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
     SessionCreateRequest,
+    SessionImportRequest,
     SessionUpdateRequest,
     validate_model_name,
 )
 from chat.server.deps import deps
 from chat.server.services.background import _memory_update_locks, _personal_memory_lock
+from chat.worker.loop import execute_agent_mission
+from core.artifacts import export_session_conversation
 from core.memory.database import DEFAULT_PROJECT_ID
 from core.memory.personal import refresh_generated_memories
 
@@ -108,6 +114,68 @@ async def create_session(payload: SessionCreateRequest):
     return session
 
 
+@router.get("/api/sessions/search")
+async def search_sessions_workspace(
+    q: str = "",
+    project_id: Optional[str] = None,
+    limit: int = 25,
+):
+    items = deps.db.search_workspace(q, project_id=project_id, limit=limit)
+    sessions = [
+        {**it, "id": it.get("session_id")}
+        for it in items
+        if it.get("type") == "session"
+    ]
+    messages = [it for it in items if it.get("type") == "message"]
+    artifacts = [it for it in items if it.get("type") == "artifact"]
+    return {
+        "query": q,
+        "results": items,
+        "sessions": sessions,
+        "messages": messages,
+        "artifacts": artifacts,
+    }
+
+
+@router.get("/api/sessions/{session_id}/export")
+async def export_session_endpoint(session_id: str, format: str = "html"):
+    session = deps.db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    messages = deps.db.get_session_messages(session_id)
+    try:
+        payload, media_type, filename = export_session_conversation(
+            session,
+            messages,
+            output_format=format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.post("/api/sessions/import")
+async def import_session_endpoint(payload: SessionImportRequest):
+    try:
+        session = deps.db.import_session_bundle(
+            payload.bundle,
+            project_id=payload.project_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    msgs = deps.db.get_session_messages(session["id"])
+    return {
+        "session": session,
+        "imported_messages": len(msgs),
+    }
+
+
 @router.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str):
     session = deps.db.get_session(session_id)
@@ -130,6 +198,7 @@ async def update_session(session_id: str, payload: SessionUpdateRequest):
             title=payload.title,
             project_id=payload.project_id,
             model=model,
+            pinned=payload.pinned,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -257,3 +326,67 @@ async def refresh_personal_memory():
             deps.settings.chat_model,
         )
     return {"status": "ok", "generated": generated}
+
+
+# --- SCHEDULED AGENT MISSIONS ---
+@router.get("/api/missions")
+async def get_missions(project_id: Optional[str] = None):
+    return {"missions": deps.db.list_missions(project_id=project_id)}
+
+
+@router.post("/api/missions")
+async def create_mission(payload: MissionCreateRequest):
+    model = validate_model_name(payload.model)
+    preset = (
+        "hourly"
+        if payload.interval_minutes <= 60
+        else ("weekly" if payload.interval_minutes >= 10080 else "daily")
+    )
+    try:
+        mission = deps.db.create_mission(
+            title=payload.title,
+            prompt=payload.prompt,
+            project_id=payload.project_id,
+            model=model,
+            schedule_preset=preset,
+            interval_minutes=payload.interval_minutes,
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"mission": mission}
+
+
+@router.put("/api/missions/{mission_id}")
+async def update_mission(mission_id: str, payload: MissionUpdateRequest):
+    changes = payload.model_dump(exclude_none=True)
+    changes.pop("schedule_label", None)
+    if "model" in changes:
+        changes["model"] = validate_model_name(changes["model"])
+    try:
+        mission = deps.db.update_mission(mission_id, **changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    return {"mission": mission}
+
+
+@router.delete("/api/missions/{mission_id}")
+async def delete_mission(mission_id: str):
+    if not deps.db.delete_mission(mission_id):
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    return {"status": "deleted"}
+
+
+@router.post("/api/missions/{mission_id}/run")
+async def run_mission_now(mission_id: str):
+    if not deps.db.get_mission(mission_id):
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    try:
+        result = await execute_agent_mission(mission_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return result

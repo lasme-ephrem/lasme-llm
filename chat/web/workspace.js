@@ -1368,11 +1368,167 @@ function renderCanvasRunResult(result) {
                 const image = document.createElement("img");
                 image.src = file.url;
                 image.alt = file.name;
+                image.title = "Cliquer pour agrandir";
+                image.addEventListener("click", (e) => {
+                    if (typeof openImageViewer === "function") {
+                        e.preventDefault();
+                        openImageViewer(file.url);
+                    }
+                });
                 link.prepend(image);
             }
             files.appendChild(link);
         });
         canvasRunResult.appendChild(files);
+    }
+}
+
+function parseDelimitedRows(text, separator = ",") {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let inQuotes = false;
+    const raw = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (inQuotes) {
+            if (ch === '"') {
+                if (raw[i + 1] === '"') {
+                    cell += '"';
+                    i++;
+                } else {
+                    inQuotes = false;
+                }
+            } else {
+                cell += ch;
+            }
+        } else if (ch === '"') {
+            inQuotes = true;
+        } else if (ch === separator) {
+            row.push(cell.trim());
+            cell = "";
+        } else if (ch === "\n") {
+            row.push(cell.trim());
+            if (row.some((c) => c.length > 0)) rows.push(row);
+            row = [];
+            cell = "";
+        } else {
+            cell += ch;
+        }
+    }
+    row.push(cell.trim());
+    if (row.some((c) => c.length > 0)) rows.push(row);
+    return rows;
+}
+
+function csvToMarkdownTable(text, separator = ",") {
+    const rows = parseDelimitedRows(text, separator).slice(0, 200);
+    if (!rows.length) return String(text || "");
+    const colCount = Math.max(...rows.map((r) => r.length), 1);
+    const escapeCell = (val) => String(val ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
+    const padRow = (r) => {
+        const padded = [];
+        for (let i = 0; i < colCount; i++) {
+            padded.push(escapeCell(r[i] ?? ""));
+        }
+        return `| ${padded.join(" | ")} |`;
+    };
+    const header = padRow(rows[0]);
+    const divider = `| ${Array.from({ length: colCount }, () => "---").join(" | ")} |`;
+    const body = rows.slice(1).map(padRow);
+    return [header, divider, ...body].join("\n");
+}
+
+async function openRunnerFileInCanvas(file, pythonCode = "") {
+    if (!file) return;
+    const name = String(file.name || "Sortie Python").trim();
+    const url = String(file.url || "").trim();
+    const lower = name.toLowerCase();
+
+    if (/\.(?:png|jpe?g|webp|gif)$/i.test(lower)) {
+        if (pythonCode && pythonCode.trim()) {
+            resetCanvas(
+                pythonCode.trim(),
+                `Script · ${name}`,
+                "code",
+                "Script Python et graphique importés depuis le sandbox · cliquez sur Exécuter pour recalculer."
+            );
+            renderCanvasRunResult({
+                status: "success",
+                duration_ms: 0,
+                stdout: "",
+                stderr: "",
+                files: [
+                    {
+                        name,
+                        url,
+                        size_bytes: Number(file.size_bytes) || 0,
+                    },
+                ],
+            });
+        } else {
+            resetCanvas(
+                `# ${name}\n\n![${name}](${url})\n`,
+                name,
+                "markdown",
+                "Graphique importé depuis le sandbox Python · enregistrez-le pour le conserver."
+            );
+        }
+        setCanvasOpen(true);
+        return;
+    }
+
+    if (url) {
+        try {
+            const resp = await fetch(url);
+            if (resp.ok) {
+                const rawText = await resp.text();
+                if (/\.csv$/i.test(lower)) {
+                    resetCanvas(
+                        csvToMarkdownTable(rawText, ","),
+                        name,
+                        "table",
+                        "Tableau CSV importé depuis le sandbox Python · exportable en Excel, PDF ou Word."
+                    );
+                    setCanvasOpen(true);
+                    return;
+                }
+                if (/\.tsv$/i.test(lower)) {
+                    resetCanvas(
+                        csvToMarkdownTable(rawText, "\t"),
+                        name,
+                        "table",
+                        "Tableau TSV importé depuis le sandbox Python · exportable en Excel, PDF ou Word."
+                    );
+                    setCanvasOpen(true);
+                    return;
+                }
+                let kind = "document";
+                if (/\.(?:html?|svg)$/i.test(lower)) kind = "html";
+                else if (/\.(?:json|py)$/i.test(lower)) kind = "code";
+                else if (/\.(?:md|markdown)$/i.test(lower)) kind = "markdown";
+                resetCanvas(
+                    rawText,
+                    name,
+                    kind,
+                    "Fichier importé depuis le sandbox Python · enregistrez-le pour le conserver."
+                );
+                setCanvasOpen(true);
+                return;
+            }
+        } catch (err) {
+            console.error("Impossible de charger le fichier runner dans Canvas :", err);
+        }
+    }
+
+    if (pythonCode && pythonCode.trim()) {
+        resetCanvas(
+            pythonCode.trim(),
+            `Script · ${name}`,
+            "code",
+            "Script Python importé depuis la conversation."
+        );
+        setCanvasOpen(true);
     }
 }
 
@@ -1864,6 +2020,21 @@ const MESSAGE_ACTION_ICONS = {
             <path d="M4 17v-5h5"></path>
             <path d="M6.1 9A7 7 0 0 1 18.7 6.3L20 8M4 16l1.3 1.7A7 7 0 0 0 17.9 15"></path>
         </svg>
+    `,
+    tts: `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </svg>
+    `,
+    duel: `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 3v18"></path>
+            <path d="M18 3v18"></path>
+            <path d="M3 8h6"></path>
+            <path d="M15 16h6"></path>
+        </svg>
     `
 };
 
@@ -1885,10 +2056,25 @@ function decorateMessageActions(messageElement, role, messageId, text) {
             ${MESSAGE_ACTION_ICONS[action] || ""}
             <span class="sr-only">${label}</span>
         `;
-        button.addEventListener("click", handler);
+        button.addEventListener("click", (evt) => handler(evt, button));
         actions.appendChild(button);
     };
     addAction("Copier", "copy", () => navigator.clipboard.writeText(text || ""));
+    if (role !== "user") {
+        addAction("Écouter", "tts", (_evt, btn) => {
+            toggleSpeechForMessage(text, btn);
+        });
+        addAction("Comparer (Duel)", "duel", () => {
+            let previous = messageElement.previousElementSibling;
+            while (previous && !previous.classList.contains("user")) {
+                previous = previous.previousElementSibling;
+            }
+            const promptText = previous?.querySelector(".user-text-content")?.textContent?.trim()
+                || previous?.querySelector(".bubble")?.textContent?.trim()
+                || "";
+            openDuelModal(promptText);
+        });
+    }
     if (!messageId) {
         messageElement.appendChild(actions);
         return;
@@ -1897,6 +2083,9 @@ function decorateMessageActions(messageElement, role, messageId, text) {
     if (role === "user") {
         addAction("Modifier", "edit", () => {
             beginInlineMessageEdit(messageElement, messageId, text);
+        });
+        addAction("Comparer (Duel)", "duel", () => {
+            openDuelModal(text || "");
         });
     } else {
         addAction("Ouvrir dans Canvas", "canvas", () => {
@@ -1950,4 +2139,779 @@ function updateResearchStep(container, event) {
             small.textContent = `${event.result_count} résultat(s) · ${event.engine || "recherche"}`;
         }
     }
+}
+
+/* ============================================================================
+ * FEATURE #1 — Recherche plein texte instantanée (Ctrl+K + SQLite FTS5)
+ * ========================================================================= */
+const searchOpenBtn = document.getElementById("searchOpenBtn");
+const searchModal = document.getElementById("searchModal");
+const searchModalOverlay = document.getElementById("searchModalOverlay");
+const closeSearchModalBtn = document.getElementById("closeSearchModalBtn");
+const searchModalInput = document.getElementById("searchModalInput");
+const searchModalStatus = document.getElementById("searchModalStatus");
+const searchModalResults = document.getElementById("searchModalResults");
+let searchDebounceTimer = null;
+
+function sanitizeSearchSnippet(snippetHtml) {
+    const raw = String(snippetHtml || "");
+    const placeholderOpen = "___LASME_MARK_OPEN___";
+    const placeholderClose = "___LASME_MARK_CLOSE___";
+    const withPlaceholders = raw
+        .replace(/<mark>/gi, placeholderOpen)
+        .replace(/<\/mark>/gi, placeholderClose);
+    const escaped = escapeHtml(withPlaceholders);
+    return escaped
+        .replaceAll(placeholderOpen, "<mark>")
+        .replaceAll(placeholderClose, "</mark>");
+}
+
+async function performWorkspaceSearch(queryText) {
+    if (!searchModalResults || !searchModalStatus) return;
+    const trimmed = String(queryText || "").trim();
+    if (!trimmed) {
+        searchModalStatus.textContent = "Tapez un mot-clé pour chercher dans vos sessions, messages et artefacts Canvas.";
+        searchModalResults.replaceChildren();
+        return;
+    }
+    searchModalStatus.textContent = "Recherche FTS5 en cours…";
+    try {
+        const params = new URLSearchParams({
+            q: trimmed,
+            limit: "25",
+        });
+        if (currentProjectId) {
+            params.set("project_id", currentProjectId);
+        }
+        const resp = await fetch(`${API_BASE}/sessions/search?${params.toString()}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderWorkspaceSearchResults(data);
+    } catch (err) {
+        console.error("Erreur recherche FTS5 :", err);
+        searchModalStatus.textContent = "Impossible d’exécuter la recherche.";
+    }
+}
+
+function renderWorkspaceSearchResults(data) {
+    if (!searchModalResults || !searchModalStatus) return;
+    searchModalResults.replaceChildren();
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+    const artifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
+    const total = sessions.length + messages.length + artifacts.length;
+
+    if (total === 0) {
+        searchModalStatus.textContent = "Aucun résultat trouvé pour cette requête.";
+        return;
+    }
+    searchModalStatus.textContent = `${total} résultat(s) trouvé(s) · SQLite FTS5`;
+
+    if (sessions.length) {
+        const sec = document.createElement("div");
+        sec.className = "search-result-section";
+        sec.innerHTML = `<div class="search-section-title">Conversations (${sessions.length})</div>`;
+        sessions.forEach(sess => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "search-result-item";
+            btn.innerHTML = `
+                <div class="search-item-header">
+                    <strong>${sess.pinned ? "📌 " : ""}${escapeHtml(sess.title || "Conversation")}</strong>
+                    <span class="search-item-badge">Session</span>
+                </div>
+            `;
+            btn.addEventListener("click", () => {
+                closeSearchModal();
+                void selectSession(sess.id);
+            });
+            sec.appendChild(btn);
+        });
+        searchModalResults.appendChild(sec);
+    }
+
+    if (messages.length) {
+        const sec = document.createElement("div");
+        sec.className = "search-result-section";
+        sec.innerHTML = `<div class="search-section-title">Messages (${messages.length})</div>`;
+        messages.forEach(msg => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "search-result-item";
+            const roleLabel = msg.role === "user" ? "Vous" : "Lasme";
+            btn.innerHTML = `
+                <div class="search-item-header">
+                    <strong>${msg.pinned ? "📌 " : ""}${escapeHtml(msg.session_title || "Conversation")}</strong>
+                    <span class="search-item-badge">${roleLabel}</span>
+                </div>
+                <div class="search-item-snippet">${sanitizeSearchSnippet(msg.snippet || msg.content || "")}</div>
+            `;
+            btn.addEventListener("click", () => {
+                closeSearchModal();
+                void selectSession(msg.session_id);
+            });
+            sec.appendChild(btn);
+        });
+        searchModalResults.appendChild(sec);
+    }
+
+    if (artifacts.length) {
+        const sec = document.createElement("div");
+        sec.className = "search-result-section";
+        sec.innerHTML = `<div class="search-section-title">Artefacts Canvas (${artifacts.length})</div>`;
+        artifacts.forEach(art => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "search-result-item";
+            btn.innerHTML = `
+                <div class="search-item-header">
+                    <strong>🎨 ${escapeHtml(art.title || "Artefact")}</strong>
+                    <span class="search-item-badge">${escapeHtml(art.kind || "document")}</span>
+                </div>
+                <div class="search-item-snippet">${escapeHtml(art.snippet || "")}</div>
+            `;
+            btn.addEventListener("click", () => {
+                closeSearchModal();
+                void openCanvasArtifact(art.artifact_id);
+            });
+            sec.appendChild(btn);
+        });
+        searchModalResults.appendChild(sec);
+    }
+}
+
+function openSearchModal(initialQuery = "") {
+    if (!searchModal) return;
+    searchModal.style.display = "flex";
+    searchModal.setAttribute("aria-hidden", "false");
+    if (searchModalInput) {
+        if (initialQuery) searchModalInput.value = initialQuery;
+        searchModalInput.focus();
+        searchModalInput.select();
+        void performWorkspaceSearch(searchModalInput.value);
+    }
+}
+
+function closeSearchModal() {
+    if (!searchModal) return;
+    searchModal.style.display = "none";
+    searchModal.setAttribute("aria-hidden", "true");
+}
+
+searchOpenBtn?.addEventListener("click", () => openSearchModal());
+closeSearchModalBtn?.addEventListener("click", closeSearchModal);
+searchModalOverlay?.addEventListener("click", closeSearchModal);
+searchModalInput?.addEventListener("input", () => {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+        void performWorkspaceSearch(searchModalInput.value);
+    }, 140);
+});
+
+document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        if (searchModal?.style.display === "flex") {
+            closeSearchModal();
+        } else {
+            openSearchModal();
+        }
+    } else if (event.key === "Escape") {
+        if (searchModal?.style.display === "flex") closeSearchModal();
+        if (exportSessionModal?.style.display === "flex") closeExportSessionModal();
+        if (duelModal?.style.display === "flex") closeDuelModal();
+        if (missionsModal?.style.display === "flex") closeMissionsModal();
+    }
+});
+
+/* ============================================================================
+ * FEATURE #3 — Export & Import souverain de conversations
+ * ========================================================================= */
+const exportSessionBtn = document.getElementById("exportSessionBtn");
+const exportSessionModal = document.getElementById("exportSessionModal");
+const exportSessionOverlay = document.getElementById("exportSessionOverlay");
+const closeExportSessionBtn = document.getElementById("closeExportSessionBtn");
+const exportSessionStatus = document.getElementById("exportSessionStatus");
+const importSessionBtn = document.getElementById("importSessionBtn");
+const importSessionFileInput = document.getElementById("importSessionFileInput");
+
+function openExportSessionModal() {
+    if (!exportSessionModal) return;
+    exportSessionModal.style.display = "flex";
+    exportSessionModal.setAttribute("aria-hidden", "false");
+    if (exportSessionStatus) {
+        exportSessionStatus.textContent = currentSessionId
+            ? "Choisissez un format d’export pour la conversation active."
+            : "Démarrez ou sélectionnez d’abord une conversation enregistrée pour l’exporter.";
+    }
+}
+
+function closeExportSessionModal() {
+    if (!exportSessionModal) return;
+    exportSessionModal.style.display = "none";
+    exportSessionModal.setAttribute("aria-hidden", "true");
+}
+
+exportSessionBtn?.addEventListener("click", openExportSessionModal);
+closeExportSessionBtn?.addEventListener("click", closeExportSessionModal);
+exportSessionOverlay?.addEventListener("click", closeExportSessionModal);
+
+document.querySelectorAll(".export-format-card[data-export-format]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+        const format = btn.getAttribute("data-export-format") || "html";
+        if (!currentSessionId) {
+            if (exportSessionStatus) {
+                exportSessionStatus.textContent = "Aucune session active enregistrée à exporter.";
+            }
+            return;
+        }
+        if (exportSessionStatus) {
+            exportSessionStatus.textContent = `Génération de l’export (${format.toUpperCase()})…`;
+        }
+        try {
+            const resp = await fetch(
+                `${API_BASE}/sessions/${encodeURIComponent(currentSessionId)}/export?format=${encodeURIComponent(format)}`
+            );
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const disposition = resp.headers.get("Content-Disposition") || "";
+            const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `conversation.${format}`;
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = filename;
+            anchor.click();
+            URL.revokeObjectURL(url);
+            if (exportSessionStatus) {
+                exportSessionStatus.textContent = `Export « ${filename} » téléchargé avec succès.`;
+            }
+        } catch (err) {
+            console.error("Erreur export conversation :", err);
+            if (exportSessionStatus) {
+                exportSessionStatus.textContent = "Erreur lors de l’export de la conversation.";
+            }
+        }
+    });
+});
+
+importSessionBtn?.addEventListener("click", () => {
+    importSessionFileInput?.click();
+});
+
+importSessionFileInput?.addEventListener("change", async () => {
+    const file = importSessionFileInput.files?.[0];
+    importSessionFileInput.value = "";
+    if (!file) return;
+    try {
+        const rawText = await file.text();
+        const bundle = JSON.parse(rawText);
+        const resp = await fetch(`${API_BASE}/sessions/import`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                bundle,
+                project_id: currentProjectId || "default",
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        await loadSessions();
+        if (data.session?.id) {
+            await selectSession(data.session.id);
+        }
+    } catch (err) {
+        console.error("Erreur import conversation JSON :", err);
+    }
+});
+
+/* ============================================================================
+ * FEATURE #4 — Mode Duel / Comparaison de modèles & d'efforts
+ * ========================================================================= */
+const duelOpenBtn = document.getElementById("duelOpenBtn");
+const duelModal = document.getElementById("duelModal");
+const duelModalOverlay = document.getElementById("duelModalOverlay");
+const closeDuelModalBtn = document.getElementById("closeDuelModalBtn");
+const duelLeftModelSelect = document.getElementById("duelLeftModelSelect");
+const duelLeftEffortSelect = document.getElementById("duelLeftEffortSelect");
+const duelRightModelSelect = document.getElementById("duelRightModelSelect");
+const duelRightEffortSelect = document.getElementById("duelRightEffortSelect");
+const duelPromptInput = document.getElementById("duelPromptInput");
+const duelRunBtn = document.getElementById("duelRunBtn");
+const duelStatus = document.getElementById("duelStatus");
+const duelResultsGrid = document.getElementById("duelResultsGrid");
+
+function openDuelModal(initialPrompt = "") {
+    if (!duelModal) return;
+    duelModal.style.display = "flex";
+    duelModal.setAttribute("aria-hidden", "false");
+    if (duelPromptInput) {
+        const fallbackPrompt = initialPrompt
+            || chatInput?.value?.trim()
+            || [...(conversationHistory || [])].reverse().find(m => m.role === "user")?.content
+            || "";
+        if (fallbackPrompt) duelPromptInput.value = fallbackPrompt;
+        duelPromptInput.focus();
+    }
+}
+
+function closeDuelModal() {
+    if (!duelModal) return;
+    duelModal.style.display = "none";
+    duelModal.setAttribute("aria-hidden", "true");
+}
+
+duelOpenBtn?.addEventListener("click", () => openDuelModal());
+closeDuelModalBtn?.addEventListener("click", closeDuelModal);
+duelModalOverlay?.addEventListener("click", closeDuelModal);
+
+function renderDuelCard(variantData, promptText) {
+    const card = document.createElement("article");
+    card.className = "duel-result-card";
+    const header = document.createElement("header");
+    header.className = "duel-card-header";
+    header.innerHTML = `
+        <div>
+            <strong>${escapeHtml(variantData.label || variantData.model)}</strong>
+            <span class="duel-effort-pill">${escapeHtml(String(variantData.effort || "").toUpperCase())}</span>
+        </div>
+        <div class="duel-metrics-row">
+            <span>⚡ ${escapeHtml(String(variantData.tokens_per_second || 0))} tok/s</span>
+            <span>⏱ ${escapeHtml(String(variantData.duration_ms || 0))} ms</span>
+            <span>🔢 ${escapeHtml(String(variantData.output_tokens || 0))} tok</span>
+        </div>
+    `;
+    const body = document.createElement("div");
+    body.className = "duel-card-body markdown-body";
+    const htmlContent = typeof marked !== "undefined"
+        ? marked.parse(String(variantData.content || ""))
+        : escapeHtml(String(variantData.content || ""));
+    body.innerHTML = sanitizeHtml(htmlContent);
+
+    const footer = document.createElement("footer");
+    footer.className = "duel-card-footer";
+
+    const keepChatBtn = document.createElement("button");
+    keepChatBtn.type = "button";
+    keepChatBtn.className = "runner-output-btn primary";
+    keepChatBtn.textContent = "✓ Retenir dans le chat";
+    keepChatBtn.addEventListener("click", () => {
+        if (chatMessages?.querySelector(".chatgpt-welcome-hero")) {
+            chatMessages.querySelector(".chatgpt-welcome-hero")?.remove();
+        }
+        appendMessage("user", promptText);
+        appendMessage("assistant", variantData.content || "");
+        conversationHistory.push({ role: "user", content: promptText });
+        conversationHistory.push({ role: "assistant", content: variantData.content || "" });
+        closeDuelModal();
+    });
+
+    const openCanvasBtn = document.createElement("button");
+    openCanvasBtn.type = "button";
+    openCanvasBtn.className = "runner-output-btn";
+    openCanvasBtn.textContent = "Ouvrir dans Canvas";
+    openCanvasBtn.addEventListener("click", () => {
+        closeDuelModal();
+        openCanvasWithContent(
+            variantData.content || "",
+            `Duel · ${variantData.label || variantData.model}`
+        );
+    });
+
+    footer.append(keepChatBtn, openCanvasBtn);
+    card.append(header, body, footer);
+    return card;
+}
+
+duelRunBtn?.addEventListener("click", async () => {
+    const promptText = duelPromptInput?.value?.trim() || "";
+    if (!promptText) {
+        if (duelStatus) duelStatus.textContent = "Saisissez une question à comparer.";
+        duelPromptInput?.focus();
+        return;
+    }
+    duelRunBtn.disabled = true;
+    if (duelStatus) {
+        duelStatus.textContent = "Exécution séquentielle des deux profils en cours (respect du budget 16 Go VRAM)…";
+    }
+    duelResultsGrid?.replaceChildren();
+    try {
+        const resp = await fetch(`${API_BASE}/chat/compare`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                prompt: promptText,
+                session_id: currentSessionId,
+                left: {
+                    model: duelLeftModelSelect?.value || "gemma-4-e4b",
+                    effort: duelLeftEffortSelect?.value || "low",
+                    label: `${duelLeftModelSelect?.selectedOptions?.[0]?.text || "Concurrent A"} · ${duelLeftEffortSelect?.value || "low"}`,
+                },
+                right: {
+                    model: duelRightModelSelect?.value || "gemma-4-12b",
+                    effort: duelRightEffortSelect?.value || "high",
+                    label: `${duelRightModelSelect?.selectedOptions?.[0]?.text || "Concurrent B"} · ${duelRightEffortSelect?.value || "high"}`,
+                },
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        if (duelStatus) {
+            duelStatus.textContent = "Duel terminé · choisissez la réponse à retenir ou à ouvrir dans Canvas.";
+        }
+        if (duelResultsGrid) {
+            duelResultsGrid.append(
+                renderDuelCard(data.left, promptText),
+                renderDuelCard(data.right, promptText)
+            );
+        }
+    } catch (err) {
+        console.error("Erreur Mode Duel :", err);
+        if (duelStatus) {
+            duelStatus.textContent = err.message || "Impossible d’exécuter le comparatif.";
+        }
+    } finally {
+        duelRunBtn.disabled = false;
+    }
+});
+
+/* ============================================================================
+ * FEATURE #5 — Audio 100 % Local : Dictée vocale (STT) & Lecture (TTS)
+ * ========================================================================= */
+const voiceInputBtn = document.getElementById("voiceInputBtn");
+let activeSpeechBtn = null;
+let activeRecognition = null;
+let isVoiceRecording = false;
+
+function stripMarkdownForSpeech(rawText) {
+    return String(rawText || "")
+        .replace(/```[\s\S]*?```/g, " Bloc de code. ")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/[#*_~>|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function toggleSpeechForMessage(text, buttonEl) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        return;
+    }
+    const synth = window.speechSynthesis;
+    if (activeSpeechBtn === buttonEl && synth.speaking) {
+        synth.cancel();
+        buttonEl.classList.remove("speaking");
+        activeSpeechBtn = null;
+        return;
+    }
+    synth.cancel();
+    if (activeSpeechBtn) {
+        activeSpeechBtn.classList.remove("speaking");
+    }
+    const cleanSpeech = stripMarkdownForSpeech(text);
+    if (!cleanSpeech) return;
+    const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+    utterance.lang = "fr-FR";
+    utterance.rate = 1.02;
+    activeSpeechBtn = buttonEl;
+    buttonEl?.classList.add("speaking");
+    utterance.onend = () => {
+        buttonEl?.classList.remove("speaking");
+        if (activeSpeechBtn === buttonEl) activeSpeechBtn = null;
+    };
+    utterance.onerror = () => {
+        buttonEl?.classList.remove("speaking");
+        if (activeSpeechBtn === buttonEl) activeSpeechBtn = null;
+    };
+    synth.speak(utterance);
+}
+
+voiceInputBtn?.addEventListener("click", async () => {
+    if (isVoiceRecording) {
+        isVoiceRecording = false;
+        voiceInputBtn.classList.remove("recording");
+        voiceInputBtn.setAttribute("aria-pressed", "false");
+        try {
+            activeRecognition?.stop?.();
+        } catch (_) {}
+        return;
+    }
+
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognitionCtor) {
+        try {
+            const recognition = new SpeechRecognitionCtor();
+            recognition.lang = "fr-FR";
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+            activeRecognition = recognition;
+            isVoiceRecording = true;
+            voiceInputBtn.classList.add("recording");
+            voiceInputBtn.setAttribute("aria-pressed", "true");
+
+            recognition.onresult = (event) => {
+                const transcript = event.results?.[0]?.[0]?.transcript || "";
+                if (transcript && chatInput) {
+                    chatInput.value = chatInput.value
+                        ? `${chatInput.value.trim()} ${transcript.trim()}`
+                        : transcript.trim();
+                    if (typeof autoResizeTextarea === "function") autoResizeTextarea(chatInput);
+                    if (typeof refreshSendButtonState === "function") refreshSendButtonState();
+                }
+            };
+            recognition.onerror = () => {
+                isVoiceRecording = false;
+                voiceInputBtn.classList.remove("recording");
+                voiceInputBtn.setAttribute("aria-pressed", "false");
+            };
+            recognition.onend = () => {
+                isVoiceRecording = false;
+                voiceInputBtn.classList.remove("recording");
+                voiceInputBtn.setAttribute("aria-pressed", "false");
+            };
+            recognition.start();
+            return;
+        } catch (_) {
+            isVoiceRecording = false;
+            voiceInputBtn.classList.remove("recording");
+        }
+    }
+
+    // Repli API locale /api/media/transcribe
+    voiceInputBtn.classList.add("recording");
+    voiceInputBtn.setAttribute("aria-pressed", "true");
+    try {
+        const resp = await fetch(`${API_BASE}/media/transcribe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                language: "fr-FR",
+                text_hint: chatInput?.value?.trim() || "Dictée vocale prête.",
+            }),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.text && chatInput && !chatInput.value.trim()) {
+                chatInput.value = data.text;
+                if (typeof autoResizeTextarea === "function") autoResizeTextarea(chatInput);
+                if (typeof refreshSendButtonState === "function") refreshSendButtonState();
+            }
+        }
+    } catch (_) {
+    } finally {
+        setTimeout(() => {
+            voiceInputBtn.classList.remove("recording");
+            voiceInputBtn.setAttribute("aria-pressed", "false");
+        }, 450);
+    }
+});
+
+/* ============================================================================
+ * FEATURE #6 — Veilles & Missions planifiées d'Agent
+ * ========================================================================= */
+const missionsToggleBtn = document.getElementById("missionsToggleBtn");
+const missionsModal = document.getElementById("missionsModal");
+const missionsModalOverlay = document.getElementById("missionsModalOverlay");
+const closeMissionsModalBtn = document.getElementById("closeMissionsModalBtn");
+const missionTitleInput = document.getElementById("missionTitleInput");
+const missionPromptInput = document.getElementById("missionPromptInput");
+const missionScheduleSelect = document.getElementById("missionScheduleSelect");
+const missionCreateBtn = document.getElementById("missionCreateBtn");
+const missionsStatus = document.getElementById("missionsStatus");
+const missionsList = document.getElementById("missionsList");
+
+async function loadMissions() {
+    if (!missionsList) return;
+    try {
+        const query = currentProjectId
+            ? `?project_id=${encodeURIComponent(currentProjectId)}`
+            : "";
+        const resp = await fetch(`${API_BASE}/missions${query}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderMissionsList(data.missions || []);
+    } catch (err) {
+        console.error("Erreur chargement missions :", err);
+        if (missionsStatus) {
+            missionsStatus.textContent = "Impossible de charger les missions planifiées.";
+        }
+    }
+}
+
+function renderMissionsList(missions) {
+    if (!missionsList) return;
+    missionsList.replaceChildren();
+    if (!missions.length) {
+        const empty = document.createElement("div");
+        empty.className = "missions-empty";
+        empty.textContent = "Aucune mission planifiée dans ce projet. Utilisez un modèle rapide ci-dessus pour en créer une.";
+        missionsList.appendChild(empty);
+        return;
+    }
+
+    missions.forEach(mission => {
+        const card = document.createElement("article");
+        card.className = "mission-card";
+        const statusLabel = {
+            idle: "En attente",
+            running: "Exécution…",
+            success: "Rapport prêt",
+            error: "Erreur",
+        }[mission.last_status] || mission.last_status;
+
+        card.innerHTML = `
+            <div class="mission-card-main">
+                <div class="mission-card-title-row">
+                    <strong>⏰ ${escapeHtml(mission.title)}</strong>
+                    <span class="mission-badge">${escapeHtml(mission.schedule_label || "Quotidien")}</span>
+                    <span class="mission-status-pill status-${escapeHtml(mission.last_status || "idle")}">${escapeHtml(statusLabel)}</span>
+                </div>
+                <p class="mission-card-prompt">${escapeHtml(mission.prompt)}</p>
+            </div>
+            <div class="mission-card-actions">
+                <button type="button" class="runner-output-btn primary" data-mission-action="run">▶ Lancer maintenant</button>
+                ${mission.last_artifact_id ? `<button type="button" class="runner-output-btn" data-mission-action="open-artifact">Ouvrir le rapport Canvas</button>` : ""}
+                <button type="button" class="runner-output-btn" data-mission-action="delete">Supprimer</button>
+            </div>
+        `;
+
+        const runBtn = card.querySelector('[data-mission-action="run"]');
+        runBtn?.addEventListener("click", async () => {
+            runBtn.disabled = true;
+            if (missionsStatus) {
+                missionsStatus.textContent = `Exécution de la mission « ${mission.title} » en cours…`;
+            }
+            try {
+                const resp = await fetch(
+                    `${API_BASE}/missions/${encodeURIComponent(mission.id)}/run`,
+                    { method: "POST" }
+                );
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+                await loadMissions();
+                await loadSessions();
+                await loadCanvasArtifacts();
+                if (missionsStatus) {
+                    missionsStatus.textContent = `Mission « ${mission.title} » terminée · rapport déposé dans le Canvas.`;
+                }
+                if (data.artifact?.id) {
+                    closeMissionsModal();
+                    await openCanvasArtifact(data.artifact.id);
+                }
+            } catch (err) {
+                console.error("Erreur exécution mission :", err);
+                if (missionsStatus) {
+                    missionsStatus.textContent = err.message || "Erreur lors de l’exécution de la mission.";
+                }
+                runBtn.disabled = false;
+            }
+        });
+
+        const openArtBtn = card.querySelector('[data-mission-action="open-artifact"]');
+        openArtBtn?.addEventListener("click", async () => {
+            if (!mission.last_artifact_id) return;
+            closeMissionsModal();
+            await openCanvasArtifact(mission.last_artifact_id);
+        });
+
+        const delBtn = card.querySelector('[data-mission-action="delete"]');
+        delBtn?.addEventListener("click", async () => {
+            try {
+                await fetch(`${API_BASE}/missions/${encodeURIComponent(mission.id)}`, {
+                    method: "DELETE",
+                });
+                await loadMissions();
+            } catch (err) {
+                console.error("Erreur suppression mission :", err);
+            }
+        });
+
+        missionsList.appendChild(card);
+    });
+}
+
+function openMissionsModal() {
+    if (!missionsModal) return;
+    missionsModal.style.display = "flex";
+    missionsModal.setAttribute("aria-hidden", "false");
+    if (missionsStatus) {
+        missionsStatus.textContent = "Planifiez une mission ou lancez-la immédiatement pour générer un dossier Canvas.";
+    }
+    void loadMissions();
+}
+
+function closeMissionsModal() {
+    if (!missionsModal) return;
+    missionsModal.style.display = "none";
+    missionsModal.setAttribute("aria-hidden", "true");
+}
+
+missionsToggleBtn?.addEventListener("click", openMissionsModal);
+closeMissionsModalBtn?.addEventListener("click", closeMissionsModal);
+missionsModalOverlay?.addEventListener("click", closeMissionsModal);
+
+document.querySelectorAll(".mission-preset-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+        if (missionTitleInput) {
+            missionTitleInput.value = chip.getAttribute("data-preset-title") || "";
+        }
+        if (missionPromptInput) {
+            missionPromptInput.value = chip.getAttribute("data-preset-prompt") || "";
+            missionPromptInput.focus();
+        }
+    });
+});
+
+missionCreateBtn?.addEventListener("click", async () => {
+    const title = missionTitleInput?.value?.trim() || "";
+    const prompt = missionPromptInput?.value?.trim() || "";
+    if (!title || !prompt) {
+        if (missionsStatus) {
+            missionsStatus.textContent = "Renseignez un titre et une consigne pour planifier la mission.";
+        }
+        return;
+    }
+    const rawSched = missionScheduleSelect?.value || "1440|Quotidien · 08:00";
+    const [intervalStr, scheduleLabel] = rawSched.split("|");
+    missionCreateBtn.disabled = true;
+    try {
+        const resp = await fetch(`${API_BASE}/missions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title,
+                prompt,
+                project_id: currentProjectId || "default",
+                model: inputModelSelect?.value || "gemma-4-12b",
+                interval_minutes: Number(intervalStr) || 1440,
+                schedule_label: scheduleLabel || "Quotidien · 08:00",
+                enabled: true,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        if (missionTitleInput) missionTitleInput.value = "";
+        if (missionPromptInput) missionPromptInput.value = "";
+        if (missionsStatus) {
+            missionsStatus.textContent = `Mission « ${data.mission?.title || title} » planifiée avec succès.`;
+        }
+        await loadMissions();
+    } catch (err) {
+        console.error("Erreur création mission :", err);
+        if (missionsStatus) {
+            missionsStatus.textContent = err.message || "Impossible de créer la mission.";
+        }
+    } finally {
+        missionCreateBtn.disabled = false;
+    }
+});
+
+if (window.LasmeWorkspace) {
+    Object.assign(window.LasmeWorkspace, {
+        openSearchModal,
+        openExportSessionModal,
+        openDuelModal,
+        openMissionsModal,
+        toggleSpeechForMessage,
+    });
 }

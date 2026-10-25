@@ -112,6 +112,51 @@ class SessionUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=120)
     project_id: Optional[str] = Field(default=None, max_length=100)
     model: Optional[str] = Field(default=None, max_length=100)
+    pinned: Optional[bool] = None
+
+
+class SessionImportRequest(BaseModel):
+    bundle: Dict[str, Any]
+    project_id: Optional[str] = Field(default=None, max_length=100)
+
+
+class ChatCompareVariant(BaseModel):
+    model: str = Field(default=settings.chat_model, max_length=100)
+    effort: Literal["low", "medium", "high"] = "high"
+    label: Optional[str] = Field(default=None, max_length=80)
+
+
+class ChatCompareRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20_000)
+    session_id: Optional[str] = Field(default=None, max_length=100)
+    left: ChatCompareVariant = Field(default_factory=lambda: ChatCompareVariant(model=settings.fast_model, effort="low"))
+    right: ChatCompareVariant = Field(default_factory=lambda: ChatCompareVariant(model=settings.chat_model, effort="high"))
+
+
+class AudioTranscribeRequest(BaseModel):
+    audio_base64: Optional[str] = Field(default=None, max_length=15_000_000)
+    text_hint: Optional[str] = Field(default=None, max_length=10_000)
+    language: str = Field(default="fr-FR", max_length=20)
+
+
+class MissionCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=140)
+    prompt: str = Field(min_length=1, max_length=20_000)
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, max_length=100)
+    model: str = Field(default=settings.chat_model, max_length=100)
+    schedule_label: str = Field(default="Quotidien · 08:00", max_length=80)
+    interval_minutes: int = Field(default=1440, ge=5, le=10080)
+    enabled: bool = True
+
+
+class MissionUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=140)
+    prompt: Optional[str] = Field(default=None, min_length=1, max_length=20_000)
+    project_id: Optional[str] = Field(default=None, max_length=100)
+    model: Optional[str] = Field(default=None, max_length=100)
+    schedule_label: Optional[str] = Field(default=None, max_length=80)
+    interval_minutes: Optional[int] = Field(default=None, ge=5, le=10080)
+    enabled: Optional[bool] = None
 
 
 class MessageUpdateRequest(BaseModel):

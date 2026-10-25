@@ -219,6 +219,19 @@ class ToolRegistry:
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
 
+        if isinstance(raw, ToolResult):
+            output, truncated = _truncate(raw.output, tool.max_output_chars)
+            meta = dict(raw.meta or {})
+            meta["truncated"] = truncated
+            return ToolResult(
+                ok=raw.ok,
+                output=output,
+                error=raw.error,
+                error_code=raw.error_code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                meta=meta,
+            )
+
         output = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
         output, truncated = _truncate(output, tool.max_output_chars)
         return ToolResult(

@@ -29,6 +29,50 @@ class SessionRepo:
     def add_message(self, session_id: str, role: str, content: str, **kwargs):
         return self._db.add_message(session_id, role, content, **kwargs)
 
+    def search(
+        self,
+        query: str,
+        project_id: Optional[str] = None,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        return self._db.search_workspace(
+            query,
+            project_id=project_id,
+            limit=limit,
+        )
+
+    def import_bundle(
+        self,
+        bundle: Dict[str, Any],
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self._db.import_session_bundle(bundle, project_id=project_id)
+
+
+class MissionRepo:
+    """Veilles et missions planifiées d'agent."""
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+
+    def list(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self._db.list_missions(project_id=project_id)
+
+    def get(self, mission_id: str) -> Optional[Dict[str, Any]]:
+        return self._db.get_mission(mission_id)
+
+    def create(self, **kwargs: Any) -> Dict[str, Any]:
+        return self._db.create_mission(**kwargs)
+
+    def update(self, mission_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        return self._db.update_mission(mission_id, **kwargs)
+
+    def delete(self, mission_id: str) -> bool:
+        return self._db.delete_mission(mission_id)
+
+    def claim_due(self) -> List[Dict[str, Any]]:
+        return self._db.claim_due_missions()
+
 
 class ProjectRepo:
     """Espaces de travail."""
@@ -73,6 +117,7 @@ def build_repos(db: Any) -> Dict[str, Any]:
     """Fabrique toutes les façades à partir d'une base partagée."""
     return {
         "sessions": SessionRepo(db),
+        "missions": MissionRepo(db),
         "projects": ProjectRepo(db),
         "memory": MemoryRepo(db),
         "agent_runs": AgentRunRepo(db),

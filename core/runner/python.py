@@ -254,6 +254,64 @@ class PythonRunner:
                 del tail[:-limit]
         return bytes(tail)
 
+    @staticmethod
+    def _harvest_workdir_outputs(job_dir: Path, output_dir: Path) -> None:
+        """Move files saved in the job working directory into output_dir.
+
+        Models frequently write ``plt.savefig('chart.png')`` or
+        ``df.to_csv('data.csv')`` to the current working directory instead of
+        ``$LASME_OUTPUT_DIR``. Moving top-level output files (excluding the
+        runner inputs ``main.py`` and ``input.json``) into ``output_dir``
+        ensures they go through the same size/count/name validation and
+        become downloadable via ``/api/runner/jobs/{job_id}/files/{name}``.
+        """
+        if not job_dir.is_dir() or not output_dir.is_dir():
+            return
+        reserved = {"main.py", "input.json"}
+        for entry in sorted(job_dir.iterdir()):
+            if (
+                not entry.is_file()
+                or entry.name in reserved
+                or not SAFE_OUTPUT_NAME.fullmatch(entry.name)
+            ):
+                continue
+            target = output_dir / entry.name
+            if target.exists():
+                continue
+            try:
+                shutil.move(str(entry), str(target))
+            except OSError:
+                pass
+
+    def _persist_pooled_outputs(
+        self,
+        output_dir: Path,
+        job_id: str,
+        files: List[Dict[str, Any]],
+    ) -> None:
+        """Persist collected pool outputs outside the shared container mount.
+
+        ``pool_workspace/{job_id}`` is wiped after every job so nothing leaks
+        between pooled runs. Moving retained outputs into ``root/{job_id}/output``
+        keeps ``pool_workspace`` clean while allowing ``output_path(job_id, name)``
+        to serve the generated charts and files over HTTP.
+        """
+        if not files or not output_dir.is_dir():
+            return
+        host_output_dir = self._job_directory(job_id) / "output"
+        host_output_dir.mkdir(parents=True, exist_ok=True)
+        for item in files:
+            name = str(item.get("name") or "")
+            if not name or not SAFE_OUTPUT_NAME.fullmatch(name):
+                continue
+            source = output_dir / name
+            if not source.is_file():
+                continue
+            try:
+                shutil.move(str(source), str(host_output_dir / name))
+            except OSError:
+                pass
+
     def _collect_output_files(
         self,
         output_dir: Path,
@@ -790,7 +848,9 @@ class PythonRunner:
                         "Execution stopped after "
                         f"{timeout_seconds} seconds.\n{stderr}"
                     ).strip()
+                self._harvest_workdir_outputs(job_dir, output_dir)
                 files = self._collect_output_files(output_dir, job_id)
+                self._persist_pooled_outputs(output_dir, job_id, files)
             finally:
                 self._force_remove_tree(job_dir)
                 self._mark_pool_state(

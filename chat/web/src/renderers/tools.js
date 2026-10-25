@@ -184,6 +184,166 @@ function appendToolChart(card, raw) {
     card.appendChild(image);
 }
 
+function isRunnerImageFile(nameOrUrl) {
+    return /\.(?:png|jpe?g|webp|svg|gif)(?:[?#].*)?$/i.test(String(nameOrUrl || ""));
+}
+
+function isRunnerCanvasOpenableFile(nameOrUrl) {
+    return /\.(?:csv|tsv|json|md|markdown|txt|html?|svg|py)(?:[?#].*)?$/i.test(
+        String(nameOrUrl || "")
+    );
+}
+
+function formatRunnerFileSize(bytes) {
+    const num = Number(bytes) || 0;
+    if (num <= 0) return "";
+    if (num < 1024) return `${num} o`;
+    if (num < 1024 * 1024) {
+        return `${(num / 1024).toFixed(1).replace(".", ",")} Ko`;
+    }
+    return `${(num / (1024 * 1024)).toFixed(1).replace(".", ",")} Mo`;
+}
+
+function extractCallPythonCode(call) {
+    if (!call) return "";
+    const rawArgs = call.arguments;
+    if (!rawArgs) return "";
+    if (typeof rawArgs === "object" && typeof rawArgs.code === "string") {
+        return rawArgs.code;
+    }
+    if (typeof rawArgs === "string") {
+        try {
+            const parsed = JSON.parse(rawArgs);
+            if (parsed && typeof parsed.code === "string") {
+                return parsed.code;
+            }
+        } catch {
+            // Fallback when arguments were stringified as Python dict or truncated
+        }
+    }
+    return "";
+}
+
+function extractRunnerFiles(result, call = null) {
+    if (!result || !result.ok) return [];
+    const pythonCode = extractCallPythonCode(call);
+    const out = [];
+    const seen = new Set();
+
+    if (Array.isArray(result.files)) {
+        for (const item of result.files) {
+            if (!item || typeof item !== "object") continue;
+            const rawUrl = String(item.url || "").trim();
+            const safeUrl = rawUrl ? safeHttpUrl(rawUrl) : "";
+            const name = String(
+                item.name || (safeUrl ? safeUrl.split("/").pop() : "") || ""
+            ).trim();
+            if (!name && !safeUrl) continue;
+            const key = safeUrl || name;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({
+                name: name || "fichier",
+                url: safeUrl,
+                size_bytes: Number(item.size_bytes) || 0,
+                pythonCode,
+            });
+        }
+    }
+
+    const outputText = String(result.output || "");
+    const urlMatches = outputText.match(/\/api\/runner\/jobs\/[^\s()<>,"'`]+/g);
+    if (urlMatches) {
+        for (const rawUrl of urlMatches) {
+            const cleaned = rawUrl.replace(/[)\].,;:!?»«"'`]+$/g, "");
+            const safeUrl = safeHttpUrl(cleaned);
+            if (!safeUrl || seen.has(safeUrl)) continue;
+            seen.add(safeUrl);
+            const name = decodeURIComponent(safeUrl.split("/").pop() || "fichier");
+            out.push({
+                name,
+                url: safeUrl,
+                size_bytes: 0,
+                pythonCode,
+            });
+        }
+    }
+    return out;
+}
+
+function appendRunnerToolOutputs(card, summary, call, result) {
+    const files = extractRunnerFiles(result, call);
+    if (!files.length) return;
+
+    const imageCount = files.filter((f) => isRunnerImageFile(f.name || f.url)).length;
+    const badge = document.createElement("span");
+    badge.className = "tool-file-badge";
+    badge.textContent = imageCount === files.length
+        ? `${imageCount} graphique${imageCount > 1 ? "s" : ""}`
+        : `${files.length} fichier${files.length > 1 ? "s" : ""}`;
+    summary.appendChild(badge);
+
+    const filesBar = document.createElement("div");
+    filesBar.className = "agent-tool-files";
+
+    for (const file of files) {
+        if (file.url && isRunnerImageFile(file.name || file.url)) {
+            const image = document.createElement("img");
+            image.className = "agent-tool-chart runner-tool-chart";
+            image.alt = file.name || "Graphique Python";
+            image.title = "Cliquer pour agrandir";
+            image.addEventListener("error", () => image.remove());
+            image.addEventListener("click", () => {
+                if (typeof openImageViewer === "function") {
+                    openImageViewer(file.url);
+                }
+            });
+            image.src = file.url;
+            card.appendChild(image);
+        }
+
+        const item = document.createElement("div");
+        item.className = "agent-tool-file-chip";
+
+        const label = document.createElement("span");
+        label.className = "agent-tool-file-name";
+        const sizeLabel = formatRunnerFileSize(file.size_bytes);
+        label.textContent = sizeLabel ? `${file.name} (${sizeLabel})` : file.name;
+        item.appendChild(label);
+
+        if (
+            typeof openRunnerFileInCanvas === "function"
+            && (isRunnerCanvasOpenableFile(file.name || file.url) || file.pythonCode)
+        ) {
+            const canvasBtn = document.createElement("button");
+            canvasBtn.type = "button";
+            canvasBtn.className = "agent-tool-file-action";
+            canvasBtn.textContent = "Canvas";
+            canvasBtn.title = "Ouvrir dans Canvas";
+            canvasBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                void openRunnerFileInCanvas(file, file.pythonCode);
+            });
+            item.appendChild(canvasBtn);
+        }
+
+        if (file.url) {
+            const downloadLink = document.createElement("a");
+            downloadLink.href = file.url;
+            downloadLink.download = file.name || "";
+            downloadLink.className = "agent-tool-file-action";
+            downloadLink.textContent = "Télécharger";
+            downloadLink.title = `Télécharger ${file.name}`;
+            downloadLink.addEventListener("click", (e) => e.stopPropagation());
+            item.appendChild(downloadLink);
+        }
+
+        filesBar.appendChild(item);
+    }
+
+    card.appendChild(filesBar);
+}
+
 function fillAgentToolCard(card, call, result) {
     card.textContent = "";
     if (call?.id !== undefined && call?.id !== null) {
@@ -268,6 +428,7 @@ function fillAgentToolCard(card, call, result) {
                 card.appendChild(output);
             }
             appendToolChart(card, result.output);
+            appendRunnerToolOutputs(card, summary, call, result);
         } else {
             const output = document.createElement("pre");
             output.className = "agent-tool-output";
@@ -277,6 +438,188 @@ function fillAgentToolCard(card, call, result) {
         }
     }
     return card;
+}
+
+function extractRunnerFilesFromEvents(events) {
+    if (!Array.isArray(events) || !events.length) return [];
+    const calls = new Map();
+    const out = [];
+    const seen = new Set();
+    for (const event of events) {
+        if (!event || typeof event !== "object") continue;
+        if (event.type === "agent_tool_call" || event.type === "tool_call") {
+            calls.set(event.id ?? calls.size, event);
+        } else if (
+            event.type === "agent_tool_result"
+            || event.type === "tool_result"
+        ) {
+            const call = calls.get(event.id) || null;
+            for (const file of extractRunnerFiles(event, call)) {
+                const key = file.url || file.name;
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                out.push(file);
+            }
+        }
+    }
+    return out;
+}
+
+function renderRunnerOutputs(container, runnerFiles) {
+    if (!container) return;
+    container.querySelector(":scope > .runner-outputs-gallery")?.remove();
+    if (!Array.isArray(runnerFiles) || !runnerFiles.length) return;
+
+    const inlineUrls = new Set();
+    const answerEl = container.querySelector(":scope > .answer-content");
+    if (answerEl) {
+        answerEl.querySelectorAll("img[src]").forEach((img) => {
+            const src = img.getAttribute("src") || "";
+            if (src) inlineUrls.add(src);
+        });
+    }
+
+    const gallery = document.createElement("div");
+    gallery.className = "runner-outputs-gallery";
+    let renderedCount = 0;
+
+    for (const rawFile of runnerFiles) {
+        if (!rawFile || typeof rawFile !== "object") continue;
+        const safeUrl = rawFile.url ? safeHttpUrl(rawFile.url) : "";
+        const name = String(
+            rawFile.name || (safeUrl ? safeUrl.split("/").pop() : "") || "fichier"
+        ).trim();
+        if (!safeUrl) continue;
+
+        const file = {
+            name,
+            url: safeUrl,
+            size_bytes: Number(rawFile.size_bytes) || 0,
+            pythonCode: String(rawFile.pythonCode || ""),
+        };
+
+        if (isRunnerImageFile(file.name || file.url)) {
+            if (inlineUrls.has(file.url)) continue;
+            const cardDiv = document.createElement("div");
+            cardDiv.className = "generated-image-card runner-chart-card";
+
+            const imgEl = document.createElement("img");
+            imgEl.src = file.url;
+            imgEl.alt = file.name;
+            imgEl.addEventListener("error", () => cardDiv.remove());
+            imgEl.addEventListener("click", () => {
+                if (typeof openImageViewer === "function") {
+                    openImageViewer(file.url);
+                }
+            });
+
+            const overlay = document.createElement("div");
+            overlay.className = "generated-image-overlay";
+
+            const titleSpan = document.createElement("span");
+            titleSpan.className = "runner-chart-title";
+            titleSpan.textContent = file.name;
+
+            const actions = document.createElement("div");
+            actions.className = "image-card-actions";
+
+            const zoomBtn = document.createElement("button");
+            zoomBtn.type = "button";
+            zoomBtn.className = "img-action-btn image-zoom-btn";
+            zoomBtn.textContent = "🔍 Zoom";
+            zoomBtn.addEventListener("click", () => {
+                if (typeof openImageViewer === "function") {
+                    openImageViewer(file.url);
+                }
+            });
+            actions.appendChild(zoomBtn);
+
+            if (typeof openRunnerFileInCanvas === "function") {
+                const canvasBtn = document.createElement("button");
+                canvasBtn.type = "button";
+                canvasBtn.className = "img-action-btn";
+                canvasBtn.textContent = "🎨 Canvas";
+                canvasBtn.addEventListener("click", () => {
+                    void openRunnerFileInCanvas(file, file.pythonCode);
+                });
+                actions.appendChild(canvasBtn);
+            }
+
+            const downloadLink = document.createElement("a");
+            downloadLink.href = file.url;
+            downloadLink.download = file.name;
+            downloadLink.className = "img-action-btn";
+            downloadLink.textContent = "📥 Télécharger";
+            actions.appendChild(downloadLink);
+
+            overlay.append(titleSpan, actions);
+            cardDiv.append(imgEl, overlay);
+            gallery.appendChild(cardDiv);
+            renderedCount++;
+        } else {
+            const fileCard = document.createElement("div");
+            fileCard.className = "runner-output-file-card";
+
+            const meta = document.createElement("div");
+            meta.className = "runner-output-file-meta";
+
+            const badge = document.createElement("span");
+            badge.className = "runner-output-file-ext";
+            const extMatch = /\.([a-z0-9]+)$/i.exec(file.name);
+            badge.textContent = extMatch ? extMatch[1].toUpperCase() : "FILE";
+
+            const titleWrap = document.createElement("div");
+            titleWrap.className = "runner-output-file-info";
+            const nameEl = document.createElement("span");
+            nameEl.className = "runner-output-file-name";
+            nameEl.textContent = file.name;
+            const subEl = document.createElement("span");
+            subEl.className = "runner-output-file-size";
+            const sizeLabel = formatRunnerFileSize(file.size_bytes);
+            subEl.textContent = sizeLabel
+                ? `${sizeLabel} · Sandbox Python`
+                : "Sandbox Python";
+            titleWrap.append(nameEl, subEl);
+            meta.append(badge, titleWrap);
+
+            const actions = document.createElement("div");
+            actions.className = "runner-output-file-actions";
+
+            if (
+                typeof openRunnerFileInCanvas === "function"
+                && (isRunnerCanvasOpenableFile(file.name || file.url) || file.pythonCode)
+            ) {
+                const canvasBtn = document.createElement("button");
+                canvasBtn.type = "button";
+                canvasBtn.className = "runner-file-btn primary";
+                canvasBtn.textContent = "Ouvrir dans Canvas";
+                canvasBtn.addEventListener("click", () => {
+                    void openRunnerFileInCanvas(file, file.pythonCode);
+                });
+                actions.appendChild(canvasBtn);
+            }
+
+            const downloadLink = document.createElement("a");
+            downloadLink.href = file.url;
+            downloadLink.download = file.name;
+            downloadLink.className = "runner-file-btn";
+            downloadLink.textContent = "Télécharger";
+            actions.appendChild(downloadLink);
+
+            fileCard.append(meta, actions);
+            gallery.appendChild(fileCard);
+            renderedCount++;
+        }
+    }
+
+    if (!renderedCount) return;
+
+    const perfNode = container.querySelector(":scope > .generation-performance");
+    if (perfNode) {
+        container.insertBefore(gallery, perfNode);
+    } else {
+        container.appendChild(gallery);
+    }
 }
 
 function ensureAgentToolsGroup(container) {
@@ -321,7 +664,22 @@ function upsertLiveAgentToolCard(container, event) {
         group.appendChild(card);
     }
     const call = card._lasmeCall || { name: event.name };
+    card._lasmeResult = event;
     fillAgentToolCard(card, call, event);
+    const liveFiles = [];
+    const seenUrls = new Set();
+    group.querySelectorAll(".agent-tool-card").forEach((c) => {
+        for (const f of extractRunnerFiles(c._lasmeResult, c._lasmeCall)) {
+            const key = f.url || f.name;
+            if (key && !seenUrls.has(key)) {
+                seenUrls.add(key);
+                liveFiles.push(f);
+            }
+        }
+    });
+    if (liveFiles.length) {
+        renderRunnerOutputs(container, liveFiles);
+    }
     // Completion feedback: soft pop on success, light shake on failure.
     // Only on the live update path, never on the canonical rebuild.
     card.classList.add(event.ok ? "anim-pop" : "anim-shake");
@@ -358,5 +716,6 @@ function renderAgentToolsSummary(container, events) {
     }
     container.querySelector(".assistant-activity[data-kind=\"tools\"]")?.remove();
     container.prepend(group);
+    renderRunnerOutputs(container, extractRunnerFilesFromEvents(events));
 }
 

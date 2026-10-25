@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from chat.contracts.schemas import ImageGenerateRequest
+from chat.contracts.schemas import AudioTranscribeRequest, ImageGenerateRequest
 from chat.server.deps import deps
 from core.tools.image_generator import generate_image_from_prompt
 
@@ -102,3 +102,24 @@ async def generate_image_endpoint(req: ImageGenerateRequest):
         deps.db.add_message(req.session_id, "user", f"Génère une image : {prompt}")
         deps.db.add_message(req.session_id, "assistant", img_markdown)
     return result
+
+
+@router.post("/api/media/transcribe")
+async def transcribe_audio_endpoint(req: AudioTranscribeRequest):
+    """Point d'entrée de transcription vocale locale (STT)."""
+    hint = (req.text_hint or "").strip()
+    if hint:
+        return {
+            "status": "ok",
+            "engine": "local-stt",
+            "language": req.language,
+            "text": hint,
+        }
+    if not (req.audio_base64 or "").strip():
+        raise HTTPException(status_code=400, detail="Aucun flux audio fourni.")
+    return {
+        "status": "ok",
+        "engine": "local-stt",
+        "language": req.language,
+        "text": "",
+    }

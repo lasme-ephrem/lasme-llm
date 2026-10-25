@@ -18,7 +18,6 @@ from fastapi import (
 
 from chat.server.deps import deps
 from chat.server.modules.documents.indexing import (
-    _index_project_file_in_background,
     _index_stored_project_file,
 )
 from core.files import canonical_mime_type
